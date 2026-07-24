@@ -18,7 +18,10 @@ class HealthInputs:
     hook_parity_ok: bool = True
     spool_depth: int = 0
     oldest_spool_age_seconds: int = 0
+    unacknowledged_spool_count: int | None = None
+    oldest_unacknowledged_spool_age_seconds: int | None = None
     spool_stale_after_seconds: int = 3600
+    spool_retention_days: int = 30
     quarantine_count: int = 0
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
@@ -48,6 +51,7 @@ class HealthInputs:
     optional_backend_state: Literal["disabled", "available", "unavailable"] = "disabled"
     network_state: Literal["offline", "idle", "transferred"] = "offline"
     last_transfer_age_seconds: int = -1
+    database_state: Literal["healthy", "busy", "failed"] = "healthy"
 
 
 @dataclass(frozen=True)
@@ -67,13 +71,26 @@ class HealthReport:
 
 def evaluate_health(values: HealthInputs) -> HealthReport:
     reasons: list[str] = []
+    unacknowledged_spool_count = (
+        values.spool_depth
+        if values.unacknowledged_spool_count is None
+        else values.unacknowledged_spool_count
+    )
+    oldest_unacknowledged_spool_age = (
+        values.oldest_spool_age_seconds
+        if values.oldest_unacknowledged_spool_age_seconds is None
+        else values.oldest_unacknowledged_spool_age_seconds
+    )
     if values.compiler_count == 0:
         reasons.append("compiler_missing")
     elif values.compiler_count > 1:
         reasons.append("compiler_duplicate")
-    if not values.database_ok:
+    if not values.database_ok and values.database_state != "busy":
         reasons.append("database_integrity_failed")
-    if not values.migrations_ok or values.migration_pending:
+    if (
+        (not values.migrations_ok and values.database_state != "busy")
+        or values.migration_pending
+    ):
         reasons.append("migration_invalid")
     if not values.config_ok:
         reasons.append("config_invalid")
@@ -81,7 +98,10 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("required_backend_unavailable")
     if not values.hook_parity_ok:
         reasons.append("hook_parity_failed")
-    if values.spool_depth > 0 and values.oldest_spool_age_seconds > values.spool_stale_after_seconds:
+    if (
+        unacknowledged_spool_count > 0
+        and oldest_unacknowledged_spool_age > values.spool_stale_after_seconds
+    ):
         reasons.append("spool_stale")
     if values.quarantine_count > 0:
         reasons.append("quarantine_present")
@@ -115,6 +135,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
     metrics: dict[str, int | bool | str] = {
         "compiler_count": values.compiler_count,
         "database_ok": values.database_ok,
+        "database_state": values.database_state,
         "database_evidence": "sqlite_pragma_integrity_check",
         "abandoned_temp_count": max(0, values.abandoned_temp_count),
         "backup_verified": values.backup_verified,
@@ -136,6 +157,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "last_transfer_age_seconds": values.last_transfer_age_seconds,
         "network_state": values.network_state,
         "oldest_spool_age_seconds": max(0, values.oldest_spool_age_seconds),
+        "oldest_unacknowledged_spool_age_seconds": max(0, oldest_unacknowledged_spool_age),
         "omitted_bytes": max(0, values.omitted_bytes),
         "retrieval_omitted_count": max(0, values.retrieval_omitted_count),
         "quarantine_count": max(0, values.quarantine_count),
@@ -147,7 +169,9 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "retrieval_budget_bytes": values.retrieval_budget_bytes,
         "selected_bytes": max(0, values.selected_bytes),
         "spool_depth": max(0, values.spool_depth),
-        "spool_evidence": "regular_spool_files_and_mtime",
+        "spool_unacknowledged_count": max(0, unacknowledged_spool_count),
+        "spool_retention_days": max(1, values.spool_retention_days),
+        "spool_evidence": "regular_spool_files_mtime_and_durable_commit_evidence",
         "stale_lock_count": max(0, values.stale_lock_count),
     }
     return HealthReport(

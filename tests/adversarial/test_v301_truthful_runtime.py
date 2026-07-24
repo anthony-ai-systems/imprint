@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from imprint.backup import create_backup
+from imprint.compiler import compile_spools, write_envelope
 from imprint.health import health_report
 from imprint.permissions import secure_tree
 from imprint.retrieve import commit_payload_delivery, retrieve_payload
@@ -48,11 +49,38 @@ def test_health_uses_real_ages_backup_verification_and_permission_evidence(
     assert report["status"] == "degraded"
     assert "spool_stale" in report["degraded_reasons"]
     assert report["metrics"]["oldest_spool_age_seconds"] >= 7190
+    assert report["metrics"]["spool_unacknowledged_count"] == 1
     assert report["metrics"]["verified_backup_count"] == 1
     assert report["metrics"]["backup_restoreable"] is True
     assert report["metrics"]["permissions_ok"] is True
     assert report["metrics"]["database_evidence"] == "sqlite_pragma_integrity_check"
     assert "sha256" in report["metrics"]["backup_evidence"]
+
+
+def test_acknowledged_old_spool_within_retention_is_healthy(
+    tmp_path, capture_envelope,
+):
+    root = tmp_path / "operator"
+    store = ImprintStore(root / "imprint.db")
+    spool = write_envelope(root, capture_envelope)
+    assert compile_spools(root, store, compiler_authorized=True)["captured"] == 1
+    (root / "projections").mkdir()
+    (root / "projections" / "imprint.jsonld").write_text("{}\n", encoding="utf-8")
+    create_backup(store, root)
+    old = spool.stat().st_mtime - 7200
+    os.utime(spool, (old, old))
+    secure_tree(root)
+
+    report = health_report(root, store, {
+        **_config(root),
+        "spool_retention_days": 30,
+    })
+
+    assert report["status"] == "healthy"
+    assert "spool_stale" not in report["degraded_reasons"]
+    assert report["metrics"]["oldest_spool_age_seconds"] >= 7190
+    assert report["metrics"]["spool_unacknowledged_count"] == 0
+    assert report["metrics"]["spool_retention_days"] == 30
 
 
 def test_quarantine_temp_fake_backup_and_open_permissions_cannot_report_healthy(

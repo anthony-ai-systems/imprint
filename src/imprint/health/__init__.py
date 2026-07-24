@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from imprint.constants import STORE_SCHEMA_VERSION
+from imprint.errors import ValidationError
 from .report import HealthInputs, HealthReport, evaluate_health
 
 
@@ -15,6 +16,10 @@ _TEMP_PREFIXES = (
     ".ack-", ".backup-", ".imprint-", ".owner-", ".proposal-",
     ".quarantine-", ".receipt-", ".restore-",
 )
+_SIDECAR_PREFLIGHT_ERROR = (
+    "store has WAL/SHM sidecars; close the active writer or recover the store before use"
+)
+_DATABASE_RETRY_DELAYS = (0.25, 0.5)
 
 
 def _age_seconds(path: Path, now: float) -> int:
@@ -67,20 +72,87 @@ def _hooks_ok(hook_root: Path, required: set[str]) -> bool:
     return True
 
 
+def _database_health(store) -> tuple[bool, bool, str, set[tuple[str, str]]]:
+    """Probe one compatible handle, treating live-writer sidecars as indeterminate."""
+    if not store.path.exists():
+        return False, False, "failed", set()
+    for attempt in range(len(_DATABASE_RETRY_DELAYS) + 1):
+        try:
+            with store.connect() as conn:
+                integrity = str(conn.execute("PRAGMA integrity_check").fetchone()[0])
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key='store_schema_version'"
+                ).fetchone()
+                consumed = {
+                    (str(item[0]), str(item[1]))
+                    for item in conn.execute(
+                        "SELECT input_event_id, source_path FROM consumed_inputs"
+                    ).fetchall()
+                }
+            database_ok = integrity == "ok"
+            migrations_ok = bool(row and row[0] == STORE_SCHEMA_VERSION)
+            return (
+                database_ok,
+                migrations_ok,
+                "healthy" if database_ok else "failed",
+                consumed,
+            )
+        except ValidationError as exc:
+            if str(exc) != _SIDECAR_PREFLIGHT_ERROR:
+                return False, False, "failed", set()
+            if attempt < len(_DATABASE_RETRY_DELAYS):
+                time.sleep(_DATABASE_RETRY_DELAYS[attempt])
+                continue
+            return False, False, "busy", set()
+        except Exception:
+            return False, False, "failed", set()
+    raise AssertionError("database retry loop exhausted")
+
+
+def _spool_is_committed(
+    root: Path, path: Path, consumed_inputs: set[tuple[str, str]],
+) -> bool:
+    """Use exact acknowledgement first, then canonical consumed-input evidence."""
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(envelope, dict):
+            return False
+        from imprint.compiler import acknowledgement_committed
+        if acknowledgement_committed(root, path, envelope):
+            return True
+        event_id = envelope.get("input_event_id")
+        source_path = path.relative_to(root).as_posix()
+        return isinstance(event_id, str) and (event_id, source_path) in consumed_inputs
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
 def health_report(root: Path, store, config: dict) -> dict[str, object]:
     """Inspect operational invariants without emitting captured content."""
     root = Path(root)
     now = time.time()
-    try:
-        database_ok = store.path.exists() and store.integrity_check() == "ok"
-    except Exception:
-        database_ok = False
+    database_ok, migrations_ok, database_state, consumed_inputs = _database_health(store)
     spool_files = [
         path for path in (root / "spool").glob("*/*.json")
         if path.is_file() and not path.is_symlink()
     ] if (root / "spool").exists() else []
     spool_ages = [_age_seconds(path, now) for path in spool_files]
     oldest_spool_age = max((age for age in spool_ages if age >= 0), default=0)
+    unacknowledged_spools = [
+        path for path in spool_files
+        if not _spool_is_committed(root, path, consumed_inputs)
+    ]
+    unacknowledged_ages = [_age_seconds(path, now) for path in unacknowledged_spools]
+    oldest_unacknowledged_spool_age = max(
+        (age for age in unacknowledged_ages if age >= 0), default=0,
+    )
+    configured_retention = config.get("spool_retention_days", 30)
+    spool_retention_days = (
+        configured_retention
+        if isinstance(configured_retention, int) and not isinstance(configured_retention, bool)
+        and configured_retention >= 1
+        else 30
+    )
     configured_hooks = config.get("hooks_dir")
     hook_root = Path(configured_hooks) if isinstance(configured_hooks, str) else Path(__file__).resolve().parents[3] / "hooks"
     required_hooks = {"session_start.py", "user_prompt_submit.py", "stop_capture.py", "health_check.py"}
@@ -88,14 +160,6 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     disk_free = shutil.disk_usage(root if root.exists() else root.parent).free if (root.exists() or root.parent.exists()) else 0
     from imprint.compiler import compiler_lock_state
     lock_state = compiler_lock_state(root)
-    migrations_ok = False
-    if store.path.exists():
-        try:
-            with store.connect() as conn:
-                row = conn.execute("SELECT value FROM meta WHERE key='store_schema_version'").fetchone()
-                migrations_ok = bool(row and row[0] == STORE_SCHEMA_VERSION)
-        except Exception:
-            migrations_ok = False
     projection_present = (root / "projections" / "imprint.jsonld").is_file()
     acknowledgement_files = [
         path for path in (root / "runtime" / "acknowledgements").glob("*/*.json")
@@ -148,6 +212,9 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         hook_parity_ok=hook_parity,
         spool_depth=len(spool_files),
         oldest_spool_age_seconds=oldest_spool_age,
+        unacknowledged_spool_count=len(unacknowledged_spools),
+        oldest_unacknowledged_spool_age_seconds=oldest_unacknowledged_spool_age,
+        spool_retention_days=spool_retention_days,
         quarantine_count=len(list((root / "quarantine").glob("*.json"))) if (root / "quarantine").exists() else 0,
         permissions_ok=not unsafe_permissions,
         unsafe_permission_count=len(unsafe_permissions),
@@ -169,6 +236,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         verified_backup_count=verified_backup_count,
         invalid_backup_count=invalid_backup_count,
         compiler_state=str(lock_state.get("state", "invalid")),
+        database_state=database_state,
     ))
     result = report.as_dict()
     # CLI contract uses healthy/degraded while the invariant engine remains green/red.

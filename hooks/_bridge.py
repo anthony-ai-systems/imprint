@@ -101,14 +101,39 @@ def run(action: str) -> int:
         return _failure(action, "hook_action_timeout", stop_hook_active=stop_hook_active)
     except OSError:
         return _failure(action, "hook_executable_unavailable", stop_hook_active=stop_hook_active)
-    if process.returncode:
-        _persist_failure(action, process)
-        return _failure(action, "hook_action_failed", stop_hook_active=stop_hook_active)
-    if process.stdout:
+    body = None
+    valid_degraded_health = False
+    if action == "health-check" and process.returncode == 2 and process.stdout:
         try:
             body = json.loads(process.stdout)
         except json.JSONDecodeError:
-            return _failure(action, "hook_output_invalid", stop_hook_active=stop_hook_active)
+            pass
+        valid_degraded_health = isinstance(body, dict) and body.get("status") == "degraded"
+    if process.returncode and not valid_degraded_health:
+        _persist_failure(action, process)
+        return _failure(action, "hook_action_failed", stop_hook_active=stop_hook_active)
+    if process.stdout:
+        if body is None:
+            try:
+                body = json.loads(process.stdout)
+            except json.JSONDecodeError:
+                return _failure(action, "hook_output_invalid", stop_hook_active=stop_hook_active)
+        if valid_degraded_health:
+            reasons = body.get("degraded_reasons")
+            concise_reasons = [
+                reason for reason in reasons
+                if isinstance(reason, str) and reason
+            ] if isinstance(reasons, list) else []
+            summary = "imprint health: degraded"
+            if concise_reasons:
+                summary += " — " + ", ".join(concise_reasons)
+            hook_output = body.get("hookSpecificOutput")
+            hook_output = dict(hook_output) if isinstance(hook_output, dict) else {}
+            hook_output.update({
+                "hookEventName": "SessionStart",
+                "additionalContext": summary,
+            })
+            body["hookSpecificOutput"] = hook_output
         delivery = body.pop("_imprint_delivery", None) if isinstance(body, dict) else None
         sys.stdout.write(json.dumps(body, sort_keys=True) + "\n")
         sys.stdout.flush()
