@@ -12,7 +12,7 @@ back to the model. The bridge must therefore:
     them wedges the host in a stop loop whenever the install is degraded
 
 These are exercised hermetically: the bridge module is loaded in-process and
-its `subprocess.run` / `sys.stdin` are monkeypatched, so no real capture
+its `_graceful_run` / `sys.stdin` are monkeypatched, so no real capture
 subprocess is spawned. That keeps the semantics independent of PYTHONPATH,
 HOME, and whether imprint is pip-installed -- the definite-capture-failure
 class is modeled by a stub returning a non-zero returncode.
@@ -24,6 +24,7 @@ import importlib.util
 import io
 import json
 import subprocess
+import sys
 from datetime import datetime
 
 import pytest
@@ -52,7 +53,7 @@ def _capture_failed(*args, **kwargs) -> subprocess.CompletedProcess[str]:
 def test_definite_capture_failure_blocks_once_with_reason_on_stderr(monkeypatch, capsys):
     bridge = _bridge_module()
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({"stop_hook_active": False})))
-    monkeypatch.setattr(bridge.subprocess, "run", _capture_failed)
+    monkeypatch.setattr(bridge, "_graceful_run", _capture_failed)
 
     assert bridge.run("stop-capture") == 2
     captured = capsys.readouterr()
@@ -72,8 +73,8 @@ def test_definite_capture_failure_persists_subprocess_output(monkeypatch, capsys
     monkeypatch.setenv("IMPRINT_CONFIG", str(config))
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({"stop_hook_active": False})))
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "_graceful_run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0] if args else [], 7, "captured stdout", "captured stderr",
         ),
@@ -94,7 +95,7 @@ def test_definite_capture_failure_persists_subprocess_output(monkeypatch, capsys
 def test_stop_hook_active_suppresses_reblocking(monkeypatch, capsys):
     bridge = _bridge_module()
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({"stop_hook_active": True})))
-    monkeypatch.setattr(bridge.subprocess, "run", _capture_failed)
+    monkeypatch.setattr(bridge, "_graceful_run", _capture_failed)
 
     assert bridge.run("stop-capture") == 0
     assert json.loads(capsys.readouterr().out)["failure_policy"] == "fail_open"
@@ -105,7 +106,7 @@ def test_invalid_input_fails_open_instead_of_blocking(monkeypatch, capsys):
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO("not json"))
     # Invalid input is rejected before any capture subprocess is spawned.
     monkeypatch.setattr(
-        bridge.subprocess, "run",
+        bridge, "_graceful_run",
         lambda *a, **k: pytest.fail("invalid input must not spawn the capture subprocess"),
     )
 
@@ -120,6 +121,27 @@ def test_failure_stdout_is_a_single_valid_json_object(monkeypatch, capsys):
     for stdin_text in (json.dumps({"stop_hook_active": True}), "not json"):
         bridge = _bridge_module()
         monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(stdin_text))
-        monkeypatch.setattr(bridge.subprocess, "run", _capture_failed)
+        monkeypatch.setattr(bridge, "_graceful_run", _capture_failed)
         bridge.run("stop-capture")
         json.loads(capsys.readouterr().out)
+
+
+def test_hung_child_gets_sigterm_grace_before_kill(monkeypatch, tmp_path):
+    """A timed-out child is asked to unwind (SIGTERM) before being killed.
+
+    A hard kill mid-write orphans WAL sidecars; the grace window lets the CLI
+    close the store cleanly. The child here models that: its SIGTERM handler
+    leaves a marker, standing in for a clean store close.
+    """
+    bridge = _bridge_module()
+    monkeypatch.setattr(bridge, "HOOK_TIMEOUT_SECONDS", 0.3)
+    marker = tmp_path / "unwound-cleanly"
+    script = (
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM,"
+        f" lambda *a: (open({str(marker)!r}, 'w').close(), sys.exit(0)))\n"
+        "time.sleep(30)\n"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        bridge._graceful_run([sys.executable, "-c", script], "")
+    assert marker.exists()

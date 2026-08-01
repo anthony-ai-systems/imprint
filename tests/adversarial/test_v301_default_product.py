@@ -276,7 +276,7 @@ def test_hook_child_hang_is_killed_at_bound_with_declared_policy(tmp_path, monke
 def test_missing_hook_executable_uses_declared_policy(monkeypatch, capsys, action, expected):
     bridge = _bridge_module()
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO("{}"))
-    monkeypatch.setattr(bridge.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing")))
+    monkeypatch.setattr(bridge, "_graceful_run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing")))
     assert bridge.run(action) == expected
     assert json.loads(capsys.readouterr().out)["error"] == "hook_executable_unavailable"
 
@@ -294,7 +294,7 @@ def test_bridge_flushes_payload_before_delivery_commit(monkeypatch):
     output = FlushedOutput()
     calls = []
 
-    def run(command, **kwargs):
+    def run(command, payload="", **kwargs):
         calls.append(command)
         if len(calls) == 1:
             body = {
@@ -309,7 +309,7 @@ def test_bridge_flushes_payload_before_delivery_commit(monkeypatch):
 
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO("{}"))
     monkeypatch.setattr(bridge.sys, "stdout", output)
-    monkeypatch.setattr(bridge.subprocess, "run", run)
+    monkeypatch.setattr(bridge, "_graceful_run", run)
     assert bridge.run("session-start") == 0
     assert len(calls) == 2
     visible = json.loads(output.getvalue())

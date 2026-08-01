@@ -10,11 +10,41 @@ import uuid
 from datetime import datetime, timezone
 
 HOOK_TIMEOUT_SECONDS = 10
+HOOK_TERM_GRACE_SECONDS = 3
 _EVENT_NAMES = {
     "session-start": "SessionStart",
     "user-prompt-submit": "UserPromptSubmit",
     "health-check": "SessionStart",
 }
+
+
+def _graceful_run(argv: list[str], payload: str) -> subprocess.CompletedProcess[str]:
+    """Run one CLI call, escalating SIGTERM -> SIGKILL on timeout.
+
+    ``subprocess.run(timeout=...)`` kills the child outright, which orphans
+    WAL sidecars when the child is mid-write. SIGTERM first gives the CLI a
+    grace window to unwind and close the store cleanly; only a child that
+    ignores it gets killed. Re-raises ``TimeoutExpired`` either way.
+    """
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
+    )
+    try:
+        stdout, stderr = process.communicate(payload, timeout=HOOK_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.communicate(timeout=HOOK_TERM_GRACE_SECONDS)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            process.kill()
+            process.communicate()
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def _persist_failure(action: str, process: subprocess.CompletedProcess[str]) -> None:
@@ -88,14 +118,9 @@ def run(action: str) -> int:
         return _failure(action, "hook_input_invalid")
     stop_hook_active = isinstance(event, dict) and bool(event.get("stop_hook_active"))
     try:
-        process = subprocess.run(
+        process = _graceful_run(
             [sys.executable, "-m", "imprint.cli", "hook", action],
-            input=json.dumps(event, ensure_ascii=False, separators=(",", ":")),
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=HOOK_TIMEOUT_SECONDS,
-            env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
+            json.dumps(event, ensure_ascii=False, separators=(",", ":")),
         )
     except subprocess.TimeoutExpired:
         return _failure(action, "hook_action_timeout", stop_hook_active=stop_hook_active)
@@ -141,10 +166,9 @@ def run(action: str) -> int:
             # The payload is already visible to the hook consumer. A failed
             # commit intentionally leaves the pending cache for replay.
             try:
-                subprocess.run(
+                _graceful_run(
                     [sys.executable, "-m", "imprint.cli", "delivery-commit"],
-                    input=json.dumps(delivery, sort_keys=True), text=True,
-                    capture_output=True, check=False, timeout=HOOK_TIMEOUT_SECONDS,
+                    json.dumps(delivery, sort_keys=True),
                 )
             except (subprocess.TimeoutExpired, OSError):
                 pass
