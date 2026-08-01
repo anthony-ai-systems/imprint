@@ -794,6 +794,11 @@ def test_recover_replays_committed_wal_residue_without_data_loss(tmp_path):
     assert store.integrity_check() == "ok"
 
 
+def _fast_settle(monkeypatch, attempts=2, interval=0.01):
+    monkeypatch.setattr(ImprintStore, "_SIDECAR_SETTLE_ATTEMPTS", attempts)
+    monkeypatch.setattr(ImprintStore, "_SIDECAR_SETTLE_INTERVAL_SECONDS", interval)
+
+
 def test_connect_auto_recovers_stale_wal_residue(tmp_path):
     """Crash residue with no live writer heals on the next ordinary open.
 
@@ -812,9 +817,16 @@ def test_connect_auto_recovers_stale_wal_residue(tmp_path):
     assert not Path(str(target) + "-wal").exists()
     assert not Path(str(target) + "-shm").exists()
     assert store.integrity_check() == "ok"
+    # The drain leaves WAL mode to shed the sidecars; it must have restored it.
+    check = sqlite3.connect(str(target))
+    try:
+        assert check.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        check.close()
 
 
-def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path):
+def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path, monkeypatch):
+    _fast_settle(monkeypatch)
     target = tmp_path / "imprint.db"
     store = ImprintStore(target)
     store.initialize()
@@ -834,6 +846,65 @@ def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path):
         live.close()
 
 
+def test_connect_refuses_while_an_idle_connection_holds_the_store(tmp_path, monkeypatch):
+    """An idle-open connection must refuse, not drain.
+
+    A checkpoint sails past a connection that holds no read mark, so a
+    checkpoint-based drain would delete the sidecars out from under it and
+    split later writers onto fresh WAL/SHM files. Leaving WAL mode is refused
+    by SQLite while any other connection is open, idle or not.
+    """
+    _fast_settle(monkeypatch)
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+
+    idle = sqlite3.connect(str(target))
+    try:
+        idle.execute("INSERT INTO meta(key,value) VALUES('idle_probe','1')")
+        idle.commit()
+        # No open transaction: the connection is idle but alive.
+        assert Path(str(target) + "-wal").exists()
+        with pytest.raises(ValidationError, match="WAL/SHM"):
+            with store.connect():
+                pass
+        # The idle connection's sidecars were left alone.
+        assert Path(str(target) + "-wal").exists()
+        assert Path(str(target) + "-shm").exists()
+    finally:
+        idle.close()
+
+
+def test_connect_waits_out_a_briefly_held_store(tmp_path, monkeypatch):
+    """A writer that closes within the settle window must not fail the open."""
+    import threading
+
+    _fast_settle(monkeypatch, attempts=40, interval=0.05)
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+
+    holder = sqlite3.connect(str(target), check_same_thread=False)
+    holder.execute("INSERT INTO meta(key,value) VALUES('brief_probe','1')")
+    holder.commit()
+    assert Path(str(target) + "-wal").exists()
+
+    release = threading.Timer(0.3, holder.close)
+    release.start()
+    try:
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key='brief_probe'"
+            ).fetchone()
+        assert row[0] == "1"
+    finally:
+        release.cancel()
+        try:
+            holder.close()
+        except sqlite3.ProgrammingError:
+            pass
+
+
 def test_recover_refuses_when_a_live_writer_holds_the_store(tmp_path):
     target = tmp_path / "imprint.db"
     store = ImprintStore(target)
@@ -851,6 +922,21 @@ def test_recover_refuses_when_a_live_writer_holds_the_store(tmp_path):
             store.recover()
     finally:
         live.close()
+
+
+def test_recover_force_drains_non_replayable_sidecar_bytes(tmp_path):
+    """Ordinary opens refuse unknown sidecar bytes; explicit recover may discard them."""
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+    Path(str(target) + "-wal").write_bytes(b"uncheckpointed-wal-sentinel")
+    Path(str(target) + "-shm").write_bytes(b"shared-memory-sentinel")
+
+    result = store.recover()
+    assert result["status"] == "recovered"
+    assert not Path(str(target) + "-wal").exists()
+    assert not Path(str(target) + "-shm").exists()
+    assert store.integrity_check() == "ok"
 
 
 def test_recover_on_a_clean_store_reports_clean(tmp_path):
