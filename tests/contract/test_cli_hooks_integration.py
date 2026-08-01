@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from imprint.store import ImprintStore
 
 
@@ -125,6 +127,96 @@ def test_native_claude_stop_payload_mines_bounded_transcript(tmp_path):
     verdict = store.current_nodes(["Verdict"])[0]
     assert verdict["payload"]["raw_operator_text"].startswith("No, explicitly report")
     assert len(verdict["evidence"]) == 2
+
+
+SKILL_BODY = (
+    "Base directory for this skill: /Users/operator/.claude/skills/capture\n"
+    "Read SKILL.md before doing anything else. No, do not skip this step."
+)
+TASK_NOTIFICATION = (
+    "<task-notification>Agent scout finished. No, the earlier answer was wrong."
+    "</task-notification>"
+)
+
+
+def _stop_capture_over_transcript(tmp_path, entries) -> tuple[subprocess.CompletedProcess[str], Path]:
+    repo = Path(__file__).parents[2]
+    data = tmp_path / "data"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "data_root": str(data), "operator_slug": "test", "node_id": "primary",
+    }))
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
+    result = _run(repo, config, "stop-capture", {
+        "hook_event_name": "Stop", "session_id": "provenance-session",
+        "transcript_path": str(transcript), "cwd": str(tmp_path),
+        "stop_hook_active": False,
+    })
+    return result, data
+
+
+def test_stop_capture_records_human_origin_feedback(tmp_path):
+    result, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        {
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"content": "No, report every failed source explicitly."},
+        },
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "queued"
+    spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
+    assert len(spooled) == 1
+    assert "report every failed source" in spooled[0].read_text()
+
+
+@pytest.mark.parametrize("entry", [
+    # Declared machine provenance decides alone, even on feedback-shaped text.
+    {"type": "user", "origin": {"kind": "task-notification"},
+     "message": {"content": TASK_NOTIFICATION}},
+    # Legacy sessions carry no origin, so the structural tells decide.
+    {"type": "user", "isSidechain": True,
+     "message": {"content": "No, that heading is wrong."}},
+    {"type": "user", "toolUseResult": {"stdout": "ok"},
+     "message": {"content": "No, that heading is wrong."}},
+    # Marker blacklist, consulted only when origin and structure are silent.
+    {"type": "user", "message": {"content": SKILL_BODY}},
+])
+def test_stop_capture_skips_synthetic_transcript_entries(tmp_path, entry):
+    result, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "Working."}}, entry,
+    ])
+    # The skip path must stay exit 0: exit 2 from a Stop hook blocks the host.
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "hook_schema_version": "1.0.0",
+        "reason": "synthetic_transcript_entry",
+        "status": "skipped",
+    }
+    assert not list((data / "test" / "spool").rglob("*.json"))
+
+
+def test_stop_capture_reaches_past_synthetic_entries_to_the_operator_turn(tmp_path):
+    result, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        {
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"content": "No, report every failed source explicitly."},
+        },
+        {"type": "assistant", "message": {"content": "Reporting all sources."}},
+        {"type": "user", "origin": {"kind": "task-notification"},
+         "message": {"content": TASK_NOTIFICATION}},
+        {"type": "user", "message": {"content": SKILL_BODY}},
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "queued"
+    spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
+    assert len(spooled) == 1
+    body = spooled[0].read_text()
+    assert "report every failed source" in body
+    assert "Base directory for this skill" not in body
 
 
 def test_hook_rejects_wrong_event_contract(tmp_path):

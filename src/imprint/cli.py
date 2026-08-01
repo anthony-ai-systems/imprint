@@ -174,6 +174,7 @@ def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
 
 def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
     """Recover final feedback from a huge transcript using a bounded tail read."""
+    from .capture.provenance import SYNTHETIC_ENTRY_REASON, classify_entry_provenance
     from .capture.transcript import _read_native_transcript_snapshot
     from .errors import ValidationError
 
@@ -191,6 +192,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
     messages: list[tuple[str, str]] = []
+    synthetic_user_entry = False
     for number, raw_line in enumerate(decoded_lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
@@ -208,10 +210,24 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
-        if text.strip():
-            messages.append((item["type"], text))
+        if not text.strip():
+            continue
+        if item["type"] == "user" and not classify_entry_provenance(item, text).is_operator:
+            synthetic_user_entry = True
+            continue
+        messages.append((item["type"], text))
     user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
     if not user_indexes:
+        # Synthetic-only tails are skipped, not raised: a raised Stop hook
+        # blocks the host session.
+        if synthetic_user_entry:
+            return {
+                "operator_text": None,
+                "prior_assistant_output": None,
+                "case_description": None,
+                "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
+                "skip_reason": SYNTHETIC_ENTRY_REASON,
+            }
         raise ValidationError("bounded transcript tail contains no user message")
     user_index = user_indexes[-1]
     operator_text = messages[user_index][1]
@@ -229,6 +245,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         "prior_assistant_output": prior_assistant,
         "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
         "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
+        "skip_reason": None,
         "degradation": {
             "schema_version": "1.0.0",
             "payload": {
@@ -960,9 +977,16 @@ def main(argv: list[str] | None = None) -> int:
                         native = _parse_large_native_transcript(
                             event["transcript_path"], snapshot=snapshot,
                         )
-                        extensions["org.imprint.transcript"] = native["degradation"]
+                        if not native["skip_reason"]:
+                            extensions["org.imprint.transcript"] = native["degradation"]
                     else:
                         native = _parse_native_stop_snapshot(snapshot)
+                    if native["skip_reason"]:
+                        _write_json({
+                            "hook_schema_version": "1.0.0", "status": "skipped",
+                            "reason": native["skip_reason"],
+                        })
+                        return 0
                     operator_text = native["operator_text"]
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]

@@ -12,6 +12,8 @@ from typing import Any
 
 from imprint.errors import ValidationError
 
+from .provenance import SYNTHETIC_ENTRY_REASON, classify_entry_provenance
+
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 
 
@@ -130,6 +132,7 @@ def _message_text(value: Any) -> str:
 
 def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str | None]:
     messages: list[tuple[str, str]] = []
+    synthetic_user_entry = False
     try:
         lines = snapshot.data.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
@@ -149,10 +152,25 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
-        if text.strip():
-            messages.append((item["type"], text))
+        if not text.strip():
+            continue
+        if item["type"] == "user" and not classify_entry_provenance(item, text).is_operator:
+            synthetic_user_entry = True
+            continue
+        messages.append((item["type"], text))
+    locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
     user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
     if not user_indexes:
+        # A transcript whose only user entries are synthetic is a skip, never an
+        # error: raising here would block the host session's stop.
+        if synthetic_user_entry:
+            return {
+                "operator_text": None,
+                "prior_assistant_output": None,
+                "case_description": None,
+                "source_locator": locator,
+                "skip_reason": SYNTHETIC_ENTRY_REASON,
+            }
         raise ValidationError("transcript contains no user message")
     user_index = user_indexes[-1]
     operator_text = messages[user_index][1]
@@ -160,12 +178,12 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
         (messages[index][1] for index in range(user_index - 1, -1, -1) if messages[index][0] == "assistant"),
         None,
     )
-    locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
     return {
         "operator_text": operator_text,
         "prior_assistant_output": prior_assistant,
         "case_description": "Explicit operator feedback witnessed in the Claude Code transcript",
         "source_locator": locator,
+        "skip_reason": None,
     }
 
 
