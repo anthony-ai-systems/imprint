@@ -780,11 +780,6 @@ def test_recover_replays_committed_wal_residue_without_data_loss(tmp_path):
     finally:
         read_only.close()
 
-    # The store still bricks on the sidecars -- recovery is deliberate, not automatic.
-    with pytest.raises(ValidationError, match="WAL/SHM"):
-        with store.connect() as conn:
-            conn.execute("SELECT 1")
-
     result = store.recover()
     assert result["status"] == "recovered"
     assert not Path(str(target) + "-wal").exists()
@@ -797,6 +792,46 @@ def test_recover_replays_committed_wal_residue_without_data_loss(tmp_path):
         ).fetchone()
     assert row[0] == "committed_before_kill"
     assert store.integrity_check() == "ok"
+
+
+def test_connect_auto_recovers_stale_wal_residue(tmp_path):
+    """Crash residue with no live writer heals on the next ordinary open.
+
+    Before this, one SIGKILLed hook bricked every later hook until a manual
+    ``store recover``; the guard could not tell residue from a live writer.
+    """
+    target = tmp_path / "imprint.db"
+    _plant_wal_residue(tmp_path, target)
+    store = ImprintStore(target)
+
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key='recover_probe'"
+        ).fetchone()
+    assert row[0] == "committed_before_kill"
+    assert not Path(str(target) + "-wal").exists()
+    assert not Path(str(target) + "-shm").exists()
+    assert store.integrity_check() == "ok"
+
+
+def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path):
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+
+    live = sqlite3.connect(str(target))
+    try:
+        live.execute("INSERT INTO meta(key,value) VALUES('live_probe','1')")
+        live.commit()
+        # Hold an open read snapshot so the WAL cannot be reset by another connection.
+        live.execute("BEGIN")
+        live.execute("SELECT * FROM meta").fetchall()
+        assert Path(str(target) + "-wal").exists()
+        with pytest.raises(ValidationError, match="WAL/SHM"):
+            with store.connect():
+                pass
+    finally:
+        live.close()
 
 
 def test_recover_refuses_when_a_live_writer_holds_the_store(tmp_path):

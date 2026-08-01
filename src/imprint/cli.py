@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import secrets
+import signal
 import sys
 import tempfile
 import uuid
@@ -853,6 +854,10 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json(store.recover())
                 return 0
         if args.command == "hook":
+            # The bridge terminates a timed-out hook with SIGTERM before
+            # escalating to SIGKILL; convert it to SystemExit so open store
+            # connections unwind and close instead of orphaning WAL sidecars.
+            signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
             event = json.load(sys.stdin)
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")

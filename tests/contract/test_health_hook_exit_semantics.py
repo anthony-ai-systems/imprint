@@ -35,8 +35,8 @@ def test_degraded_health_exit_two_is_passed_through_without_failure_record(
     }
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({})))
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "_graceful_run",
         lambda *args, **kwargs: subprocess.CompletedProcess(
             args[0], 2, json.dumps(child), "",
         ),
@@ -65,8 +65,8 @@ def test_health_child_crash_keeps_generic_failure_behavior(monkeypatch, capsys):
     persisted = []
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({})))
     monkeypatch.setattr(
-        bridge.subprocess,
-        "run",
+        bridge,
+        "_graceful_run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 7, "", "boom"),
     )
     monkeypatch.setattr(bridge, "_persist_failure", lambda action, process: persisted.append((action, process)))

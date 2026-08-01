@@ -145,7 +145,14 @@ class ImprintStore:
         store_versions: frozenset[str] = frozenset({STORE_SCHEMA_VERSION}),
         ontology_versions: frozenset[str] | None = frozenset({ONTOLOGY_SCHEMA_VERSION}),
     ) -> tuple[int, int]:
-        """Inspect an existing database without permitting SQLite side effects."""
+        """Inspect an existing database, healing stale WAL residue in passing.
+
+        The immutable read below is only sound when no writer holds the store,
+        so WAL/SHM sidecars must be gone before it runs. Sidecars left by a
+        hard-killed writer used to brick every subsequent open until a manual
+        ``store recover``; now they are drained in place first, and only a
+        store genuinely held by a live connection keeps refusing.
+        """
         try:
             resolved = self.path.resolve(strict=True)
             if not resolved.is_file() or self.path.is_symlink():
@@ -155,9 +162,10 @@ class ImprintStore:
                 Path(str(resolved) + suffix) for suffix in ("-wal", "-shm")
             )
             if any(path.exists() for path in sidecars):
-                raise ValidationError(
-                    "store has WAL/SHM sidecars; close the active writer or recover the store before use"
-                )
+                if not self._drain_stale_sidecars(resolved):
+                    raise ValidationError(
+                        "store has WAL/SHM sidecars; close the active writer or recover the store before use"
+                    )
             uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
             conn = sqlite3.connect(uri, uri=True, timeout=5)
             try:
@@ -274,19 +282,54 @@ class ImprintStore:
         with self.connect() as conn:
             return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
+    _WAL_MAGIC = (b"\x37\x7f\x06\x82", b"\x37\x7f\x06\x83")
+
+    def _drain_stale_sidecars(self, resolved: Path, *, force: bool = False) -> bool:
+        """Replay orphaned WAL crash residue in place; True when the store is clean.
+
+        Proves no live connection holds the store (zero busy grace, so a held
+        store is reported rather than waited on), lets SQLite checkpoint the
+        committed WAL frames into the main database, then drops the drained
+        sidecars. Returns False when a live connection holds the store or when
+        the ``-wal`` file is not something SQLite can replay (unknown bytes are
+        never silently discarded; ``force`` lifts that gate for the explicit
+        ``store recover`` command); propagates ``OSError``/
+        ``sqlite3.DatabaseError`` when the store itself is unreadable and
+        ``ValidationError`` when it is incompatible.
+        """
+        wal = Path(str(resolved) + "-wal")
+        if not force and wal.exists() and wal.stat().st_size > 0:
+            with wal.open("rb") as handle:
+                if handle.read(4) not in self._WAL_MAGIC:
+                    return False
+        conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=0)
+        try:
+            self._require_connection_compatible(conn)
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError:
+                return False
+            busy = int(row[0]) if row and row[0] is not None else 1
+            if busy != 0:
+                return False
+        finally:
+            conn.close()
+        # The committed frames now live in the main database, so removing the
+        # drained sidecars is safe. Closing the last connection usually removes
+        # them already; the unlinks mop up what a crashed reader left behind.
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(resolved) + suffix).unlink(missing_ok=True)
+        _secure_sqlite_state(resolved)
+        return True
+
     def recover(self) -> dict[str, Any]:
         """Replay orphaned WAL crash residue into the store, or report a live writer.
 
-        ``connect`` refuses to open a store whose SQLite ``-wal``/``-shm`` sidecars
-        are present, because a passive immutable inspection cannot tell an active
-        writer apart from crash residue. A hard SIGKILL, routinely produced by the
-        hook bridge's fail-closed timeout, leaves those sidecars behind holding
-        already-committed captures that live only in the WAL. Deleting them by hand
-        is the obvious manual fix, and it silently discards that committed work.
-
-        This is the safe recovery instead: prove no live writer holds the store,
-        let SQLite replay the committed WAL frames into the main database, then drop
-        the drained sidecars. A store held by a live writer is left untouched.
+        Ordinary opens heal stale residue automatically, but they surface a held
+        store as the generic sidecar refusal. This explicit command exists for
+        operators: it names the live-writer case precisely and gives a positive
+        confirmation that the store is clean. A store held by a live writer is
+        left untouched.
         """
         if not self.path.exists():
             raise ValidationError("store must be initialized before recovery")
@@ -304,31 +347,14 @@ class ImprintStore:
             self._require_existing_store_compatible()
             return {"status": "clean"}
         try:
-            conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=0)
+            drained = self._drain_stale_sidecars(resolved, force=True)
         except (OSError, sqlite3.DatabaseError) as exc:
             raise ValidationError("existing store is corrupt or unreadable") from exc
-        try:
-            # Opening rw replays the committed WAL frames; validate before truncating.
-            self._require_connection_compatible(conn)
-            try:
-                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            except sqlite3.OperationalError as exc:
-                raise ValidationError(
-                    "store is held by a live writer; close the active session before recovery"
-                ) from exc
-            busy = int(row[0]) if row and row[0] is not None else 1
-            if busy != 0:
-                raise ValidationError(
-                    "store is held by a live writer; close the active session before recovery"
-                )
-        finally:
-            conn.close()
-        # The committed frames now live in the main database, so removing the drained
-        # sidecars is safe.
-        for sidecar in sidecars:
-            sidecar.unlink(missing_ok=True)
-        _secure_sqlite_state(resolved)
-        # Prove the recovered store now opens through the ordinary refusing path.
+        if not drained:
+            raise ValidationError(
+                "store is held by a live writer; close the active session before recovery"
+            )
+        # Prove the recovered store now opens through the ordinary path.
         self._require_existing_store_compatible()
         return {"status": "recovered"}
 
