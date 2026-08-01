@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -162,7 +163,7 @@ class ImprintStore:
                 Path(str(resolved) + suffix) for suffix in ("-wal", "-shm")
             )
             if any(path.exists() for path in sidecars):
-                if not self._drain_stale_sidecars(resolved):
+                if not self._settle_sidecars(resolved, sidecars):
                     raise ValidationError(
                         "store has WAL/SHM sidecars; close the active writer or recover the store before use"
                     )
@@ -283,19 +284,41 @@ class ImprintStore:
             return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
 
     _WAL_MAGIC = (b"\x37\x7f\x06\x82", b"\x37\x7f\x06\x83")
+    _SIDECAR_SETTLE_ATTEMPTS = 10
+    _SIDECAR_SETTLE_INTERVAL_SECONDS = 0.15
+
+    def _settle_sidecars(self, resolved: Path, sidecars: tuple[Path, ...]) -> bool:
+        """Wait out a briefly-held store before refusing on its sidecars.
+
+        Hook writers hold the store for milliseconds; refusing on first sight
+        of their sidecars fails a concurrent open spuriously. Retry the drain
+        across a bounded window -- a writer that closes cleanly removes its own
+        sidecars, and stale residue drains -- and refuse only a store held
+        longer than the window.
+        """
+        for _ in range(self._SIDECAR_SETTLE_ATTEMPTS):
+            if self._drain_stale_sidecars(resolved):
+                return True
+            time.sleep(self._SIDECAR_SETTLE_INTERVAL_SECONDS)
+            if not any(path.exists() for path in sidecars):
+                return True
+        return False
 
     def _drain_stale_sidecars(self, resolved: Path, *, force: bool = False) -> bool:
         """Replay orphaned WAL crash residue in place; True when the store is clean.
 
-        Proves no live connection holds the store (zero busy grace, so a held
-        store is reported rather than waited on), lets SQLite checkpoint the
-        committed WAL frames into the main database, then drops the drained
-        sidecars. Returns False when a live connection holds the store or when
-        the ``-wal`` file is not something SQLite can replay (unknown bytes are
-        never silently discarded; ``force`` lifts that gate for the explicit
-        ``store recover`` command); propagates ``OSError``/
-        ``sqlite3.DatabaseError`` when the store itself is unreadable and
-        ``ValidationError`` when it is incompatible.
+        The drain leaves WAL mode entirely (``journal_mode=DELETE``): SQLite
+        refuses that switch while ANY other connection has the store open --
+        including an idle one that a checkpoint would sail straight past --
+        and it deletes the sidecar files itself under the proper locks, so a
+        live connection can never have its WAL removed from underneath it.
+        WAL mode is restored before the connection closes. Returns False when
+        a live connection holds the store or when the ``-wal`` file is not
+        something SQLite can replay (unknown bytes are never silently
+        discarded; ``force`` lifts that gate for the explicit ``store
+        recover`` command); propagates ``OSError``/``sqlite3.DatabaseError``
+        when the store itself is unreadable and ``ValidationError`` when it is
+        incompatible.
         """
         wal = Path(str(resolved) + "-wal")
         if not force and wal.exists() and wal.stat().st_size > 0:
@@ -304,21 +327,22 @@ class ImprintStore:
                     return False
         conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=0)
         try:
-            self._require_connection_compatible(conn)
             try:
-                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                self._require_connection_compatible(conn)
+                row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
             except sqlite3.OperationalError:
+                # A lock held at this instant is contention, not damage.
                 return False
-            busy = int(row[0]) if row and row[0] is not None else 1
-            if busy != 0:
+            if row is None or str(row[0]).lower() != "delete":
                 return False
+            # Re-entering WAL needs only a brief write lock, not exclusivity.
+            conn.execute("PRAGMA busy_timeout=2000")
+            restored = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            if restored is None or str(restored[0]).lower() != "wal":
+                raise ValidationError("store journal mode could not be restored to WAL")
         finally:
             conn.close()
-        # The committed frames now live in the main database, so removing the
-        # drained sidecars is safe. Closing the last connection usually removes
-        # them already; the unlinks mop up what a crashed reader left behind.
-        for suffix in ("-wal", "-shm", "-journal"):
-            Path(str(resolved) + suffix).unlink(missing_ok=True)
+        Path(str(resolved) + "-journal").unlink(missing_ok=True)
         _secure_sqlite_state(resolved)
         return True
 
