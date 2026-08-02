@@ -137,6 +137,10 @@ TASK_NOTIFICATION = (
     "<task-notification>Agent scout finished. No, the earlier answer was wrong."
     "</task-notification>"
 )
+SYSTEM_REMINDER = (
+    "<system-reminder>The task tools have not been used recently. Consider "
+    "whether they apply. This is a gentle reminder.</system-reminder>"
+)
 INTERRUPTION_NOTICE = "[Request interrupted by user for tool use]"
 
 
@@ -303,6 +307,66 @@ def test_stop_capture_captures_the_next_operator_turn_after_an_idempotent_skip(t
     assert json.loads(results[0].stdout)["status"] == "queued"
     spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
     assert len(spooled) == 2
+
+
+def test_a_failed_capture_releases_the_turn_mark_so_the_retry_captures(tmp_path):
+    # The once-capture mark is claimed before the envelope is written, so a
+    # write that fails must give the claim back. A mark left over a failed
+    # capture makes the healed retry skip the turn forever.
+    repo = Path(__file__).parents[2]
+    data = tmp_path / "data"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "data_root": str(data), "operator_slug": "test", "node_id": "primary",
+    }))
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-1",
+        "message": {"content": "No, report every failed source explicitly."},
+    }) + "\n")
+    event = {
+        "hook_event_name": "Stop", "session_id": "unwind-session",
+        "transcript_path": str(transcript), "cwd": str(tmp_path),
+        "stop_hook_active": False,
+    }
+    # Block the spool write the way a real disk fault would: the node's spool
+    # directory cannot be created because its path is taken by a file.
+    blocked = data / "test" / "spool" / "primary"
+    blocked.parent.mkdir(parents=True)
+    blocked.write_text("not a directory")
+
+    failed = _run(repo, config, "stop-capture", event)
+    assert failed.returncode == 2
+    assert json.loads(failed.stdout)["status"] == "error"
+    marks = data / "test" / "runtime" / "captured-turns"
+    assert not list(marks.rglob("*.json")), "a failed capture must not keep the claim"
+
+    blocked.unlink()
+    healed = _run(repo, config, "stop-capture", event)
+    assert healed.returncode == 0, healed.stderr
+    assert json.loads(healed.stdout)["status"] == "queued"
+    spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
+    assert len(spooled) == 1
+    assert "report every failed source" in spooled[0].read_text()
+    assert len(list(marks.rglob("*.json"))) == 1
+
+
+def test_stop_capture_hears_a_correction_behind_a_prepended_host_reminder(tmp_path):
+    # The host prepends its own blocks to a genuinely submitted prompt, which
+    # once pushed the operator's first sentence out of reach of the anchored
+    # correction rule and dropped the turn as non-feedback.
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        {
+            "type": "user", "origin": {"kind": "human"},
+            "message": {"content": f"{SYSTEM_REMINDER}\n\nNo, keep the failed source in the summary."},
+        },
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "queued"
+    spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
+    assert len(spooled) == 1
+    assert "keep the failed source" in spooled[0].read_text()
 
 
 def test_hook_rejects_wrong_event_contract(tmp_path):

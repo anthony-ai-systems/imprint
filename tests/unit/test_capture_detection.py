@@ -41,3 +41,33 @@ def test_silent_reask_is_an_operator_reask_not_silence():
 ])
 def test_negative_controls(text):
     assert detect_explicit_feedback(text).is_feedback is False
+
+
+REMINDER = (
+    "<system-reminder>The task tools have not been used recently. This is a "
+    "gentle reminder; ignore it if it does not apply.</system-reminder>"
+)
+
+
+def test_a_prepended_host_block_does_not_hide_the_operator_sentence():
+    # The host prepends its blocks to a genuinely submitted prompt. Without
+    # stripping them the correction rule's sentence anchor never reaches the
+    # operator's opening "No,".
+    result = detect_explicit_feedback(f"{REMINDER}\n\nNo, keep the failed source in the summary.")
+    assert result.is_feedback and result.marker == "direct"
+    assert detect_explicit_feedback(
+        f"<task-notification>scout finished</task-notification>\n{REMINDER}\n\n"
+        "No, keep the failed source in the summary."
+    ).is_feedback
+
+
+def test_a_host_block_only_turn_is_not_operator_feedback():
+    assert detect_explicit_feedback(REMINDER).is_feedback is False
+
+
+def test_only_leading_host_blocks_are_stripped():
+    # A marker the operator quotes mid-sentence stays part of what was said.
+    quoted = f"The reminder reads {REMINDER} and it is wrong."
+    assert detect_explicit_feedback(quoted).is_feedback
+    trailing = f"No, keep the failed source in the summary.\n\n{REMINDER}"
+    assert detect_explicit_feedback(trailing).marker == "direct"

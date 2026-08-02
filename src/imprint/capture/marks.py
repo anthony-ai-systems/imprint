@@ -6,12 +6,16 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from imprint.permissions import secure_directory, secure_file
 
 ALREADY_CAPTURED_REASON = "operator_turn_already_captured"
 MARK_SCHEMA_VERSION = "1.0.0"
+# A session's marks stop earning their keep once the transcript that produced
+# them is long gone. Sweeping them keeps the runtime directory bounded.
+MARK_RETENTION_DAYS = 30
 
 
 def turn_identity(source_entry_id: str | None, operator_text: str) -> str:
@@ -46,8 +50,55 @@ class CapturedTurns:
         secure_directory(directory)
         return directory / f"{turn}.json"
 
+    def prune(self, *, now: float | None = None) -> int:
+        """Drop marks past retention. Best effort: a capture never fails on it.
+
+        Runs before the claim path creates this session's directory, so an
+        emptied session directory is never removed out from under a claim.
+        """
+        threshold = (time.time() if now is None else now) - MARK_RETENTION_DAYS * 86400
+        removed = 0
+        try:
+            sessions = sorted(self.root.iterdir())
+        except OSError:
+            return 0
+        for session in sessions:
+            if not session.is_dir():
+                continue
+            try:
+                marks = sorted(session.iterdir())
+            except OSError:
+                continue
+            for mark in marks:
+                try:
+                    if mark.stat().st_mtime < threshold:
+                        mark.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            try:
+                session.rmdir()
+            except OSError:
+                pass
+        return removed
+
+    def release(self, session_id: str, turn_id: str) -> None:
+        """Undo a claim whose capture never reached the spool.
+
+        A durable mark over a failed capture would make the healed retry skip
+        the turn as already captured, losing the operator's words for good.
+        """
+        try:
+            self._mark_path(session_id, turn_id).unlink(missing_ok=True)
+        except OSError:
+            pass
+
     def claim(self, session_id: str, turn_id: str) -> bool:
         """Return True exactly once per session and turn."""
+        try:
+            self.prune()
+        except Exception:  # retention is never a reason to drop a capture
+            pass
         final = self._mark_path(session_id, turn_id)
         if final.exists():
             secure_file(final)

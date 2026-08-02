@@ -1029,44 +1029,52 @@ def main(argv: list[str] | None = None) -> int:
                 # Stop fires on every assistant turn, so the same trailing
                 # operator utterance is re-read until the operator speaks again.
                 # Claim the turn once per session or the Verdict is duplicated.
-                if not CapturedTurns(root).claim(
-                    session, turn_identity(source_entry_id, operator_text),
-                ):
+                marks = CapturedTurns(root)
+                turn_id = turn_identity(source_entry_id, operator_text)
+                if not marks.claim(session, turn_id):
                     _write_json({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": ALREADY_CAPTURED_REASON,
                     })
                     return 0
-                envelope = build_capture_envelope(
-                    operator_id=_operator_urn(root), session_id=session,
-                    node_id=str(config.get("node_id", "primary")),
-                    case_description=str(case_description or "Explicit operator feedback witnessed by explicit hook input"),
-                    raw_operator_text=operator_text, call_type=detection.call_type,
-                    capture_mechanism="claude_code_stop_hook", captured_by="imprint-hook",
-                    reason=event.get("reason") if isinstance(event.get("reason"), str) else None,
-                    contextual_evidence=contextual_evidence,
-                    extensions=extensions,
-                )
-                path = write_envelope(root, envelope)
-                receipt = {
-                    "hook_schema_version": "1.0.0", "status": "queued",
-                    "event_id": envelope["input_event_id"], "spool_file": path.name,
-                    "canonical_status": "spool_only",
-                }
-                if bool(config.get("compiler")):
-                    from .compiler import acknowledgement_committed
-                    counts = compile_spools(
-                        root, store, compiler_authorized=True,
+                # The claim is taken before the write so two concurrent Stops
+                # cannot both spool the turn, which makes an unwind mandatory:
+                # a mark left over a failed capture would make the healed retry
+                # skip the turn as already captured and lose it for good.
+                try:
+                    envelope = build_capture_envelope(
+                        operator_id=_operator_urn(root), session_id=session,
+                        node_id=str(config.get("node_id", "primary")),
+                        case_description=str(case_description or "Explicit operator feedback witnessed by explicit hook input"),
+                        raw_operator_text=operator_text, call_type=detection.call_type,
+                        capture_mechanism="claude_code_stop_hook", captured_by="imprint-hook",
+                        reason=event.get("reason") if isinstance(event.get("reason"), str) else None,
+                        contextual_evidence=contextual_evidence,
+                        extensions=extensions,
                     )
-                    if not acknowledgement_committed(root, path, envelope):
-                        raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
-                    receipt["canonical_status"] = "compiled"
-                    receipt["compile"] = counts
-                    receipt["compile_status"] = (
-                        "degraded" if counts["quarantined"] else "healthy"
-                    )
-                    if counts["quarantined"]:
-                        receipt["unrelated_quarantine_count"] = counts["quarantined"]
+                    path = write_envelope(root, envelope)
+                    receipt = {
+                        "hook_schema_version": "1.0.0", "status": "queued",
+                        "event_id": envelope["input_event_id"], "spool_file": path.name,
+                        "canonical_status": "spool_only",
+                    }
+                    if bool(config.get("compiler")):
+                        from .compiler import acknowledgement_committed
+                        counts = compile_spools(
+                            root, store, compiler_authorized=True,
+                        )
+                        if not acknowledgement_committed(root, path, envelope):
+                            raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
+                        receipt["canonical_status"] = "compiled"
+                        receipt["compile"] = counts
+                        receipt["compile_status"] = (
+                            "degraded" if counts["quarantined"] else "healthy"
+                        )
+                        if counts["quarantined"]:
+                            receipt["unrelated_quarantine_count"] = counts["quarantined"]
+                except BaseException:
+                    marks.release(session, turn_id)
+                    raise
                 if extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
                 _write_json(receipt)
