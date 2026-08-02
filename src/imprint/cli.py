@@ -174,8 +174,12 @@ def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
 
 def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
     """Recover final feedback from a huge transcript using a bounded tail read."""
-    from .capture.provenance import SYNTHETIC_ENTRY_REASON, classify_entry_provenance
-    from .capture.transcript import _read_native_transcript_snapshot
+    from .capture.provenance import (
+        NO_OPERATOR_MESSAGE_REASON,
+        SYNTHETIC_ENTRY_REASON,
+        classify_entry_provenance,
+    )
+    from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
     from .errors import ValidationError
 
     tail_limit = 2 * 1024 * 1024
@@ -191,8 +195,8 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         decoded_lines = tail.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
-    messages: list[tuple[str, str]] = []
-    synthetic_user_entry = False
+    messages: list[tuple[str, str, str | None]] = []
+    synthetic_basis: str | None = None
     for number, raw_line in enumerate(decoded_lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
@@ -210,25 +214,27 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
+        if item["type"] == "user":
+            verdict = classify_entry_provenance(item, text)
+            if not verdict.is_operator:
+                synthetic_basis = verdict.basis
+                continue
         if not text.strip():
             continue
-        if item["type"] == "user" and not classify_entry_provenance(item, text).is_operator:
-            synthetic_user_entry = True
-            continue
-        messages.append((item["type"], text))
-    user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
+        messages.append((item["type"], text, _entry_identity(item)))
+    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
     if not user_indexes:
-        # Synthetic-only tails are skipped, not raised: a raised Stop hook
-        # blocks the host session.
-        if synthetic_user_entry:
-            return {
-                "operator_text": None,
-                "prior_assistant_output": None,
-                "case_description": None,
-                "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
-                "skip_reason": SYNTHETIC_ENTRY_REASON,
-            }
-        raise ValidationError("bounded transcript tail contains no user message")
+        # A tail with no operator turn is skipped, not raised: a raised Stop
+        # hook exits 2 and blocks the host session.
+        return {
+            "operator_text": None,
+            "prior_assistant_output": None,
+            "case_description": None,
+            "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
+            "skip_reason": SYNTHETIC_ENTRY_REASON if synthetic_basis else NO_OPERATOR_MESSAGE_REASON,
+            "provenance_basis": synthetic_basis,
+            "source_entry_id": None,
+        }
     user_index = user_indexes[-1]
     operator_text = messages[user_index][1]
     prior_assistant = next(
@@ -246,6 +252,8 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
         "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
         "skip_reason": None,
+        "provenance_basis": None,
+        "source_entry_id": messages[user_index][2],
         "degradation": {
             "schema_version": "1.0.0",
             "payload": {
@@ -964,11 +972,17 @@ def main(argv: list[str] | None = None) -> int:
                     _read_native_transcript_snapshot,
                 )
                 from .capture.detector import detect_explicit_feedback
+                from .capture.marks import (
+                    ALREADY_CAPTURED_REASON,
+                    CapturedTurns,
+                    turn_identity,
+                )
                 operator_text = event.get("operator_text") or event.get("last_user_message")
                 prior_assistant = event.get("prior_assistant_output")
                 case_description = event.get("case_description")
                 contextual_evidence = []
                 extensions = {}
+                source_entry_id = None
                 if not operator_text and isinstance(event.get("transcript_path"), str):
                     snapshot = _read_native_transcript_snapshot(
                         event["transcript_path"], tail_limit=2 * 1024 * 1024,
@@ -982,14 +996,20 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         native = _parse_native_stop_snapshot(snapshot)
                     if native["skip_reason"]:
-                        _write_json({
+                        skipped = {
                             "hook_schema_version": "1.0.0", "status": "skipped",
                             "reason": native["skip_reason"],
-                        })
+                        }
+                        # Which tell dropped the entry, so marker-basis drops
+                        # stay distinguishable from declared-provenance ones.
+                        if native.get("provenance_basis"):
+                            skipped["provenance_basis"] = native["provenance_basis"]
+                        _write_json(skipped)
                         return 0
                     operator_text = native["operator_text"]
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
+                    source_entry_id = native.get("source_entry_id")
                     if isinstance(prior_assistant, str) and prior_assistant:
                         contextual_evidence = [{
                             "kind": "context", "content": prior_assistant,
@@ -1005,6 +1025,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not detection.is_feedback:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                    return 0
+                # Stop fires on every assistant turn, so the same trailing
+                # operator utterance is re-read until the operator speaks again.
+                # Claim the turn once per session or the Verdict is duplicated.
+                if not CapturedTurns(root).claim(
+                    session, turn_identity(source_entry_id, operator_text),
+                ):
+                    _write_json({
+                        "hook_schema_version": "1.0.0", "status": "skipped",
+                        "reason": ALREADY_CAPTURED_REASON,
+                    })
                     return 0
                 envelope = build_capture_envelope(
                     operator_id=_operator_urn(root), session_id=session,

@@ -110,7 +110,7 @@ def test_native_claude_stop_payload_mines_bounded_transcript(tmp_path):
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text("\n".join([
         json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I omitted one failed source."}]}}),
-        json.dumps({"type": "user", "message": {"role": "user", "content": "No, explicitly report every failed source because omission changes the decision."}}),
+        json.dumps({"type": "user", "promptSource": "typed", "message": {"role": "user", "content": "No, explicitly report every failed source because omission changes the decision."}}),
         json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "Understood."}}),
     ]) + "\n")
     result = _run(repo, config, "stop-capture", {
@@ -137,9 +137,12 @@ TASK_NOTIFICATION = (
     "<task-notification>Agent scout finished. No, the earlier answer was wrong."
     "</task-notification>"
 )
+INTERRUPTION_NOTICE = "[Request interrupted by user for tool use]"
 
 
-def _stop_capture_over_transcript(tmp_path, entries) -> tuple[subprocess.CompletedProcess[str], Path]:
+def _stop_capture_over_transcript(
+    tmp_path, entries, *, runs: int = 1,
+) -> tuple[list[subprocess.CompletedProcess[str]], Path]:
     repo = Path(__file__).parents[2]
     data = tmp_path / "data"
     config = tmp_path / "config.json"
@@ -148,16 +151,19 @@ def _stop_capture_over_transcript(tmp_path, entries) -> tuple[subprocess.Complet
     }))
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n")
-    result = _run(repo, config, "stop-capture", {
-        "hook_event_name": "Stop", "session_id": "provenance-session",
-        "transcript_path": str(transcript), "cwd": str(tmp_path),
-        "stop_hook_active": False,
-    })
-    return result, data
+    results = [
+        _run(repo, config, "stop-capture", {
+            "hook_event_name": "Stop", "session_id": "provenance-session",
+            "transcript_path": str(transcript), "cwd": str(tmp_path),
+            "stop_hook_active": False,
+        })
+        for _ in range(runs)
+    ]
+    return results, data
 
 
 def test_stop_capture_records_human_origin_feedback(tmp_path):
-    result, data = _stop_capture_over_transcript(tmp_path, [
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
         {"type": "assistant", "message": {"content": "I omitted one failed source."}},
         {
             "type": "user", "origin": {"kind": "human"},
@@ -171,20 +177,36 @@ def test_stop_capture_records_human_origin_feedback(tmp_path):
     assert "report every failed source" in spooled[0].read_text()
 
 
-@pytest.mark.parametrize("entry", [
+def test_stop_capture_records_prompt_source_feedback_without_origin(tmp_path):
+    # The CLI versions that record no origin still stamp submitted prompts.
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        {
+            "type": "user", "promptSource": "typed", "isSidechain": False,
+            "message": {"content": "No, report every failed source explicitly."},
+        },
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "queued"
+    assert len(sorted((data / "test" / "spool" / "primary").glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize(("entry", "basis"), [
     # Declared machine provenance decides alone, even on feedback-shaped text.
-    {"type": "user", "origin": {"kind": "task-notification"},
-     "message": {"content": TASK_NOTIFICATION}},
-    # Legacy sessions carry no origin, so the structural tells decide.
-    {"type": "user", "isSidechain": True,
-     "message": {"content": "No, that heading is wrong."}},
-    {"type": "user", "toolUseResult": {"stdout": "ok"},
-     "message": {"content": "No, that heading is wrong."}},
-    # Marker blacklist, consulted only when origin and structure are silent.
-    {"type": "user", "message": {"content": SKILL_BODY}},
+    ({"type": "user", "origin": {"kind": "task-notification"},
+      "message": {"content": TASK_NOTIFICATION}}, "origin"),
+    # Structural tells drop an entry that otherwise looks like a prompt.
+    ({"type": "user", "promptSource": "typed", "isSidechain": True,
+      "message": {"content": "No, that heading is wrong."}}, "structure"),
+    ({"type": "user", "promptSource": "typed", "toolUseResult": {"stdout": "ok"},
+      "message": {"content": "No, that heading is wrong."}}, "structure"),
+    # No origin and no promptSource: not a submitted prompt at all. The marker
+    # blacklist survives only to name why recognisable host text was dropped.
+    ({"type": "user", "message": {"content": SKILL_BODY}}, "marker"),
+    ({"type": "user", "message": {"content": INTERRUPTION_NOTICE}}, "structure"),
 ])
-def test_stop_capture_skips_synthetic_transcript_entries(tmp_path, entry):
-    result, data = _stop_capture_over_transcript(tmp_path, [
+def test_stop_capture_skips_synthetic_transcript_entries(tmp_path, entry, basis):
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
         {"type": "assistant", "message": {"content": "Working."}}, entry,
     ])
     # The skip path must stay exit 0: exit 2 from a Stop hook blocks the host.
@@ -192,14 +214,31 @@ def test_stop_capture_skips_synthetic_transcript_entries(tmp_path, entry):
     assert result.stderr == ""
     assert json.loads(result.stdout) == {
         "hook_schema_version": "1.0.0",
+        "provenance_basis": basis,
         "reason": "synthetic_transcript_entry",
         "status": "skipped",
     }
     assert not list((data / "test" / "spool").rglob("*.json"))
 
 
+def test_stop_capture_skips_a_tool_result_only_transcript_without_blocking_stop(tmp_path):
+    # Blank-text user entries once bypassed the gate and reached a raise that
+    # exits 2, which blocks the host session's stop.
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "Running the suite."}},
+        {"type": "user", "toolUseResult": {"stdout": "419 passed"},
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": "toolu_1", "content": "419 passed"},
+         ]}},
+    ])
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout)["status"] == "skipped"
+    assert not list((data / "test" / "spool").rglob("*.json"))
+
+
 def test_stop_capture_reaches_past_synthetic_entries_to_the_operator_turn(tmp_path):
-    result, data = _stop_capture_over_transcript(tmp_path, [
+    (result,), data = _stop_capture_over_transcript(tmp_path, [
         {"type": "assistant", "message": {"content": "I omitted one failed source."}},
         {
             "type": "user", "origin": {"kind": "human"},
@@ -217,6 +256,53 @@ def test_stop_capture_reaches_past_synthetic_entries_to_the_operator_turn(tmp_pa
     body = spooled[0].read_text()
     assert "report every failed source" in body
     assert "Base directory for this skill" not in body
+
+
+def test_repeated_stop_capture_over_an_unchanged_transcript_captures_once(tmp_path):
+    # Stop fires on every assistant turn, so the same operator utterance is
+    # re-read until the operator speaks again.
+    results, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        {
+            "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-1",
+            "message": {"content": "No, report every failed source explicitly."},
+        },
+    ], runs=3)
+    assert [result.returncode for result in results] == [0, 0, 0]
+    bodies = [json.loads(result.stdout) for result in results]
+    assert bodies[0]["status"] == "queued"
+    for body in bodies[1:]:
+        assert body == {
+            "hook_schema_version": "1.0.0",
+            "reason": "operator_turn_already_captured",
+            "status": "skipped",
+        }
+    assert len(sorted((data / "test" / "spool" / "primary").glob("*.json"))) == 1
+
+
+def test_stop_capture_captures_the_next_operator_turn_after_an_idempotent_skip(tmp_path):
+    first_turn = {
+        "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-1",
+        "message": {"content": "No, report every failed source explicitly."},
+    }
+    results, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        first_turn,
+    ], runs=2)
+    assert json.loads(results[0].stdout)["status"] == "queued"
+    assert json.loads(results[1].stdout)["reason"] == "operator_turn_already_captured"
+    results, data = _stop_capture_over_transcript(tmp_path, [
+        {"type": "assistant", "message": {"content": "I omitted one failed source."}},
+        first_turn,
+        {"type": "assistant", "message": {"content": "Reporting all sources."}},
+        {
+            "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-2",
+            "message": {"content": "No, keep the source labels on every row."},
+        },
+    ])
+    assert json.loads(results[0].stdout)["status"] == "queued"
+    spooled = sorted((data / "test" / "spool" / "primary").glob("*.json"))
+    assert len(spooled) == 2
 
 
 def test_hook_rejects_wrong_event_contract(tmp_path):
