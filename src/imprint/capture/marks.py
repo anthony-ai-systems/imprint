@@ -82,16 +82,19 @@ class CapturedTurns:
                 pass
         return removed
 
-    def release(self, session_id: str, turn_id: str) -> None:
+    def release(self, session_id: str, turn_id: str) -> bool:
         """Undo a claim whose capture never reached the spool.
 
         A durable mark over a failed capture would make the healed retry skip
         the turn as already captured, losing the operator's words for good.
+        Returns False when the mark survived, so the caller can report the
+        stuck claim instead of failing the capture a second time.
         """
         try:
             self._mark_path(session_id, turn_id).unlink(missing_ok=True)
         except OSError:
-            pass
+            return False
+        return True
 
     def claim(self, session_id: str, turn_id: str) -> bool:
         """Return True exactly once per session and turn."""

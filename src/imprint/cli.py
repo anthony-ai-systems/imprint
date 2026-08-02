@@ -494,6 +494,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Facts the failure receipt must carry out of a partially completed action.
+    error_details: dict[str, object] = {}
     try:
         config = load_config(args.config)
         root = resolved_operator_root(config)
@@ -1041,6 +1043,11 @@ def main(argv: list[str] | None = None) -> int:
                 # cannot both spool the turn, which makes an unwind mandatory:
                 # a mark left over a failed capture would make the healed retry
                 # skip the turn as already captured and lose it for good.
+                # Invariant: mark lifetime == envelope durability. The claim is
+                # given back only while nothing is spooled; once the envelope is
+                # durable the mark is kept even on failure, because the turn IS
+                # captured and a later compile heals from the surviving file.
+                envelope_path = None
                 try:
                     envelope = build_capture_envelope(
                         operator_id=_operator_urn(root), session_id=session,
@@ -1052,10 +1059,10 @@ def main(argv: list[str] | None = None) -> int:
                         contextual_evidence=contextual_evidence,
                         extensions=extensions,
                     )
-                    path = write_envelope(root, envelope)
+                    envelope_path = write_envelope(root, envelope)
                     receipt = {
                         "hook_schema_version": "1.0.0", "status": "queued",
-                        "event_id": envelope["input_event_id"], "spool_file": path.name,
+                        "event_id": envelope["input_event_id"], "spool_file": envelope_path.name,
                         "canonical_status": "spool_only",
                     }
                     if bool(config.get("compiler")):
@@ -1063,7 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
                         counts = compile_spools(
                             root, store, compiler_authorized=True,
                         )
-                        if not acknowledgement_committed(root, path, envelope):
+                        if not acknowledgement_committed(root, envelope_path, envelope):
                             raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
                         receipt["canonical_status"] = "compiled"
                         receipt["compile"] = counts
@@ -1073,7 +1080,10 @@ def main(argv: list[str] | None = None) -> int:
                         if counts["quarantined"]:
                             receipt["unrelated_quarantine_count"] = counts["quarantined"]
                 except BaseException:
-                    marks.release(session, turn_id)
+                    if envelope_path is None and not marks.release(session, turn_id):
+                        # A stuck mark silently costs the next retry of this turn,
+                        # so the failure receipt has to say so.
+                        error_details["mark_release_failed"] = True
                     raise
                 if extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
@@ -1086,7 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json({"hook_schema_version": "1.0.0", **result})
                 return 0 if result.get("status") == "healthy" else 2
     except (ImprintError, OSError, json.JSONDecodeError) as exc:
-        _write_json({"status": "error", "error": str(exc), "error_type": type(exc).__name__})
+        _write_json({
+            "status": "error", "error": str(exc), "error_type": type(exc).__name__,
+            **error_details,
+        })
         return 2
     parser.error("unsupported command")
     return 2

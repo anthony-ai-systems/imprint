@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from imprint import cli
+from imprint.capture.marks import CapturedTurns
 from imprint.store import ImprintStore
 
 
@@ -349,6 +352,98 @@ def test_a_failed_capture_releases_the_turn_mark_so_the_retry_captures(tmp_path)
     assert len(spooled) == 1
     assert "report every failed source" in spooled[0].read_text()
     assert len(list(marks.rglob("*.json"))) == 1
+
+
+def test_a_capture_that_fails_after_the_spool_write_keeps_the_turn_mark(tmp_path):
+    # The mirror of the release case. Once the envelope is durable the turn IS
+    # captured, so a failure downstream of the write must keep the claim: a
+    # released mark lets the retry spool the same turn under a fresh event id,
+    # and the compiler cannot dedupe two distinct events into one Verdict.
+    repo = Path(__file__).parents[2]
+    data = tmp_path / "data"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "data_root": str(data), "operator_slug": "test", "node_id": "primary",
+        "compiler": True,
+    }))
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-1",
+        "message": {"content": "No, report every failed source explicitly."},
+    }) + "\n")
+    event = {
+        "hook_event_name": "Stop", "session_id": "post-write-session",
+        "transcript_path": str(transcript), "cwd": str(tmp_path),
+        "stop_hook_active": False,
+    }
+    # Fail the compile step only, after the envelope is durably spooled: the
+    # acknowledgement directory cannot be created because a file holds its path.
+    blocked = data / "test" / "runtime" / "acknowledgements" / "primary"
+    blocked.parent.mkdir(parents=True)
+    blocked.write_text("not a directory")
+
+    failed = _run(repo, config, "stop-capture", event)
+    assert failed.returncode == 2
+    assert json.loads(failed.stdout)["status"] == "error"
+    spool = data / "test" / "spool" / "primary"
+    assert len(sorted(spool.glob("*.json"))) == 1, "the envelope is durable"
+    marks = data / "test" / "runtime" / "captured-turns"
+    assert len(list(marks.rglob("*.json"))) == 1, "a spooled turn must keep its claim"
+
+    blocked.unlink()
+    retried = _run(repo, config, "stop-capture", event)
+    assert retried.returncode == 0, retried.stderr
+    assert json.loads(retried.stdout) == {
+        "hook_schema_version": "1.0.0",
+        "reason": "operator_turn_already_captured",
+        "status": "skipped",
+    }
+    assert len(sorted(spool.glob("*.json"))) == 1, "the retry must not respool the turn"
+
+    healed = subprocess.run(
+        [sys.executable, "-m", "imprint.cli", "compile"], text=True, capture_output=True,
+        cwd=repo, env={**os.environ, "IMPRINT_CONFIG": str(config)}, check=False,
+    )
+    assert healed.returncode == 0, healed.stderr
+    assert json.loads(healed.stdout)["quarantined"] == 0
+    store = ImprintStore(data / "test" / "imprint.db")
+    verdicts = store.current_nodes(["Verdict"])
+    assert len(verdicts) == 1, "one operator turn is exactly one canonical Verdict"
+    assert store.integrity_check() == "ok"
+
+
+def test_a_release_that_could_not_free_the_mark_is_named_in_the_receipt(
+    tmp_path, monkeypatch, capsys,
+):
+    # A stuck mark silently costs the operator the retry of that turn, so it
+    # belongs in the failure receipt rather than only in the unwind's silence.
+    data = tmp_path / "data"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "data_root": str(data), "operator_slug": "test", "node_id": "primary",
+    }))
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "origin": {"kind": "human"}, "uuid": "entry-uuid-1",
+        "message": {"content": "No, report every failed source explicitly."},
+    }) + "\n")
+    blocked = data / "test" / "spool" / "primary"
+    blocked.parent.mkdir(parents=True)
+    blocked.write_text("not a directory")
+    monkeypatch.setattr(CapturedTurns, "release", lambda self, session, turn: False)
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps({
+        "hook_event_name": "Stop", "session_id": "stuck-mark-session",
+        "transcript_path": str(transcript), "cwd": str(tmp_path),
+        "stop_hook_active": False,
+    })))
+
+    code = cli.main(["--config", str(config), "hook", "stop-capture"])
+
+    # The exit semantics do not change: the capture failure is still the story.
+    assert code == 2
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "error"
+    assert receipt["mark_release_failed"] is True
 
 
 def test_stop_capture_hears_a_correction_behind_a_prepended_host_reminder(tmp_path):

@@ -19,10 +19,23 @@ def test_release_gives_the_claim_back_for_a_failed_capture(tmp_path):
     marks = CapturedTurns(tmp_path)
     turn = turn_identity(None, "No, keep the failed source.")
     assert marks.claim("session-a", turn) is True
-    marks.release("session-a", turn)
+    assert marks.release("session-a", turn) is True
     assert marks.claim("session-a", turn) is True
     # Releasing a turn that was never claimed is not an error.
-    marks.release("session-a", "never-claimed")
+    assert marks.release("session-a", "never-claimed") is True
+
+
+def test_a_release_that_cannot_remove_the_mark_reports_the_stuck_claim(tmp_path):
+    # Release still never raises into the hook, but a surviving mark blocks the
+    # turn's retry forever, so the caller has to be able to say so.
+    marks = CapturedTurns(tmp_path)
+    turn = turn_identity("entry-uuid-1", "No, keep the failed source.")
+    assert marks.claim("session-a", turn) is True
+    stuck = next(marks.root.rglob("*.json"))
+    stuck.unlink()
+    stuck.mkdir()
+    assert marks.release("session-a", turn) is False
+    assert stuck.exists()
 
 
 def test_claim_prunes_marks_past_retention_without_touching_recent_ones(tmp_path):
