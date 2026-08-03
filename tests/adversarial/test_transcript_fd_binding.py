@@ -24,6 +24,7 @@ def _write_transcript(
         + "\n"
         + json.dumps({
             "type": "user",
+            "promptSource": "typed",
             "message": {"content": operator_text},
         })
         + "\n"

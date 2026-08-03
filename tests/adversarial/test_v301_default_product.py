@@ -109,7 +109,10 @@ def test_huge_transcript_preserves_feedback_with_bounded_hashed_evidence(tmp_pat
         "type": "assistant", "message": {"role": "assistant", "content": "context " * 20000},
     })
     feedback = "No, keep the correction even when the transcript is huge because losing it corrupts the record."
-    user = json.dumps({"type": "user", "message": {"role": "user", "content": feedback}})
+    user = json.dumps({
+        "type": "user", "promptSource": "typed",
+        "message": {"role": "user", "content": feedback},
+    })
     tail_payload = ("\n" + bounded_context + "\n" + user + "\n").encode()
     with transcript.open("wb") as handle:
         handle.seek((1024 * 1024 * 1024) - len(tail_payload))

@@ -174,7 +174,12 @@ def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
 
 def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
     """Recover final feedback from a huge transcript using a bounded tail read."""
-    from .capture.transcript import _read_native_transcript_snapshot
+    from .capture.provenance import (
+        NO_OPERATOR_MESSAGE_REASON,
+        SYNTHETIC_ENTRY_REASON,
+        classify_entry_provenance,
+    )
+    from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
     from .errors import ValidationError
 
     tail_limit = 2 * 1024 * 1024
@@ -190,7 +195,8 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         decoded_lines = tail.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
-    messages: list[tuple[str, str]] = []
+    messages: list[tuple[str, str, str | None]] = []
+    synthetic_basis: str | None = None
     for number, raw_line in enumerate(decoded_lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
@@ -208,11 +214,27 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
-        if text.strip():
-            messages.append((item["type"], text))
-    user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
+        if item["type"] == "user":
+            verdict = classify_entry_provenance(item, text)
+            if not verdict.is_operator:
+                synthetic_basis = verdict.basis
+                continue
+        if not text.strip():
+            continue
+        messages.append((item["type"], text, _entry_identity(item)))
+    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
     if not user_indexes:
-        raise ValidationError("bounded transcript tail contains no user message")
+        # A tail with no operator turn is skipped, not raised: a raised Stop
+        # hook exits 2 and blocks the host session.
+        return {
+            "operator_text": None,
+            "prior_assistant_output": None,
+            "case_description": None,
+            "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
+            "skip_reason": SYNTHETIC_ENTRY_REASON if synthetic_basis else NO_OPERATOR_MESSAGE_REASON,
+            "provenance_basis": synthetic_basis,
+            "source_entry_id": None,
+        }
     user_index = user_indexes[-1]
     operator_text = messages[user_index][1]
     prior_assistant = next(
@@ -229,6 +251,9 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         "prior_assistant_output": prior_assistant,
         "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
         "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
+        "skip_reason": None,
+        "provenance_basis": None,
+        "source_entry_id": messages[user_index][2],
         "degradation": {
             "schema_version": "1.0.0",
             "payload": {
@@ -469,6 +494,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Facts the failure receipt must carry out of a partially completed action.
+    error_details: dict[str, object] = {}
     try:
         config = load_config(args.config)
         root = resolved_operator_root(config)
@@ -947,11 +974,17 @@ def main(argv: list[str] | None = None) -> int:
                     _read_native_transcript_snapshot,
                 )
                 from .capture.detector import detect_explicit_feedback
+                from .capture.marks import (
+                    ALREADY_CAPTURED_REASON,
+                    CapturedTurns,
+                    turn_identity,
+                )
                 operator_text = event.get("operator_text") or event.get("last_user_message")
                 prior_assistant = event.get("prior_assistant_output")
                 case_description = event.get("case_description")
                 contextual_evidence = []
                 extensions = {}
+                source_entry_id = None
                 if not operator_text and isinstance(event.get("transcript_path"), str):
                     snapshot = _read_native_transcript_snapshot(
                         event["transcript_path"], tail_limit=2 * 1024 * 1024,
@@ -960,12 +993,25 @@ def main(argv: list[str] | None = None) -> int:
                         native = _parse_large_native_transcript(
                             event["transcript_path"], snapshot=snapshot,
                         )
-                        extensions["org.imprint.transcript"] = native["degradation"]
+                        if not native["skip_reason"]:
+                            extensions["org.imprint.transcript"] = native["degradation"]
                     else:
                         native = _parse_native_stop_snapshot(snapshot)
+                    if native["skip_reason"]:
+                        skipped = {
+                            "hook_schema_version": "1.0.0", "status": "skipped",
+                            "reason": native["skip_reason"],
+                        }
+                        # Which tell dropped the entry, so marker-basis drops
+                        # stay distinguishable from declared-provenance ones.
+                        if native.get("provenance_basis"):
+                            skipped["provenance_basis"] = native["provenance_basis"]
+                        _write_json(skipped)
+                        return 0
                     operator_text = native["operator_text"]
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
+                    source_entry_id = native.get("source_entry_id")
                     if isinstance(prior_assistant, str) and prior_assistant:
                         contextual_evidence = [{
                             "kind": "context", "content": prior_assistant,
@@ -982,36 +1028,63 @@ def main(argv: list[str] | None = None) -> int:
                 if not detection.is_feedback:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
                     return 0
-                envelope = build_capture_envelope(
-                    operator_id=_operator_urn(root), session_id=session,
-                    node_id=str(config.get("node_id", "primary")),
-                    case_description=str(case_description or "Explicit operator feedback witnessed by explicit hook input"),
-                    raw_operator_text=operator_text, call_type=detection.call_type,
-                    capture_mechanism="claude_code_stop_hook", captured_by="imprint-hook",
-                    reason=event.get("reason") if isinstance(event.get("reason"), str) else None,
-                    contextual_evidence=contextual_evidence,
-                    extensions=extensions,
-                )
-                path = write_envelope(root, envelope)
-                receipt = {
-                    "hook_schema_version": "1.0.0", "status": "queued",
-                    "event_id": envelope["input_event_id"], "spool_file": path.name,
-                    "canonical_status": "spool_only",
-                }
-                if bool(config.get("compiler")):
-                    from .compiler import acknowledgement_committed
-                    counts = compile_spools(
-                        root, store, compiler_authorized=True,
+                # Stop fires on every assistant turn, so the same trailing
+                # operator utterance is re-read until the operator speaks again.
+                # Claim the turn once per session or the Verdict is duplicated.
+                marks = CapturedTurns(root)
+                turn_id = turn_identity(source_entry_id, operator_text)
+                if not marks.claim(session, turn_id):
+                    _write_json({
+                        "hook_schema_version": "1.0.0", "status": "skipped",
+                        "reason": ALREADY_CAPTURED_REASON,
+                    })
+                    return 0
+                # The claim is taken before the write so two concurrent Stops
+                # cannot both spool the turn, which makes an unwind mandatory:
+                # a mark left over a failed capture would make the healed retry
+                # skip the turn as already captured and lose it for good.
+                # Invariant: mark lifetime == envelope durability. The claim is
+                # given back only while nothing is spooled; once the envelope is
+                # durable the mark is kept even on failure, because the turn IS
+                # captured and a later compile heals from the surviving file.
+                envelope_path = None
+                try:
+                    envelope = build_capture_envelope(
+                        operator_id=_operator_urn(root), session_id=session,
+                        node_id=str(config.get("node_id", "primary")),
+                        case_description=str(case_description or "Explicit operator feedback witnessed by explicit hook input"),
+                        raw_operator_text=operator_text, call_type=detection.call_type,
+                        capture_mechanism="claude_code_stop_hook", captured_by="imprint-hook",
+                        reason=event.get("reason") if isinstance(event.get("reason"), str) else None,
+                        contextual_evidence=contextual_evidence,
+                        extensions=extensions,
                     )
-                    if not acknowledgement_committed(root, path, envelope):
-                        raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
-                    receipt["canonical_status"] = "compiled"
-                    receipt["compile"] = counts
-                    receipt["compile_status"] = (
-                        "degraded" if counts["quarantined"] else "healthy"
-                    )
-                    if counts["quarantined"]:
-                        receipt["unrelated_quarantine_count"] = counts["quarantined"]
+                    envelope_path = write_envelope(root, envelope)
+                    receipt = {
+                        "hook_schema_version": "1.0.0", "status": "queued",
+                        "event_id": envelope["input_event_id"], "spool_file": envelope_path.name,
+                        "canonical_status": "spool_only",
+                    }
+                    if bool(config.get("compiler")):
+                        from .compiler import acknowledgement_committed
+                        counts = compile_spools(
+                            root, store, compiler_authorized=True,
+                        )
+                        if not acknowledgement_committed(root, envelope_path, envelope):
+                            raise ImprintError("Stop capture lacks exact durable canonical acknowledgement")
+                        receipt["canonical_status"] = "compiled"
+                        receipt["compile"] = counts
+                        receipt["compile_status"] = (
+                            "degraded" if counts["quarantined"] else "healthy"
+                        )
+                        if counts["quarantined"]:
+                            receipt["unrelated_quarantine_count"] = counts["quarantined"]
+                except BaseException:
+                    if envelope_path is None and not marks.release(session, turn_id):
+                        # A stuck mark silently costs the next retry of this turn,
+                        # so the failure receipt has to say so.
+                        error_details["mark_release_failed"] = True
+                    raise
                 if extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
                 _write_json(receipt)
@@ -1023,7 +1096,10 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json({"hook_schema_version": "1.0.0", **result})
                 return 0 if result.get("status") == "healthy" else 2
     except (ImprintError, OSError, json.JSONDecodeError) as exc:
-        _write_json({"status": "error", "error": str(exc), "error_type": type(exc).__name__})
+        _write_json({
+            "status": "error", "error": str(exc), "error_type": type(exc).__name__,
+            **error_details,
+        })
         return 2
     parser.error("unsupported command")
     return 2

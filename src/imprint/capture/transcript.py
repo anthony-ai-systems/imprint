@@ -12,6 +12,12 @@ from typing import Any
 
 from imprint.errors import ValidationError
 
+from .provenance import (
+    NO_OPERATOR_MESSAGE_REASON,
+    SYNTHETIC_ENTRY_REASON,
+    classify_entry_provenance,
+)
+
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 
 
@@ -128,8 +134,14 @@ def _message_text(value: Any) -> str:
     return ""
 
 
+def _entry_identity(item: dict[str, Any]) -> str | None:
+    value = item.get("uuid") or item.get("id")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str | None]:
-    messages: list[tuple[str, str]] = []
+    messages: list[tuple[str, str, str | None]] = []
+    synthetic_basis: str | None = None
     try:
         lines = snapshot.data.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
@@ -149,23 +161,42 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
-        if text.strip():
-            messages.append((item["type"], text))
-    user_indexes = [index for index, (kind, _) in enumerate(messages) if kind == "user"]
+        if item["type"] == "user":
+            verdict = classify_entry_provenance(item, text)
+            if not verdict.is_operator:
+                synthetic_basis = verdict.basis
+                continue
+        if not text.strip():
+            continue
+        messages.append((item["type"], text, _entry_identity(item)))
+    locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
+    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
     if not user_indexes:
-        raise ValidationError("transcript contains no user message")
+        # No operator turn is a skip, never an error: raising here exits 2 and
+        # blocks the host session's stop.
+        return {
+            "operator_text": None,
+            "prior_assistant_output": None,
+            "case_description": None,
+            "source_locator": locator,
+            "skip_reason": SYNTHETIC_ENTRY_REASON if synthetic_basis else NO_OPERATOR_MESSAGE_REASON,
+            "provenance_basis": synthetic_basis,
+            "source_entry_id": None,
+        }
     user_index = user_indexes[-1]
     operator_text = messages[user_index][1]
     prior_assistant = next(
         (messages[index][1] for index in range(user_index - 1, -1, -1) if messages[index][0] == "assistant"),
         None,
     )
-    locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
     return {
         "operator_text": operator_text,
         "prior_assistant_output": prior_assistant,
         "case_description": "Explicit operator feedback witnessed in the Claude Code transcript",
         "source_locator": locator,
+        "skip_reason": None,
+        "provenance_basis": None,
+        "source_entry_id": messages[user_index][2],
     }
 
 

@@ -27,6 +27,19 @@ _RULES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = (
     ("correction", "correct", "indirect", re.compile(r"\b(?:not quite|this feels (?:too|like)|it would be better|what i (?:meant|was looking for)|this isn't landing|this is not landing)\b", re.I)),
 )
 _POLITE_EDIT = re.compile(r"\b(?:please|could you|would you)\b.*\b(?:change|use|make|keep|remove|restore|avoid|don't)\b", re.I)
+# The host prepends its own blocks to a genuinely submitted prompt, which pushes
+# the operator's first sentence off the start of the text and out of reach of
+# the sentence-anchored correction rule. Only *leading* blocks are removed: a
+# marker later in the text is the operator quoting or discussing one.
+_LEADING_HOST_BLOCK = re.compile(
+    r"\A\s*(?:<(system-reminder|task-notification)\b[^>]*>.*?</\1>\s*)+",
+    re.I | re.S,
+)
+
+
+def strip_leading_host_blocks(text: str) -> str:
+    """Return the operator's own words with prepended host blocks removed."""
+    return _LEADING_HOST_BLOCK.sub("", text)
 
 
 def _normalize(text: str) -> str:
@@ -42,13 +55,16 @@ def detect_explicit_feedback(
     """Detect feedback forms without treating silence or ordinary questions as calls."""
     if not isinstance(operator_text, str) or not operator_text.strip():
         return FeedbackDetection(False, "non_feedback", None, None, 1.0)
+    spoken = strip_leading_host_blocks(operator_text)
+    if not spoken.strip():
+        return FeedbackDetection(False, "non_feedback", None, None, 1.0)
     for route, call_type, marker, pattern in _RULES:
-        if pattern.search(operator_text):
+        if pattern.search(spoken):
             return FeedbackDetection(True, route, call_type, marker, 0.99)
-    if prior_assistant_output and _POLITE_EDIT.search(operator_text):
+    if prior_assistant_output and _POLITE_EDIT.search(spoken):
         return FeedbackDetection(True, "correction", "correct", "polite", 0.96)
     if prior_assistant_output and prior_operator_text:
-        current, prior = _normalize(operator_text), _normalize(prior_operator_text)
+        current, prior = _normalize(spoken), _normalize(prior_operator_text)
         if current and prior:
             ratio = SequenceMatcher(None, prior, current).ratio()
             shared = len(set(current.split()) & set(prior.split())) / max(1, len(set(prior.split())))
