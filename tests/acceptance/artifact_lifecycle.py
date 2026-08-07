@@ -170,7 +170,9 @@ def main() -> int:
     transcript = args.data_root / "native-transcript.jsonl"
     transcript.write_text("\n".join([
         json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "I omitted the failed source."}}),
-        json.dumps({"type": "user", "message": {"role": "user", "content": "No, report the failed source because it changes the decision."}}),
+        # promptSource is the host's positive tell that an entry is a submitted
+        # prompt; without it the provenance gate reads the entry as synthetic.
+        json.dumps({"type": "user", "promptSource": "typed", "message": {"role": "user", "content": "No, report the failed source because it changes the decision."}}),
         json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "Corrected."}}),
     ]) + "\n")
     env = dict(os.environ, IMPRINT_CONFIG=str(hook_config))
