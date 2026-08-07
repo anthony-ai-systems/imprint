@@ -35,6 +35,17 @@ def _latest_age(paths: list[Path], now: float) -> int:
     return min(known) if known else -1
 
 
+def _hook_failure_files(root: Path) -> list[Path]:
+    """List persisted hook-failure diagnostics without reading their contents."""
+    directory = root / "logs" / "hook-failures"
+    if not directory.is_dir() or directory.is_symlink():
+        return []
+    return [
+        path for path in directory.glob("*.json")
+        if path.is_file() and not path.is_symlink()
+    ]
+
+
 def _temporary_residue(root: Path) -> list[Path]:
     if not root.exists():
         return []
@@ -204,6 +215,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     from imprint.permissions import unsafe_private_permissions
     unsafe_permissions = unsafe_private_permissions(root)
     temporary_residue = _temporary_residue(root)
+    hook_failure_files = _hook_failure_files(root)
     report = evaluate_health(HealthInputs(
         compiler_count=1 if config.get("compiler") else 0,
         database_ok=database_ok,
@@ -216,6 +228,8 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         oldest_unacknowledged_spool_age_seconds=oldest_unacknowledged_spool_age,
         spool_retention_days=spool_retention_days,
         quarantine_count=len(list((root / "quarantine").glob("*.json"))) if (root / "quarantine").exists() else 0,
+        hook_failure_count=len(hook_failure_files),
+        hook_failure_newest_age_seconds=_latest_age(hook_failure_files, now),
         permissions_ok=not unsafe_permissions,
         unsafe_permission_count=len(unsafe_permissions),
         selected_bytes=selected_bytes,

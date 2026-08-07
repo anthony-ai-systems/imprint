@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import os
 
 import imprint.health as health_module
 from imprint.constants import STORE_SCHEMA_VERSION
@@ -46,6 +47,64 @@ def test_health_does_not_claim_projection_or_backup_that_do_not_exist(tmp_path):
     report = health_report(root, store, _config(root))
     assert report["metrics"]["projection_snapshot_present"] is False
     assert report["metrics"]["backup_verified"] is False
+
+
+def test_hook_failure_backlog_degrades_health_with_content_free_evidence(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    failures = root / "logs" / "hook-failures"
+    failures.mkdir(parents=True)
+    for index in range(3):
+        path = failures / f"2026080{index}T000000.000000Z-{index:032x}.json"
+        path.write_text(json.dumps({"stderr": "operator secret sentence"}), encoding="utf-8")
+        aged = path.stat().st_mtime - 86400 * (index + 1)
+        os.utime(path, (aged, aged))
+
+    report = health_report(root, store, _config(root))
+
+    assert report["status"] == "degraded"
+    assert "hook_failures_present" in report["degraded_reasons"]
+    assert report["metrics"]["hook_failure_count"] == 3
+    assert report["metrics"]["hook_failure_newest_age_seconds"] >= 86000
+    assert report["metrics"]["hook_failure_evidence"] == "operator_logs_hook_failures_file_scan"
+    encoded = json.dumps(report)
+    assert "operator secret sentence" not in encoded
+    assert "hook-failures" not in encoded
+
+
+def test_absent_hook_failure_directory_reports_zero_without_degrading(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+
+    report = health_report(root, store, _config(root))
+
+    assert not (root / "logs" / "hook-failures").exists()
+    assert report["metrics"]["hook_failure_count"] == 0
+    assert report["metrics"]["hook_failure_newest_age_seconds"] == -1
+    assert "hook_failures_present" not in report["degraded_reasons"]
+
+
+def test_hook_failure_scan_ignores_symlinks_and_non_json_entries(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    failures = root / "logs" / "hook-failures"
+    failures.mkdir(parents=True)
+    real = failures / "20260803T000000.000000Z-real.json"
+    real.write_text("{}\n", encoding="utf-8")
+    (failures / "notes.txt").write_text("ignored\n", encoding="utf-8")
+    (failures / "nested.json").mkdir()
+    (failures / "linked.json").symlink_to(real)
+
+    report = health_report(root, store, _config(root))
+
+    assert report["metrics"]["hook_failure_count"] == 1
+    assert "hook_failures_present" in report["degraded_reasons"]
 
 
 def test_sidecar_contention_is_busy_and_does_not_degrade_database_or_migrations(

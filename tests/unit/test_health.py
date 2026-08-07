@@ -28,6 +28,7 @@ def healthy(**changes):
         ({"stale_lock_count": 1}, "stale_lock_present"),
         ({"abandoned_temp_count": 1}, "abandoned_temp_present"),
         ({"backup_verified": False}, "backup_unverified"),
+        ({"hook_failure_count": 1}, "hook_failures_present"),
         ({"experimental_enabled": True, "experimental_state": "stalled"}, "experimental_loop_stalled"),
     ],
 )
@@ -43,6 +44,23 @@ def test_recent_activity_is_not_a_health_input_and_output_is_content_free():
     assert "operator secret sentence" not in encoded
     assert set(report.as_dict()) == {"health_schema_version", "status", "degraded_reasons", "metrics"}
     assert "compiler_missing" in report.degraded_reasons
+
+
+def test_hook_failure_backlog_is_visible_as_counts_and_ages_only():
+    report = healthy(hook_failure_count=117, hook_failure_newest_age_seconds=345600)
+    assert report.status == "red"
+    assert "hook_failures_present" in report.degraded_reasons
+    assert report.metrics["hook_failure_count"] == 117
+    assert report.metrics["hook_failure_newest_age_seconds"] == 345600
+    assert report.metrics["hook_failure_evidence"] == "operator_logs_hook_failures_file_scan"
+
+
+def test_absent_hook_failure_backlog_is_healthy_and_reports_unknown_age():
+    report = healthy()
+    assert report.status == "green"
+    assert "hook_failures_present" not in report.degraded_reasons
+    assert report.metrics["hook_failure_count"] == 0
+    assert report.metrics["hook_failure_newest_age_seconds"] == -1
 
 
 def test_explicit_higher_budget_is_visible_and_allowed():

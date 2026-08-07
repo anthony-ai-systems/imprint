@@ -11,7 +11,7 @@ from imprint.capture.transcript import parse_native_stop_transcript
 from imprint.cli import _parse_large_native_transcript
 
 SKILL_BODY = (
-    "Base directory for this skill: /Users/operator/.claude/skills/capture\n"
+    "Base directory for this skill: /home/operator/.claude/skills/capture\n"
     "Read the SKILL.md file before doing anything else in this session."
 )
 TASK_NOTIFICATION = (

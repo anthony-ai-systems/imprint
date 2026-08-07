@@ -23,6 +23,8 @@ class HealthInputs:
     spool_stale_after_seconds: int = 3600
     spool_retention_days: int = 30
     quarantine_count: int = 0
+    hook_failure_count: int = 0
+    hook_failure_newest_age_seconds: int = -1
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
     selected_bytes: int = 0
@@ -105,6 +107,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("spool_stale")
     if values.quarantine_count > 0:
         reasons.append("quarantine_present")
+    if values.hook_failure_count > 0:
+        reasons.append("hook_failures_present")
     if not values.permissions_ok or values.unsafe_permission_count > 0:
         reasons.append("unsafe_permissions")
     if values.selected_bytes > values.retrieval_budget_bytes:
@@ -161,6 +165,9 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "omitted_bytes": max(0, values.omitted_bytes),
         "retrieval_omitted_count": max(0, values.retrieval_omitted_count),
         "quarantine_count": max(0, values.quarantine_count),
+        "hook_failure_count": max(0, values.hook_failure_count),
+        "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
+        "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "permissions_ok": values.permissions_ok,
         "unsafe_permission_count": max(0, values.unsafe_permission_count),
         "permissions_evidence": "posix_mode_scan_or_platform_acl_contract",

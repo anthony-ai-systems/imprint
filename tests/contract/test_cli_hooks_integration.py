@@ -133,7 +133,7 @@ def test_native_claude_stop_payload_mines_bounded_transcript(tmp_path):
 
 
 SKILL_BODY = (
-    "Base directory for this skill: /Users/operator/.claude/skills/capture\n"
+    "Base directory for this skill: /home/operator/.claude/skills/capture\n"
     "Read SKILL.md before doing anything else. No, do not skip this step."
 )
 TASK_NOTIFICATION = (
