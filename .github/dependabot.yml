@@ -1,0 +1,18 @@
+version: 2
+
+updates:
+  # Python package (setuptools / pyproject.toml at the repo root).
+  # Runtime dependencies are empty today; this covers the dev and
+  # release optional-dependency groups and any future runtime deps.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # GitHub Actions used by .github/workflows/ci.yml.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
