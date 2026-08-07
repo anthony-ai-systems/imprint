@@ -65,7 +65,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [blacksmith-4vcpu-ubuntu-2404, macos-latest]
+        # ubuntu-latest (not Blacksmith): the Empty-HOME acceptance test depends on
+        # stock login-shell profile sourcing, which the Blacksmith image alters.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
