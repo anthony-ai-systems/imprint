@@ -11,6 +11,7 @@ import secrets
 import signal
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -29,6 +30,26 @@ def _store(root: Path) -> ImprintStore:
 def _write_json(value) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False))
     sys.stdout.flush()
+
+
+def _prune_hook_failures(root: Path, *, retention_days: int) -> int:
+    """Delete hook-failure diagnostics past retention; never read their contents."""
+    directory = root / "logs" / "hook-failures"
+    if retention_days < 1 or not directory.is_dir() or directory.is_symlink():
+        return 0
+    threshold = time.time() - retention_days * 86400
+    removed = 0
+    for path in sorted(directory.glob("*.json")):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_mtime >= threshold:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
@@ -542,7 +563,12 @@ def main(argv: list[str] | None = None) -> int:
                 root, source_node_id=str(config.get("node_id", "primary")),
                 retention_days=days,
             )
-            _write_json({"status": "ok" if result["invalid"] == 0 else "degraded", **result})
+            hook_failures_pruned = _prune_hook_failures(root, retention_days=days)
+            _write_json({
+                "status": "ok" if result["invalid"] == 0 else "degraded",
+                **result,
+                "hook_failures_pruned": hook_failures_pruned,
+            })
             return 0 if result["invalid"] == 0 else 2
         if args.command == "derive":
             from .derive import ProposalSpoolWriter, compile_pending_proposals

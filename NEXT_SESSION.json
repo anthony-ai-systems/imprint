@@ -1,0 +1,8 @@
+{
+  "schema": "next-session/v2",
+  "session_date": "2026-08-07",
+  "project": "imprint",
+  "state": "Live capture system (Rich-lineage fork, org home anthony-ai-systems). WAL saga closed 2026-08-01. Open: capture-filter PR #13 gates the kill/continue window (closes 2026-08-31); R2 retrieval-budget ruling pending. Runtime = imprint-local venv install; repo changes reach the runtime only via reinstall with --operator anthony.",
+  "launch_one_liner": "Check open PRs and the R2/kill-window ruling state before building.",
+  "next_action_for_agent": "Never touch ~/.local/share/imprint data roots from a repo session; runtime reinstalls require --operator anthony. This file also clears the fully-aware next_session boot probe."
+}
