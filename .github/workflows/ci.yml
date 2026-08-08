@@ -120,4 +120,6 @@ jobs:
         run: python tools/release/extract_safe.py "candidate/imprint-${env:IMPRINT_VERSION}.zip" extracted
       - name: Genuine Windows empty-profile acceptance
         shell: pwsh
-        run: ./extracted/imprint-${env:IMPRINT_VERSION}/tests/acceptance/test_install_windows.ps1
+        # Call operator + quoted path: PowerShell does not expand variables in
+        # a bare command-name position.
+        run: '& "./extracted/imprint-${env:IMPRINT_VERSION}/tests/acceptance/test_install_windows.ps1"'
