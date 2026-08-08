@@ -148,11 +148,13 @@ class ImprintStore:
     ) -> tuple[int, int]:
         """Inspect an existing database, healing stale WAL residue in passing.
 
-        The immutable read below is only sound when no writer holds the store,
-        so WAL/SHM sidecars must be gone before it runs. Sidecars left by a
-        hard-killed writer used to brick every subsequent open until a manual
-        ``store recover``; now they are drained in place first, and only a
-        store genuinely held by a live connection keeps refusing.
+        Sidecars trichotomize: absent (quiescent store -- validate through an
+        ``immutable=1`` read, which is only sound with no writer), drained in
+        place (a hard-killed writer's replayable residue), or persistent.
+        Persistent sidecars split again: a store held by a live connection is
+        ordinary WAL concurrency -- readers and writers coexist by design, so
+        validation proceeds through a plain read-only handle -- while residue
+        whose bytes SQLite cannot replay keeps refusing into ``store recover``.
         """
         try:
             resolved = self.path.resolve(strict=True)
@@ -162,29 +164,65 @@ class ImprintStore:
             sidecars = tuple(
                 Path(str(resolved) + suffix) for suffix in ("-wal", "-shm")
             )
+            state = "clean"
             if any(path.exists() for path in sidecars):
-                if not self._settle_sidecars(resolved, sidecars):
+                state = self._settle_sidecars(resolved, sidecars)
+                if state == "unreplayable":
                     raise ValidationError(
                         "store has WAL/SHM sidecars; close the active writer or recover the store before use"
                     )
-            uri = f"{resolved.as_uri()}?mode=ro&immutable=1"
-            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            if state == "held":
+                try:
+                    return self._probe_compatibility(
+                        resolved, before, immutable=False,
+                        store_versions=store_versions, ontology_versions=ontology_versions,
+                    )
+                except sqlite3.OperationalError:
+                    if any(path.exists() for path in sidecars):
+                        raise
+                    # The holder closed and checkpointed mid-probe; the
+                    # quiescent path below is sound again.
+                    state = "clean"
             try:
-                self._require_connection_compatible(
-                    conn, store_versions=store_versions,
-                    ontology_versions=ontology_versions,
+                return self._probe_compatibility(
+                    resolved, before, immutable=True,
+                    store_versions=store_versions, ontology_versions=ontology_versions,
                 )
-            finally:
-                conn.close()
-            after = resolved.stat(follow_symlinks=False)
-            identity = (before.st_dev, before.st_ino)
-            if identity != (after.st_dev, after.st_ino):
-                raise ValidationError("store path changed during compatibility validation")
-            return identity
+            except (ValidationError, sqlite3.DatabaseError):
+                # A writer that opened mid-probe can garble an immutable read;
+                # sidecars appearing are the evidence. Deterministic verdicts
+                # on a quiescent store re-raise identically on the WAL-aware
+                # retry, so nothing genuine is masked.
+                if not any(path.exists() for path in sidecars):
+                    raise
+                return self._probe_compatibility(
+                    resolved, before, immutable=False,
+                    store_versions=store_versions, ontology_versions=ontology_versions,
+                )
         except ValidationError:
             raise
         except (OSError, sqlite3.DatabaseError) as exc:
             raise ValidationError("existing store is corrupt or unreadable") from exc
+
+    def _probe_compatibility(
+        self, resolved: Path, before, *, immutable: bool,
+        store_versions: frozenset[str],
+        ontology_versions: frozenset[str] | None,
+    ) -> tuple[int, int]:
+        query = "mode=ro&immutable=1" if immutable else "mode=ro"
+        conn = sqlite3.connect(f"{resolved.as_uri()}?{query}", uri=True, timeout=5)
+        try:
+            self._require_connection_compatible(
+                conn, store_versions=store_versions,
+                ontology_versions=ontology_versions,
+            )
+        finally:
+            conn.close()
+        after = resolved.stat(follow_symlinks=False)
+        identity = (before.st_dev, before.st_ino)
+        if identity != (after.st_dev, after.st_ino):
+            raise ValidationError("store path changed during compatibility validation")
+        return identity
 
     @contextmanager
     def connect(self):
@@ -219,16 +257,29 @@ class ImprintStore:
         finally:
             conn.close()
             if not handle_validated:
-                for sidecar in (
-                    Path(str(resolved) + "-wal"), Path(str(resolved) + "-shm"),
-                    Path(str(resolved) + "-journal"),
-                ):
-                    sidecar.unlink(missing_ok=True)
+                self._drain_failed_open_residue(resolved)
             if self.path.exists():
                 current_path = self.path.resolve(strict=True)
                 current = current_path.stat(follow_symlinks=False)
                 if identity == (current.st_dev, current.st_ino):
                     _secure_sqlite_state(current_path)
+
+    def _drain_failed_open_residue(self, resolved: Path) -> None:
+        """Best-effort cleanup after a failed open, safe under concurrency.
+
+        A concurrent session's live writer may own the sidecars a failed open
+        observes, so they are never unlinked blindly -- the drain removes them
+        only when SQLite grants exclusivity, and a held or unreadable store is
+        simply left for the next opener to settle.
+        """
+        try:
+            if any(
+                Path(str(resolved) + suffix).exists()
+                for suffix in ("-wal", "-shm", "-journal")
+            ):
+                self._drain_stale_sidecars(resolved)
+        except (OSError, sqlite3.Error, ValidationError):
+            pass
 
     @contextmanager
     def _migration_connection(
@@ -271,8 +322,7 @@ class ImprintStore:
         finally:
             conn.close()
             if not handle_validated:
-                for suffix in ("-wal", "-shm", "-journal"):
-                    Path(str(resolved) + suffix).unlink(missing_ok=True)
+                self._drain_failed_open_residue(resolved)
             if self.path.exists():
                 current_path = self.path.resolve(strict=True)
                 current = current_path.stat(follow_symlinks=False)
@@ -287,34 +337,37 @@ class ImprintStore:
     _SIDECAR_SETTLE_ATTEMPTS = 10
     _SIDECAR_SETTLE_INTERVAL_SECONDS = 0.15
 
-    def _settle_sidecars(self, resolved: Path, sidecars: tuple[Path, ...]) -> bool:
-        """Wait out a briefly-held store before refusing on its sidecars.
+    def _settle_sidecars(self, resolved: Path, sidecars: tuple[Path, ...]) -> str:
+        """Classify persistent sidecars: ``clean``, ``held``, or ``unreplayable``.
 
-        Hook writers hold the store for milliseconds; refusing on first sight
-        of their sidecars fails a concurrent open spuriously. Retry the drain
-        across a bounded window -- a writer that closes cleanly removes its own
-        sidecars, and stale residue drains -- and refuse only a store held
-        longer than the window.
+        A store held by a live connection is reported immediately -- on a busy
+        machine dozens of sessions overlap constantly, and session-start must
+        neither stall on nor fail against healthy WAL concurrency. Residue
+        whose bytes SQLite cannot replay is retried across a bounded window
+        (a writer mid-header-write is transient) and only then classified
+        ``unreplayable``.
         """
         for _ in range(self._SIDECAR_SETTLE_ATTEMPTS):
-            if self._drain_stale_sidecars(resolved):
-                return True
+            state = self._drain_stale_sidecars(resolved)
+            if state in ("clean", "held"):
+                return state
             time.sleep(self._SIDECAR_SETTLE_INTERVAL_SECONDS)
             if not any(path.exists() for path in sidecars):
-                return True
-        return False
+                return "clean"
+        return "unreplayable"
 
-    def _drain_stale_sidecars(self, resolved: Path, *, force: bool = False) -> bool:
-        """Replay orphaned WAL crash residue in place; True when the store is clean.
+    def _drain_stale_sidecars(self, resolved: Path, *, force: bool = False) -> str:
+        """Replay orphaned WAL crash residue in place; classify what remains.
 
         The drain leaves WAL mode entirely (``journal_mode=DELETE``): SQLite
         refuses that switch while ANY other connection has the store open --
         including an idle one that a checkpoint would sail straight past --
         and it deletes the sidecar files itself under the proper locks, so a
         live connection can never have its WAL removed from underneath it.
-        WAL mode is restored before the connection closes. Returns False when
-        a live connection holds the store or when the ``-wal`` file is not
-        something SQLite can replay (unknown bytes are never silently
+        WAL mode is restored before the connection closes. Returns ``clean``
+        when the store carries no residue, ``held`` when a live connection
+        keeps the store open, and ``unreplayable`` when the ``-wal`` bytes are
+        not something SQLite can replay (unknown bytes are never silently
         discarded; ``force`` lifts that gate for the explicit ``store
         recover`` command); propagates ``OSError``/``sqlite3.DatabaseError``
         when the store itself is unreadable and ``ValidationError`` when it is
@@ -324,17 +377,17 @@ class ImprintStore:
         if not force and wal.exists() and wal.stat().st_size > 0:
             with wal.open("rb") as handle:
                 if handle.read(4) not in self._WAL_MAGIC:
-                    return False
+                    return "unreplayable"
         conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=0)
         try:
             try:
                 self._require_connection_compatible(conn)
                 row = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
             except sqlite3.OperationalError:
-                # A lock held at this instant is contention, not damage.
-                return False
+                # A lock held at this instant is a live connection, not damage.
+                return "held"
             if row is None or str(row[0]).lower() != "delete":
-                return False
+                return "held"
             # Re-entering WAL needs only a brief write lock, not exclusivity.
             conn.execute("PRAGMA busy_timeout=2000")
             restored = conn.execute("PRAGMA journal_mode=WAL").fetchone()
@@ -344,7 +397,7 @@ class ImprintStore:
             conn.close()
         Path(str(resolved) + "-journal").unlink(missing_ok=True)
         _secure_sqlite_state(resolved)
-        return True
+        return "clean"
 
     def recover(self) -> dict[str, Any]:
         """Replay orphaned WAL crash residue into the store, or report a live writer.
@@ -374,7 +427,7 @@ class ImprintStore:
             drained = self._drain_stale_sidecars(resolved, force=True)
         except (OSError, sqlite3.DatabaseError) as exc:
             raise ValidationError("existing store is corrupt or unreadable") from exc
-        if not drained:
+        if drained != "clean":
             raise ValidationError(
                 "store is held by a live writer; close the active session before recovery"
             )

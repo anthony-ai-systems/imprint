@@ -59,10 +59,15 @@ def test_store_rechecks_open_handle_after_preflight_path_replacement(tmp_path, m
     original.initialize()
     future = tmp_path / "future.db"
     ImprintStore(future).initialize()
-    with sqlite3.connect(future) as connection:
+    # sqlite3's context manager commits but never closes; an explicit close is
+    # required so no live handle keeps holding the swapped-in file.
+    connection = sqlite3.connect(future)
+    try:
         connection.execute("UPDATE meta SET value='999.0.0' WHERE key='store_schema_version'")
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
     Path(str(future) + "-wal").unlink(missing_ok=True)
     Path(str(future) + "-shm").unlink(missing_ok=True)
     future_before = future.read_bytes()

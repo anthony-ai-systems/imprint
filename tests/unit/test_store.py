@@ -825,7 +825,14 @@ def test_connect_auto_recovers_stale_wal_residue(tmp_path):
         check.close()
 
 
-def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path, monkeypatch):
+def test_connect_proceeds_alongside_a_live_reader_holding_the_store(tmp_path, monkeypatch):
+    """A held store is ordinary WAL concurrency, not a corruption signal.
+
+    On a busy machine dozens of sessions overlap constantly; one session's
+    open connection must never fail another session's capture. The open
+    proceeds through a plain read-only compatibility probe and writes land
+    while the holder keeps its snapshot.
+    """
     _fast_settle(monkeypatch)
     target = tmp_path / "imprint.db"
     store = ImprintStore(target)
@@ -839,20 +846,33 @@ def test_connect_still_refuses_while_live_writer_holds_the_store(tmp_path, monke
         live.execute("BEGIN")
         live.execute("SELECT * FROM meta").fetchall()
         assert Path(str(target) + "-wal").exists()
-        with pytest.raises(ValidationError, match="WAL/SHM"):
-            with store.connect():
-                pass
+        with store.connect() as conn:
+            conn.execute("INSERT INTO meta(key,value) VALUES('concurrent_probe','1')")
+        # The holder's sidecars were never touched.
+        assert Path(str(target) + "-wal").exists()
+        assert Path(str(target) + "-shm").exists()
+        # The holder's snapshot is intact and its connection still works.
+        assert live.execute(
+            "SELECT value FROM meta WHERE key='live_probe'"
+        ).fetchone()[0] == "1"
+        live.execute("COMMIT")
     finally:
         live.close()
+    with store.connect() as conn:
+        assert conn.execute(
+            "SELECT value FROM meta WHERE key='concurrent_probe'"
+        ).fetchone()[0] == "1"
+    assert store.integrity_check() == "ok"
 
 
-def test_connect_refuses_while_an_idle_connection_holds_the_store(tmp_path, monkeypatch):
-    """An idle-open connection must refuse, not drain.
+def test_connect_proceeds_alongside_an_idle_connection_without_draining_it(tmp_path, monkeypatch):
+    """An idle-open connection must be coexisted with, never drained.
 
     A checkpoint sails past a connection that holds no read mark, so a
     checkpoint-based drain would delete the sidecars out from under it and
     split later writers onto fresh WAL/SHM files. Leaving WAL mode is refused
-    by SQLite while any other connection is open, idle or not.
+    by SQLite while any other connection is open, idle or not -- so the open
+    proceeds alongside it and leaves its sidecars alone.
     """
     _fast_settle(monkeypatch)
     target = tmp_path / "imprint.db"
@@ -865,14 +885,97 @@ def test_connect_refuses_while_an_idle_connection_holds_the_store(tmp_path, monk
         idle.commit()
         # No open transaction: the connection is idle but alive.
         assert Path(str(target) + "-wal").exists()
-        with pytest.raises(ValidationError, match="WAL/SHM"):
-            with store.connect():
-                pass
+        with store.connect() as conn:
+            conn.execute("INSERT INTO meta(key,value) VALUES('beside_idle','1')")
         # The idle connection's sidecars were left alone.
         assert Path(str(target) + "-wal").exists()
         assert Path(str(target) + "-shm").exists()
+        assert idle.execute(
+            "SELECT value FROM meta WHERE key='beside_idle'"
+        ).fetchone()[0] == "1"
     finally:
         idle.close()
+    assert store.integrity_check() == "ok"
+
+
+def test_two_concurrent_store_openers_both_capture(tmp_path, monkeypatch):
+    """Two sessions' hooks overlapping at session-start must both capture.
+
+    Opener A holds its store connection across opener B's entire open-write-
+    close cycle -- the exact shape of two Claude sessions starting at once.
+    Neither open may fail and neither write may be lost.
+    """
+    _fast_settle(monkeypatch)
+    target = tmp_path / "imprint.db"
+    store_a = ImprintStore(target)
+    store_a.initialize()
+    store_b = ImprintStore(target)
+
+    with store_a.connect() as conn_a:
+        conn_a.execute("SELECT value FROM meta WHERE key='store_schema_version'").fetchone()
+        with store_b.connect() as conn_b:
+            conn_b.execute("INSERT INTO meta(key,value) VALUES('opener_b','1')")
+        conn_a.execute("INSERT INTO meta(key,value) VALUES('opener_a','1')")
+
+    with store_a.connect() as conn:
+        rows = dict(
+            conn.execute(
+                "SELECT key,value FROM meta WHERE key IN ('opener_a','opener_b')"
+            ).fetchall()
+        )
+    assert rows == {"opener_a": "1", "opener_b": "1"}
+    assert store_a.integrity_check() == "ok"
+
+
+def test_many_concurrent_openers_all_capture(tmp_path, monkeypatch):
+    """Parallel session-start writers serialize on the WAL lock; none fail."""
+    import threading
+
+    _fast_settle(monkeypatch)
+    target = tmp_path / "imprint.db"
+    ImprintStore(target).initialize()
+    failures = []
+
+    def open_and_write(index):
+        try:
+            store = ImprintStore(target)
+            with store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO meta(key,value) VALUES(?,?)", (f"opener_{index}", "1")
+                )
+        except Exception as exc:  # noqa: BLE001 -- any failure fails the test
+            failures.append((index, repr(exc)))
+
+    threads = [threading.Thread(target=open_and_write, args=(i,)) for i in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    store = ImprintStore(target)
+    with store.connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM meta WHERE key LIKE 'opener_%'"
+        ).fetchone()[0]
+    assert count == 6
+    assert store.integrity_check() == "ok"
+
+
+def test_connect_still_refuses_unreplayable_sidecar_bytes(tmp_path, monkeypatch):
+    """Genuine corruption keeps refusing into the explicit recover path."""
+    _fast_settle(monkeypatch)
+    target = tmp_path / "imprint.db"
+    store = ImprintStore(target)
+    store.initialize()
+    Path(str(target) + "-wal").write_bytes(b"uncheckpointed-wal-sentinel")
+    Path(str(target) + "-shm").write_bytes(b"shared-memory-sentinel")
+
+    with pytest.raises(ValidationError, match="WAL/SHM"):
+        with store.connect():
+            pass
+    # The unknown bytes were never silently discarded.
+    assert Path(str(target) + "-wal").read_bytes() == b"uncheckpointed-wal-sentinel"
 
 
 def test_connect_waits_out_a_briefly_held_store(tmp_path, monkeypatch):
