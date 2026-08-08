@@ -8,10 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   python-contract:
     name: Python ${{ matrix.python }} contract
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -21,11 +26,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest
 
   build:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
         with:
@@ -35,6 +42,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+          cache: pip
       - run: python -m pip install -e '.[dev,release]'
       - run: bash tests/acceptance/test_upgrade_from_v300.sh
       # gitleaks-action requires a GITLEAKS_LICENSE on organization-owned
@@ -62,6 +70,7 @@ jobs:
 
   artifact-posix:
     needs: build
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +96,7 @@ jobs:
   artifact-windows:
     needs: build
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
