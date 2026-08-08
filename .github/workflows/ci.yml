@@ -87,11 +87,13 @@ jobs:
         with:
           name: imprint-release-candidate
           path: candidate
+      - name: Resolve version from pyproject.toml
+        run: echo "IMPRINT_VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')" >> "$GITHUB_ENV"
       - run: python tools/release/verify_artifacts.py candidate --expected-revision "$(git rev-parse HEAD)" --source-root .
       - name: Extract tar artifact
-        run: python tools/release/extract_safe.py candidate/imprint-3.0.1.tar.gz extracted
+        run: python tools/release/extract_safe.py "candidate/imprint-${IMPRINT_VERSION}.tar.gz" extracted
       - name: Empty-HOME artifact acceptance
-        run: bash extracted/imprint-3.0.1/tests/acceptance/test_install_posix.sh
+        run: bash "extracted/imprint-${IMPRINT_VERSION}/tests/acceptance/test_install_posix.sh"
 
   artifact-windows:
     needs: build
@@ -106,11 +108,16 @@ jobs:
         with:
           name: imprint-release-candidate
           path: candidate
+      - name: Resolve version from pyproject.toml
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+          "IMPRINT_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
       - shell: pwsh
         run: python tools/release/verify_artifacts.py candidate --expected-revision "$(git rev-parse HEAD)" --source-root .
       - name: Extract ZIP artifact
         shell: pwsh
-        run: python tools/release/extract_safe.py candidate/imprint-3.0.1.zip extracted
+        run: python tools/release/extract_safe.py "candidate/imprint-${env:IMPRINT_VERSION}.zip" extracted
       - name: Genuine Windows empty-profile acceptance
         shell: pwsh
-        run: ./extracted/imprint-3.0.1/tests/acceptance/test_install_windows.ps1
+        run: ./extracted/imprint-${env:IMPRINT_VERSION}/tests/acceptance/test_install_windows.ps1
