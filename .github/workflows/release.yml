@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# No cancel-in-progress: never kill a release run mid-publish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    # GitHub-hosted (not Blacksmith): release runs are rare, so runner cost is
+    # irrelevant and stock-image parity (gh CLI, login-shell behavior) matters
+    # more than speed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e '.[dev,release]'
+      - name: Assert tag matches pyproject version
+        run: |
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$GITHUB_REF_NAME" != "v${VERSION}" ]; then
+            echo "Ref '$GITHUB_REF_NAME' does not match pyproject version 'v${VERSION}'" >&2
+            exit 1
+          fi
+          echo "IMPRINT_VERSION=${VERSION}" >> "$GITHUB_ENV"
+      - run: python tools/release/scan_public.py
+      - run: python tools/release/package.py
+      - name: Prove deterministic rebuild
+        run: |
+          cp release-artifacts/SHA256SUMS "$RUNNER_TEMP/first-SHA256SUMS"
+          python tools/release/package.py
+          diff -u "$RUNNER_TEMP/first-SHA256SUMS" release-artifacts/SHA256SUMS
+      - run: python tools/release/verify_artifacts.py release-artifacts --expected-revision "$(git rev-parse HEAD)" --source-root .
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-artifacts/* \
+            --verify-tag \
+            --title "imprint ${IMPRINT_VERSION}" \
+            --notes "Deterministic release built and verified from ${GITHUB_SHA}. Checksums in SHA256SUMS."
