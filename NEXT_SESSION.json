@@ -1,8 +1,8 @@
 {
   "schema": "next-session/v2",
-  "session_date": "2026-08-07",
+  "session_date": "2026-08-08",
   "project": "imprint",
-  "state": "Live capture system (Rich-lineage fork, org home anthony-ai-systems). WAL saga closed 2026-08-01. Capture-filter MERGED as org PR #1 (2026-08-02; formerly fork PR #13) -- verify the runtime venv was reinstalled since before judging capture quality. Open: kill/continue window closes 2026-08-31; R2 retrieval-budget ruling pending. Runtime = imprint-local venv install; repo changes reach the runtime only via reinstall with --operator anthony.",
-  "launch_one_liner": "Check open PRs and the R2/kill-window ruling state before building.",
+  "state": "Live capture system (Rich-lineage fork, org home anthony-ai-systems). WAL saga closed 2026-08-01. Capture-filter MERGED as org PR #1 (2026-08-02; formerly fork PR #13). Org PRs #13 (test data-root isolation + operator spool guard) and #14 (WAL/SHM session-start contention) MERGED 2026-08-08; the 126-record spool backlog was archived the same morning. R2 retrieval budget RULED 2026-08-08 -- keep lean to Aug 31: context budget stays 12,288 B, the kill/continue window closes 2026-08-31, and post-filter capture quality is the evidence. Runtime = imprint-local venv install; repo changes reach the runtime only via reinstall with --operator anthony, and a post-#13/#14 reinstall is OWED before capture quality can be judged.",
+  "launch_one_liner": "Verify the runtime was reinstalled post-PR#13/#14 before judging capture quality; kill/continue window closes 2026-08-31.",
   "next_action_for_agent": "Never touch ~/.local/share/imprint data roots from a repo session; runtime reinstalls require --operator anthony. This file also clears the fully-aware next_session boot probe."
 }
