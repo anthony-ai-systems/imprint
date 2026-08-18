@@ -56,6 +56,33 @@ def test_secure_helpers_refuse_symlinks(tmp_path):
         secure_file(file_link)
 
 
+def test_secure_file_tolerates_vanished_path(tmp_path):
+    # SQLite drops -wal/-shm sidecars when the last connection closes, racing
+    # every exists-then-tighten caller (_secure_sqlite_state); the 2026-08-17
+    # session-start hook failure was FileNotFoundError on imprint.db-shm.
+    ghost = tmp_path / "imprint.db-shm"
+    assert secure_file(ghost) == ghost
+    assert not ghost.exists()
+
+
+def test_secure_file_still_refuses_present_irregular_path(tmp_path):
+    directory = tmp_path / "not-a-file"
+    directory.mkdir()
+    with pytest.raises(OSError, match="regular file"):
+        secure_file(directory)
+
+
+def test_unsafe_posix_scan_skips_vanished_stat(tmp_path):
+    from imprint.permissions import _lmode
+
+    assert _lmode(tmp_path / "vanished-sidecar") is None
+    survivor = tmp_path / "loose.txt"
+    survivor.write_text("x", encoding="utf-8")
+    os.chmod(survivor, 0o644)
+    assert _lmode(survivor) == 0o644
+    assert unsafe_posix_permissions(tmp_path) == ("loose.txt",)
+
+
 def test_secure_directory_hardens_new_parent_chain(tmp_path):
     root = tmp_path / "private" / "runtime" / "receipts"
     prior = os.umask(0)
