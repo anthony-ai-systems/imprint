@@ -28,6 +28,7 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $paths = [Console]::In.ReadToEnd() | ConvertFrom-Json
 $current = [Security.Principal.WindowsIdentity]::GetCurrent().User
 foreach ($path in $paths) {
+  if (-not (Test-Path -LiteralPath $path)) { continue }  # vanished mid-tighten
   $item = Get-Item -Force -LiteralPath $path
   if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw "refusing reparse-point private state"
@@ -88,19 +89,32 @@ def secure_directory(path: Path) -> Path:
         _secure_windows_paths(candidates)
     else:
         for candidate in candidates:
-            os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+            try:
+                os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+            except FileNotFoundError:
+                continue  # concurrently removed (e.g. a consumed spool claim)
     return target
 
 
 def secure_file(path: Path) -> Path:
-    """Tighten an existing Imprint-owned regular file."""
+    """Tighten an Imprint-owned regular file.
+
+    A path that no longer exists is a no-op, not an error: SQLite drops its
+    -wal/-shm sidecars whenever the last connection closes, racing every
+    exists-then-tighten caller, and a vanished file has no modes to leak.
+    A path that is PRESENT but irregular (symlink, directory, device) still
+    fails closed.
+    """
     target = Path(path)
-    if target.is_symlink() or not target.is_file():
+    if target.is_symlink() or (target.exists() and not target.is_file()):
         raise OSError(f"private file is not a regular file: {target}")
     if os.name == "nt":
         _secure_windows_paths([target])
-    else:
+        return target
+    try:
         os.chmod(target, PRIVATE_FILE_MODE, follow_symlinks=False)
+    except FileNotFoundError:
+        pass
     return target
 
 
@@ -141,10 +155,19 @@ def unsafe_posix_permissions(root: Path) -> tuple[str, ...]:
             continue
         if not (path.is_dir() or path.is_file()):
             continue
-        mode = stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
-        if mode & 0o077:
+        mode = _lmode(path)
+        if mode is not None and mode & 0o077:
             unsafe.append(str(path.relative_to(base)) or ".")
     return tuple(sorted(set(unsafe)))
+
+
+def _lmode(path: Path) -> int | None:
+    """Permission bits without following links; None if the path vanished
+    mid-scan (SQLite sidecars come and go with connection lifetime)."""
+    try:
+        return stat.S_IMODE(path.stat(follow_symlinks=False).st_mode)
+    except FileNotFoundError:
+        return None
 
 
 def unsafe_windows_permissions(root: Path) -> tuple[str, ...]:
@@ -171,6 +194,7 @@ $current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($current, 'S-1-5-18')
 $unsafe = @()
 foreach ($path in $paths) {
+  if (-not (Test-Path -LiteralPath $path)) { continue }  # vanished mid-scan
   $item = Get-Item -Force -LiteralPath $path
   $acl = Get-Acl -LiteralPath $path
   $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
