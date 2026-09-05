@@ -16,6 +16,7 @@ from .provenance import (
     NO_OPERATOR_MESSAGE_REASON,
     SYNTHETIC_ENTRY_REASON,
     classify_entry_provenance,
+    skip_reason,
 )
 
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
@@ -179,7 +180,7 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
             "prior_assistant_output": None,
             "case_description": None,
             "source_locator": locator,
-            "skip_reason": SYNTHETIC_ENTRY_REASON if synthetic_basis else NO_OPERATOR_MESSAGE_REASON,
+            "skip_reason": skip_reason(synthetic_basis),
             "provenance_basis": synthetic_basis,
             "source_entry_id": None,
         }
