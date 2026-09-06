@@ -32,6 +32,7 @@ def _graceful_run(argv: list[str], payload: str) -> subprocess.CompletedProcess[
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        # Preserve IMPRINT_CAPTURE_ORIGIN from the caller; never derive it from prompt text.
         env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
     )
     try:

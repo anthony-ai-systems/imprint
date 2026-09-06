@@ -7,11 +7,13 @@ from typing import Any, Mapping
 
 SYNTHETIC_ENTRY_REASON = "synthetic_transcript_entry"
 NO_OPERATOR_MESSAGE_REASON = "no_operator_message"
+UNVERIFIED_ENTRY_REASON = "unverified_provenance"
+MACHINE_ORIGIN_REASON = "machine_origin"
 
 _HUMAN_ORIGIN_KIND = "human"
-# The host stamps every entry it created from a submitted prompt with
-# promptSource (measured: 10/10 prompt entries carry it, 0/54 tool-result
-# entries do). It is the positive tell that an entry is a prompt at all.
+# Only measured interactive provenance is positive evidence of human input.
+# SDK submission establishes transport, not authorship.
+_INTERACTIVE_PROMPT_SOURCES = {"typed", "queued", "suggestion_accepted"}
 _PROMPT_SOURCE_FIELDS = ("promptSource", "prompt_source")
 _SYNTHETIC_FLAGS = ("isSidechain", "isMeta")
 _SYNTHETIC_PAYLOADS = ("toolUseResult",)
@@ -45,12 +47,18 @@ def _origin_kind(entry: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _has_prompt_source(entry: Mapping[str, Any]) -> bool:
-    for field in _PROMPT_SOURCE_FIELDS:
-        value = entry.get(field)
-        if isinstance(value, str) and value.strip():
-            return True
-    return False
+def _prompt_source(entry: Mapping[str, Any]) -> str | None:
+    values = [entry[field].strip().lower() for field in _PROMPT_SOURCE_FIELDS
+              if isinstance(entry.get(field), str) and entry[field].strip()]
+    if not values:
+        return None
+    return values[0] if len(set(values)) == 1 else "unverified"
+
+
+def skip_reason(basis: str | None) -> str:
+    if basis == "unverified":
+        return UNVERIFIED_ENTRY_REASON
+    return SYNTHETIC_ENTRY_REASON if basis else NO_OPERATOR_MESSAGE_REASON
 
 
 def _is_synthetic_structure(entry: Mapping[str, Any]) -> bool:
@@ -76,25 +84,22 @@ def _dominant_marker(text: str) -> str | None:
 
 
 def classify_entry_provenance(entry: Mapping[str, Any], text: str) -> ProvenanceVerdict:
-    """Decide whether one transcript user entry is operator-authored.
+    """Trust declared human origin or known interactive transport, never prompt text.
 
-    The gate is ordered positive tell first. Native entries declare themselves,
-    so ``origin.kind`` decides alone. Otherwise ``promptSource`` decides that the
-    entry is a submitted prompt, and markers are deliberately *not* consulted for
-    it: the host injects reminders into real prompt entries, so a marker there
-    would drop operator speech. An entry carrying neither tell is not a prompt
-    entry at all -- it is a tool result, an interruption notice, or another
-    host-authored turn -- and is synthetic regardless of what it says. The marker
-    blacklist survives only as a final guard, and as the reported basis when one
-    of those host-authored shapes is also recognisable by its text.
+    Explicit origins decide authorship; absent an origin, typed, queued and suggestion_accepted are
+    verified human sources. Unknown/SDK prompt sources are unverified. Legacy
+    structural/marker diagnostics remain for host entries without a source.
     """
     kind = _origin_kind(entry)
     if kind is not None:
         return ProvenanceVerdict(kind == _HUMAN_ORIGIN_KIND, "origin")
-    if _has_prompt_source(entry):
+    source = _prompt_source(entry)
+    if source is not None:
         if _is_synthetic_structure(entry):
             return ProvenanceVerdict(False, "structure")
-        return ProvenanceVerdict(True, "promptSource")
+        if source in _INTERACTIVE_PROMPT_SOURCES:
+            return ProvenanceVerdict(True, "promptSource")
+        return ProvenanceVerdict(False, "unverified")
     if _is_synthetic_structure(entry):
         return ProvenanceVerdict(False, "structure")
     if _dominant_marker(text):

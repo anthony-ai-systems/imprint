@@ -1,8 +1,8 @@
 {
   "schema": "next-session/v2",
-  "session_date": "2026-08-08",
+  "session_date": "2026-09-05",
   "project": "imprint",
-  "state": "Live capture system (Rich-lineage fork, org home anthony-ai-systems). WAL saga closed 2026-08-01. Capture-filter MERGED as org PR #1 (2026-08-02; formerly fork PR #13). Org PRs #13 (test data-root isolation + operator spool guard) and #14 (WAL/SHM session-start contention) MERGED 2026-08-08; the 126-record spool backlog was archived the same morning. R2 retrieval budget RULED 2026-08-08 -- keep lean to Aug 31: context budget stays 12,288 B, the kill/continue window closes 2026-08-31, and post-filter capture quality is the evidence. Runtime = imprint-local venv install; repo changes reach the runtime only via reinstall with --operator anthony, and a post-#13/#14 reinstall is OWED before capture quality can be judged.",
-  "launch_one_liner": "Verify the runtime was reinstalled post-PR#13/#14 before judging capture quality; kill/continue window closes 2026-08-31.",
-  "next_action_for_agent": "Never touch ~/.local/share/imprint data roots from a repo session; runtime reinstalls require --operator anthony. This file also clears the fully-aware next_session boot probe."
+  "state": "Live installed capture runtime is separate from repository source. The September convergence audit compared installed capture provenance/parser/detector files with source; those compared files matched. That is not a complete reinstall receipt. The prior August 31 budget and continue/kill window has passed; its final operator ruling is not established. The observed installed budget is 4096 bytes, distinct from historical 12288-byte notes and source defaults. Do not change it without a current ruling. Approved provenance repair is on the super-audit branch, pending controlled installation.",
+  "launch_one_liner": "Review the provenance repair and docs/contracts/capture-origin.md; verify installed identity after deployment. Ask for the unresolved budget/continue ruling only when work depends on it.",
+  "next_action_for_agent": "Do not alter operator data roots or relabel existing canon. Pair automated caller transport markers with the new runtime gate. Runtime changes require the correct operator installation; repository commits alone do not deploy them."
 }

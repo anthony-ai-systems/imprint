@@ -199,6 +199,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         NO_OPERATOR_MESSAGE_REASON,
         SYNTHETIC_ENTRY_REASON,
         classify_entry_provenance,
+        skip_reason,
     )
     from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
     from .errors import ValidationError
@@ -252,7 +253,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
             "prior_assistant_output": None,
             "case_description": None,
             "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
-            "skip_reason": SYNTHETIC_ENTRY_REASON if synthetic_basis else NO_OPERATOR_MESSAGE_REASON,
+            "skip_reason": skip_reason(synthetic_basis),
             "provenance_basis": synthetic_basis,
             "source_entry_id": None,
         }
@@ -518,6 +519,19 @@ def main(argv: list[str] | None = None) -> int:
     # Facts the failure receipt must carry out of a partially completed action.
     error_details: dict[str, object] = {}
     try:
+        # Machine transport is authoritative even if a payload claims human
+        # origin. Skip before resolving operator identity or touching the store.
+        transport_origin = os.environ.get("IMPRINT_CAPTURE_ORIGIN", "").strip().lower()
+        if args.command == "hook" and args.action == "stop-capture" and transport_origin:
+            from .capture.provenance import MACHINE_ORIGIN_REASON, UNVERIFIED_ENTRY_REASON
+            event = json.load(sys.stdin)
+            if not isinstance(event, dict):
+                raise ImprintError("hook event must be an object")
+            _validate_hook_event(event, "Stop")
+            _write_json({"hook_schema_version": "1.0.0", "status": "skipped",
+                         "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
+                         else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"})
+            return 0
         config = load_config(args.config)
         root = resolved_operator_root(config)
         store = _store(root)
