@@ -23,7 +23,8 @@ CARD = 9001
 SCOPE = {"client_id": "example-client", "project_id": "example-project", "domain": "example-domain"}
 
 # Stands in for the native judgment reader's CLI contract: it binds a pin only when the
-# store's current head is the pinned ratified version, and never reads unbound rows.
+# store's current head is the pinned ratified version with current evidence, and never
+# reads unbound rows.
 STUB_READER = r'''
 import argparse, json, sqlite3, sys
 from pathlib import Path
@@ -47,10 +48,13 @@ if args.scope_bindings:
     accepted, rejected = [], []
     for pin in manifest["bindings"]:
         row = conn.execute(
-            "SELECT version_id,payload_sha256,provenance_status,event_id,payload_json FROM node_versions"
-            " WHERE node_id=? AND system_to IS NULL", (pin["node_id"],)).fetchone()
-        if row and list(row[:4]) == [pin["version_id"], pin["payload_sha256"], "ratified",
-                                      pin["ratification_event_id"]]:
+            "SELECT version_id,payload_sha256,provenance_status,event_id,payload_json,evidence_json"
+            " FROM node_versions WHERE node_id=? AND system_to IS NULL", (pin["node_id"],)).fetchone()
+        current = row and all(conn.execute(
+            "SELECT 1 FROM node_versions WHERE node_id=? AND system_to IS NULL", (evidence,)).fetchone()
+            for evidence in json.loads(row[5]))
+        if current and list(row[:4]) == [pin["version_id"], pin["payload_sha256"], "ratified",
+                                          pin["ratification_event_id"]]:
             accepted.append(pin["node_id"])
             result["claims"].append({"source": "imprint", "record_id": pin["node_id"],
                                      "text": json.loads(row[4])["statement"],
@@ -282,14 +286,21 @@ def test_rerun_keeps_the_receipt_when_only_the_readback_changes(tmp_path):
     batch.write_card(sha, batches=(MIXED,))
     receipt = Path(batch.run()["receipt"])
     before = batch.snapshot()
-    broken = tmp_path / "broken_reader.py"
-    broken.write_text("import sys\nprint('{}')\nsys.exit(2)\n")
+    leaky = tmp_path / "leaky_reader.py"
+    leaky.write_text(STUB_READER.replace(
+        'result = {"scope": scope, "claims": []}',
+        'result = {"scope": scope, "claims": [] if args.scope_bindings else [{"record_id": "leak"}]}'))
 
-    again = batch.run(reader_path=broken)
+    again = batch.run(reader_path=leaky)
 
-    assert again["status"] == "readback_failed" and "reader exited 2" in again["error"]
+    assert again["status"] == "readback_failed"
+    assert again["readback"][0]["problems"] == ["unbound read returned 1 claim(s), expected 0"]
     assert batch.snapshot() == before
     assert json.loads(receipt.read_text())["status"] == "applied"
+
+    broken = tmp_path / "broken_reader.py"
+    broken.write_text("import sys\nprint('{}')\nsys.exit(2)\n")
+    assert any("the reader could not check the pins" in reason for reason in batch.refused(reader_path=broken))
 
 
 def test_interrupted_batch_resumes_to_the_same_end_state(tmp_path, monkeypatch):
@@ -443,6 +454,96 @@ def test_latest_item_answer_wins_and_card_level_conflicts_refuse(tmp_path):
     assert any("item 1 has conflicting answers" in reason for reason in single.refused())
 
 
+@pytest.mark.parametrize("count, text, fields", [
+    (1, "9001 nope", {"status": "killed", "killed_by": "anthony"}),
+    (1, "9001 kill", {"status": "killed", "killed_by": "anthony"}),
+    (1, "9001 edit tighten wording", {"status": "edited", "his_words": "tighten wording"}),
+    (3, "9001 change item 2 to weekly", {"status": "edited", "his_words": "change item 2 to weekly"}),
+    (3, "9001 all yes", {"status": "edited", "his_words": "all yes"}),
+    (3, "9001.2 no", {"status": "edited", "his_words": ".2 no"}),
+])
+def test_texted_card_level_answers_refuse_instead_of_being_skipped(tmp_path, count, text, fields):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch) if count == 3 else batch.write_packet(
+        [batch.item(1, "Keep weekly status notes short.", [batch.evidence("Keep notes to five lines.")[0]])])
+    history = [{"event": "killed" if "killed_by" in fields else "edit", "note": text}]
+    batch.write_card(sha, batches=("9001 all yes" if count == 3 else "9001 yes",), history=history,
+                     answer={"at": "2026-10-28T13:00:00", "channel": "imessage", "proof": "his own number",
+                             "ref": "imessage:synthetic", "text": text}, **fields)
+
+    reasons = batch.refused()
+
+    assert any(text in reason or "card-level" in reason for reason in reasons), reasons
+    assert not batch.out.exists()
+
+    legacy = Batch(tmp_path / "legacy")
+    sha = legacy.write_packet([legacy.item(1, "Keep weekly status notes short.",
+                                           [legacy.evidence("Keep notes to five lines.")[0]])])
+    legacy.write_card(sha, per_item=False, lines=("9001 yes",), history=history,
+                      answer={"at": "2026-10-28T13:00:00", "channel": "imessage", "proof": "his own number",
+                              "ref": "imessage:synthetic", "text": text}, **fields)
+    assert legacy.refused()
+
+
+def test_a_card_level_edit_the_card_program_dropped_still_refuses(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=("9001.1 yes", "9001.2 yes\n9001.3 yes"), status="yes",
+                     history=[{"event": "item 1 yes"}, {"event": "edit", "note": "fix item 1 overstates"},
+                              {"event": "item 2 yes"}, {"event": "item 3 yes"}])
+
+    assert any("history shows a card-level answer" in reason for reason in batch.refused())
+
+
+def test_a_proof_flagged_on_another_card_voids_the_shared_message(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    record = batch.write_card(sha, batches=("9001 all yes",))
+    sibling = json.loads(json.dumps(record))
+    sibling["n"] = 9002
+    for entry in [sibling["answer"], *sibling["chat_answers"], *sibling["item_answers"].values()]:
+        entry["origin"]["flag"] = {"result": "tampered", "detail": "edited after recording"}
+    batch.cards.write_text(json.dumps({"next": 9003, "cards": [record, sibling]}))
+
+    assert any("flagged on another card" in reason for reason in batch.refused())
+
+
+def test_card_program_item_rows_are_read_the_way_it_splits_them(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=("9001.1 yes 👍\n9001.2 no - duplicate of 1\n9001.3 fix ...shorter",))
+
+    result = batch.run()
+
+    assert result["status"] == "applied" and result["decisions"] == {"1": "yes", "2": "no", "3": "fix"}
+    deferral = batch.store.node_history(batch.node("Belief", sha, 3))["dispositions"][0]
+    assert deferral["payload"]["reason"].endswith(": ...shorter")
+
+    single = Batch(tmp_path / "single")
+    evidence, _, _ = single.evidence("Keep weekly status notes to five lines.")
+    sha = single.write_packet([single.item(1, "Keep weekly status notes short.", [evidence])])
+    single.write_card(sha, batches=("9001. yes",))
+    assert single.run()["status"] == "applied"
+
+
+def test_a_later_yes_replaces_an_applied_fix(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    first = "9001.1 yes\n9001.2 fix shorter\n9001.3 yes"
+    batch.write_card(sha, batches=(first,), status="edited")
+    assert batch.run()["decisions"] == {"1": "yes", "2": "fix", "3": "yes"}
+
+    batch.write_card(sha, batches=(first, "9001.2 yes"), status="yes")
+    result = batch.run()
+
+    assert (result["status"], result["decisions"]["2"]) == ("applied", "yes")
+    rule = batch.node("Rule", sha, 2)
+    assert batch.heads()[rule]["provenance_status"] == "ratified"
+    assert [event["event_type"] for event in batch.store.node_history(rule)["dispositions"]] == ["deferred", "ratified"]
+    assert result["readback"][0]["bound_claims"] == 3
+    assert batch.run()["status"] == "already_applied"
+
+
 def test_refuses_flagged_or_mismatched_item_answers(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
@@ -504,8 +605,24 @@ def test_second_packet_appends_and_stale_pins_refuse_first(tmp_path):
     third_evidence, _, _ = batch.evidence("Put the ask in the first line.")
     third = batch.write_packet([batch.item(1, "Lead with the ask.", [third_evidence])], card=9003)
     batch.write_card(third, batches=("9003 yes",), card=9003)
-    assert any("no longer matches the store" in reason for reason in batch.refused())
-    assert any("no longer matches the store" in reason for reason in batch.refused(dry_run=True))
+    assert any("does not accept every pin already in" in reason for reason in batch.refused())
+    assert any("does not accept every pin already in" in reason for reason in batch.refused(dry_run=True))
+
+
+def test_inherited_pin_with_withdrawn_evidence_refuses_before_any_write(tmp_path):
+    batch = Batch(tmp_path)
+    first_evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
+    first = batch.write_packet([batch.item(1, "Keep weekly status notes short.", [first_evidence])])
+    batch.write_card(first, batches=("9001 yes",))
+    assert batch.run()["status"] == "applied"
+    batch.store.tombstone_node(first_evidence, reason="Synthetic withdrawal.")
+
+    second_evidence, _, _ = batch.evidence("Lead every summary with the decision.")
+    second = batch.write_packet([batch.item(1, "Summaries open with the decision.", [second_evidence])],
+                                card=9002)
+    batch.write_card(second, batches=("9002 yes",), card=9002)
+
+    assert any("does not accept every pin already in" in reason for reason in batch.refused())
 
 
 def test_scope_values_the_reader_accepts_are_encoded_into_paths(tmp_path):

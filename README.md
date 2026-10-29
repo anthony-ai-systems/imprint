@@ -170,11 +170,13 @@ scope, the operator's verbatim Evidence IDs, and limits). It reads the card stor
 `~/.local/share/thirty-second-card/state/asks.json`) without writing it. The card
 must name the packet's SHA-256, and a card with `ratification_items` must list
 exactly the packet's statements. Only answers the card program recorded count:
-its per-item `item_answers`, each checked against the saved message behind it, and
-recorded lines in the grammar `<card>.<item> yes|no|fix[ <note>]`, `<card> all yes`,
-or a bare answer on a single-item card. It refuses before any write when an item
-has no answer, answers conflict, a proof is flagged as tampered or missing, a
-multi-item card carries a card-level no or fix, or evidence or scope is missing.
+per-item answers (`<card>.<item> yes|no|fix[ <note>]` or `<card> all yes`) through
+its `item_answers`, each checked against the saved message behind it, and a bare
+`<card> yes|no|fix[ <note>]` on a single-item card. It refuses before any write
+when an item has no answer, answers conflict, a proof is flagged as tampered or
+missing, a card carries any other card-level answer (the card program files those
+as a no or an edit), a pin already in the target manifest no longer satisfies the
+reader, or evidence or scope is missing.
 Every item becomes an evidenced inferred candidate; a yes is then ratified by the
 configured operator and pinned in the owner's manifest
 `<out-root>/scope-bindings/<owner>/<client_id>/<project_id>/<domain>.json` (scope

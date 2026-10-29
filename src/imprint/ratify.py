@@ -93,6 +93,12 @@ ITEM_ANSWER = re.compile(_CARD + r"\.(?P<item>\d+)" + _GAP + _VERB, re.I)
 ALL_YES = re.compile(_CARD + r"\s+all\s+yes\W*$", re.I)
 BARE_ANSWER = re.compile(_CARD + _GAP + _VERB, re.I)
 WORD = re.compile(r"[^\W_]")
+# The card program's own splits of a saved per-item message (work order 3b).
+ITEM_ROW = re.compile(r"^([1-9]\d*)\.([1-9]\d*)\s+(yes|no|fix)(?:\s+(.*))?$", re.I)
+ALL_ROW = re.compile(r"^([1-9]\d*)\s+all\s+yes$", re.I)
+BARE_ROW = re.compile(r"^(?:card\s*)?#?(\d+)\s*[-:.,)]*\s*(yes|no|fix)\b[\s:,.!-]*(.*?)$", re.I | re.S)
+# History events the card program writes for a card-level answer from Anthony.
+CARD_LEVEL_EVENTS = frozenset({"yes", "killed", "edit", "sent by him"})
 
 
 class Refusal(ImprintError):
@@ -272,14 +278,42 @@ def _item_problems(item: Any, index: int) -> list[str]:
 # Card answers -------------------------------------------------------------
 
 
+@dataclass
+class CardContext:
+    card: dict[str, Any]
+    sha256: str
+    flagged_addresses: set[str]
+    flagged_batches: set[str]
+
+
 def card_store_path(explicit: Path | None = None) -> Path:
     if explicit is not None:
         return Path(explicit).expanduser()
     return Path(os.environ.get(CARD_STORE_ENV) or DEFAULT_CARD_STORE).expanduser()
 
 
-def read_card(path: Path, number: int, packet_sha: str) -> tuple[dict[str, Any], str]:
-    """Return the card and the card store's sha256. The store is only read."""
+def _origin(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+
+
+def _flagged(entry: dict[str, Any]) -> str | None:
+    flag = _origin(entry).get("flag")
+    if isinstance(flag, dict) and flag.get("result") != "intact":
+        return str(flag.get("result"))
+    return None
+
+
+def _answer_records(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    records = [("answer", card["answer"])] if isinstance(card.get("answer"), dict) else []
+    records += [("chat_answers", entry) for entry in card.get("chat_answers") or [] if isinstance(entry, dict)]
+    answers = card.get("item_answers")
+    if isinstance(answers, dict):
+        records += [("item_answers", entry) for entry in answers.values() if isinstance(entry, dict)]
+    return records
+
+
+def read_card(path: Path, number: int, packet_sha: str) -> CardContext:
+    """Find the card and every flagged proof in the card store, which is only read."""
     raw = _read_input(path, "card store", MAX_CARD_STORE_BYTES)
     try:
         state = json.loads(raw.decode("utf-8"))
@@ -305,40 +339,37 @@ def read_card(path: Path, number: int, packet_sha: str) -> tuple[dict[str, Any],
                         "in review_packet_sha256, what, or objects")
     if problems:
         raise Refusal(problems)
-    return card, _sha256(raw)
+    # One saved message can answer several cards; a flag found through any of them voids it everywhere.
+    flagged = [entry for other in cards if isinstance(other, dict)
+               for _, entry in _answer_records(other) if _flagged(entry)]
+    return CardContext(card, _sha256(raw),
+                       {str(_origin(entry).get("address")) for entry in flagged if _origin(entry).get("address")},
+                       {str(entry["batch_sha256"]) for entry in flagged if entry.get("batch_sha256")})
 
 
-def _origin(entry: dict[str, Any]) -> dict[str, Any]:
-    return entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+def flagged_proofs(context: CardContext, number: int) -> list[str]:
+    """A saved message the card program found edited or gone voids the answers it backs."""
+    problems = []
+    for record, entry in _answer_records(context.card):
+        address = _origin(entry).get("address")
+        result = _flagged(entry)
+        if result is None and (address in context.flagged_addresses
+                               or entry.get("batch_sha256") in context.flagged_batches):
+            result = "flagged on another card"
+        if result:
+            problems.append(f"card {number}: the saved message behind {record} {address} is {result}; "
+                            "re-ask on a new card")
+    return problems
 
 
-def _answer_records(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    records = [("answer", card["answer"])] if isinstance(card.get("answer"), dict) else []
-    records += [("chat_answers", entry) for entry in card.get("chat_answers") or [] if isinstance(entry, dict)]
-    answers = card.get("item_answers")
-    if isinstance(answers, dict):
-        records += [("item_answers", entry) for entry in answers.values() if isinstance(entry, dict)]
-    return records
-
-
-def flagged_proofs(card: dict[str, Any], number: int) -> list[str]:
-    """A saved message the card program found edited or gone voids the card's answers."""
-    return [f"card {number}: the saved message behind {record} {_origin(entry).get('address')} is "
-            f"{_origin(entry)['flag'].get('result')}; re-ask on a new card"
-            for record, entry in _answer_records(card)
-            if isinstance(_origin(entry).get("flag"), dict)
-            and _origin(entry)["flag"].get("result") != "intact"]
-
-
-def recorded_lines(card: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Card-level answer lines the card program recorded, plus records that cannot count.
+def card_level_records(card: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Card-level answers the card program recorded, plus mail it kept only as unproven.
 
     Per-item batches (``batch_sha256``) are read through ``item_answers`` instead,
     where the card program keeps each item's latest answer.
     """
-    batches = [entry for entry in card.get("chat_answers") or []
-               if isinstance(entry, dict) and entry.get("batch_sha256")]
-    batch_refs = {entry.get("ref") for entry in batches}
+    batch_refs = {entry.get("ref") for entry in card.get("chat_answers") or []
+                  if isinstance(entry, dict) and entry.get("batch_sha256")}
     lines, skipped = [], []
     for record, entry in _answer_records(card):
         if record == "item_answers" or entry.get("batch_sha256"):
@@ -354,14 +385,14 @@ def recorded_lines(card: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dic
             skipped.append({**found, "line": text.strip(), "why": "a mail reply is never an answer"})
             continue
         if (record == "chat_answers" or entry.get("source") == "chat") and not _origin(entry).get("address"):
-            skipped.append({**found, "line": text.strip(), "why": "a chat answer without its native origin"})
+            lines.append({**found, "line": text.strip(), "unverified": True})
             continue
         lines.extend({**found, "line": " ".join(raw.split())} for raw in text.splitlines() if raw.strip())
     return lines, skipped
 
 
 def parse_answer(line: str, number: int, item_count: int) -> tuple[list[tuple[int, str, str]], str | None, str | None]:
-    """Return (answers, why the line does not count, refusal) for one recorded line."""
+    """Return (answers, why the line does not count, refusal) for one line in the ratification grammar."""
     match = ITEM_ANSWER.match(line)
     if match:
         if int(match["n"]) != number:
@@ -392,6 +423,28 @@ def parse_answer(line: str, number: int, item_count: int) -> tuple[list[tuple[in
     return [], "not an answer in the ratification grammar", None
 
 
+def card_level_answer(record: dict[str, Any], number: int, item_count: int) -> tuple[list[tuple[int, str, str]], str | None, str | None]:
+    """Read one card-level record. Only a bare answer on a single-item card counts.
+
+    The card program files any other card-level text as a no or an edit (an
+    item line or ``all yes`` sent by text included), so it refuses the batch
+    instead of being skipped.
+    """
+    line = record["line"]
+    if record.get("unverified"):
+        return [], None, f"card {number} holds a chat answer {line!r} without its native origin"
+    answers, why, problem = parse_answer(line, number, item_count)
+    if problem or (why and (why.startswith("names card") or why.startswith("a bare yes counts only"))):
+        return answers, why, problem
+    if ITEM_ANSWER.match(line) or ALL_YES.match(line):
+        return [], None, (f"card {number} has a card-level record {line!r}; per-item answers count only "
+                          "through the card program's verified item answers")
+    if why:
+        return [], None, (f"card {number} has a card-level answer {line!r} the ratification grammar cannot read "
+                          f"({why}); the card program may file it as a no or an edit; re-ask on a new card")
+    return answers, None, None
+
+
 def _verb(verb: str, rest: str) -> tuple[str, str, str | None]:
     verb = verb.lower()
     note = rest.lstrip(" \t:,.!-").strip()
@@ -400,6 +453,23 @@ def _verb(verb: str, rest: str) -> tuple[str, str, str | None]:
     if verb == "fix" and not WORD.search(note):
         return verb, note, "a fix needs its note"
     return verb, note, None
+
+
+def batch_answers(typed: str, number: int, item_count: int) -> list[tuple[int, str, str, str]]:
+    """(item, verb, note, row) in a saved message, split exactly the way the card program splits it."""
+    found = []
+    for row in typed.splitlines():
+        row = row.strip()
+        one, every = ITEM_ROW.fullmatch(row), ALL_ROW.fullmatch(row)
+        bare = BARE_ROW.match(" ".join(row.split()))
+        if one and int(one[1]) == number:
+            found.append((int(one[2]), one[3].lower(), (one[4] or "").strip(), row))
+        elif every and int(every[1]) == number:
+            found.extend((item, "yes", "", row) for item in range(1, item_count + 1))
+        elif (bare and int(bare[1]) == number and bare[2].lower() == "yes" and item_count == 1
+              and not re.search(r"[A-Za-z0-9]", bare[3])):
+            found.append((1, "yes", "", row))
+    return found
 
 
 def item_answers(card: dict[str, Any], number: int, statements: list[str]) -> tuple[list[tuple[int, str, str, dict]], list[str]]:
@@ -441,23 +511,21 @@ def item_answers(card: dict[str, Any], number: int, statements: list[str]) -> tu
         if typed is None or _text_sha256(typed) != entry.get("batch_sha256"):
             problems.append(f"{where} is not backed by the saved message it was recorded from")
             continue
-        matching = [line for line in (" ".join(raw.split()) for raw in typed.splitlines()) if line
-                    and (item, verb, _key(note)) in {(i, v, _key(n)) for i, v, n in
-                                                     parse_answer(line, number, len(statements))[0]}]
-        if not matching:
+        rows = [row for i, v, n, row in batch_answers(typed, number, len(statements))
+                if (i, v, _key(n)) == (item, verb, _key(note))]
+        if not rows:
             problems.append(f"{where} does not match the saved message it was recorded from")
             continue
         found.append((item, verb, note, {"record": "item_answers", "at": entry.get("at"),
-                                         "address": _origin(entry).get("address"), "line": matching[0]}))
+                                         "address": _origin(entry).get("address"), "line": rows[0]}))
     return found, problems
 
 
-def decide(card: dict[str, Any], number: int, statements: list[str]) -> tuple[dict[int, Decision], list[dict[str, Any]]]:
+def decide(context: CardContext, number: int, statements: list[str]) -> tuple[dict[int, Decision], list[dict[str, Any]]]:
     """Map every item to exactly one recorded decision, or refuse."""
-    count = len(statements)
-    problems = flagged_proofs(card, number)
-    if count > 1 and card.get("status") == "killed" and card.get("killed_by") == "anthony":
-        problems.append(f"card {number} was killed by a card-level no; ask per item on a new card")
+    card, count = context.card, len(statements)
+    per_item = "ratification_items" in card
+    problems = flagged_proofs(context, number)
     found: dict[int, dict[tuple[str, str], Decision]] = {}
 
     def add(item: int, verb: str, note: str, record: dict[str, Any]) -> None:
@@ -468,15 +536,30 @@ def decide(card: dict[str, Any], number: int, statements: list[str]) -> tuple[di
     problems.extend(structured_problems)
     for item, verb, note, record in structured:
         add(item, verb, note, record)
-    lines, not_counted = recorded_lines(card)
-    for record in lines:
-        answers, why, problem = parse_answer(record["line"], number, count)
+    records, not_counted = card_level_records(card)
+    for record in records:
+        answers, why, problem = card_level_answer(record, number, count)
         if problem:
             problems.append(problem)
         elif why:
             not_counted.append({**record, "why": why})
         for item, verb, note in answers:
             add(item, verb, note, record)
+    if per_item:
+        # The card program can drop a texted card-level answer when a later item batch completes the card.
+        events = [entry for entry in card.get("history") or []
+                  if isinstance(entry, dict) and entry.get("event") in CARD_LEVEL_EVENTS]
+        if count > 1 and events:
+            problems.append(f"card {number} history shows a card-level answer on a multi-item card; "
+                            "re-ask on a new card")
+        elif len(events) > len(records):
+            problems.append(f"card {number} history shows a card-level answer the card no longer holds; "
+                            "re-ask on a new card")
+    verbs = {decision.verb for slot in found.values() for decision in slot.values()}
+    if card.get("status") == "killed" and card.get("killed_by") == "anthony" and (count > 1 or "yes" in verbs):
+        problems.append(f"card {number} was killed by a card-level no; ask per item on a new card")
+    if not per_item and card.get("status") == "edited" and verbs - {"fix"}:
+        problems.append(f"card {number} was sent back for an edit; re-ask on a new card")
     for item in sorted(found):
         if len(found[item]) > 1:
             problems.append(f"card {number} item {item} has conflicting answers: " + "; ".join(
@@ -616,17 +699,18 @@ def node_state(conn: sqlite3.Connection, node_id: str) -> dict[str, Any]:
     state: dict[str, Any] = {"node_type": node["node_type"], "operator_id": node["operator_id"],
                              "payload_sha256s": sorted({version["payload_sha256"] for version in versions}),
                              "events": events}
-    if not current and kinds == ["rejected"]:
+    # Deferrals may precede one closing review; anything else changed the node after review.
+    closing = [kind for kind in kinds if kind != "deferred"]
+    reasons = [event["payload"].get("reason", "") for event in events if event["event_type"] == "deferred"]
+    head = current[0] if len(current) == 1 else None
+    tier = (head["provenance_status"], head["authority_tier"]) if head else None
+    if not closing and tier == ("inferred", "inferred_candidate"):
+        return {**state, "state": "deferred" if reasons else "inferred", "deferrals": reasons}
+    if closing == ["ratified"] and kinds[-1] == "ratified" and tier == ("ratified", "ratified_knowledge") \
+            and events[-1]["event_id"] == head["event_id"]:
+        return {**state, "state": "ratified", "head": head}
+    if closing == ["rejected"] and kinds[-1] == "rejected" and not current:
         return {**state, "state": "rejected"}
-    if len(current) == 1:
-        head = current[0]
-        if (head["provenance_status"], head["authority_tier"]) == ("inferred", "inferred_candidate") \
-                and set(kinds) <= {"deferred"}:
-            reasons = [event["payload"].get("reason", "") for event in events]
-            return {**state, "state": "deferred" if reasons else "inferred", "deferrals": reasons}
-        if (head["provenance_status"], head["authority_tier"]) == ("ratified", "ratified_knowledge") \
-                and kinds == ["ratified"] and events[0]["event_id"] == head["event_id"]:
-            return {**state, "state": "ratified", "head": head}
     return {**state, "state": "changed after review"}
 
 
@@ -637,9 +721,10 @@ def _steps(plan_verb: str, state: dict[str, Any], review_text: str) -> list[str]
         return ["append", action]
     if kind == "inferred":
         return [action]
-    if kind == FINAL_STATES[plan_verb] and kind != "deferred":
-        return []
-    if kind == "deferred" and plan_verb == "fix" and {_key(r) for r in state["deferrals"]} == {_key(review_text)}:
+    if kind == "deferred":
+        # The card keeps each item's latest answer, so a later answer may replace an applied fix.
+        return [] if plan_verb == "fix" and _key(state["deferrals"][-1]) == _key(review_text) else [action]
+    if kind == FINAL_STATES[plan_verb]:
         return []
     return None
 
@@ -752,8 +837,9 @@ def load_manifest(path: Path, owner: str, operator_id: str, scope: dict[str, str
     return bindings, sha
 
 
-def plan_manifests(out_root: Path, database: Path, operator_id: str, plans: list[ItemPlan]) -> dict[Path, dict[str, Any]]:
-    """Group pinned items by manifest and check every pin already in each one."""
+def plan_manifests(out_root: Path, database: Path, operator_id: str, plans: list[ItemPlan],
+                   reader: Path) -> dict[Path, dict[str, Any]]:
+    """Group pinned items by manifest; every pin already there must still satisfy the reader."""
     groups: dict[Path, dict[str, Any]] = {}
     for plan in plans:
         if plan.pinned:
@@ -765,22 +851,28 @@ def plan_manifests(out_root: Path, database: Path, operator_id: str, plans: list
     with read_only(database) as conn:
         for path, group in groups.items():
             group["existing"], group["sha256"] = load_manifest(path, group["owner"], operator_id, group["scope"])
-            pending = {plan.node_id for plan in group["plans"] if plan.steps}
-            for pin in group["existing"]:
-                if pin["node_id"] in pending:
-                    problems.append(f"{path} already pins {pin['node_id']}, which is not ratified yet")
+            known = {pin["node_id"]: pin for pin in group["existing"]}
+            for plan in group["plans"]:
+                if plan.node_id not in known:
                     continue
-                try:
-                    live = current_pin(conn, pin["node_id"], operator_id)
-                except ConflictError:
-                    live = None
-                if pin != live:
-                    problems.append(f"{path} holds a pin for {pin['node_id']} that no longer matches the store; "
-                                    "repair the manifest before adding to it")
-            known = {pin["node_id"] for pin in group["existing"]}
+                if plan.steps:
+                    problems.append(f"{path} already pins {plan.node_id}, which is not ratified yet")
+                elif known[plan.node_id] != current_pin(conn, plan.node_id, operator_id):
+                    problems.append(f"{path} pins {plan.node_id} at a version the store no longer holds")
             added = sum(plan.node_id not in known for plan in group["plans"])
-            if len(group["existing"]) + added > MAX_PINS:
+            if len(known) + added > MAX_PINS:
                 problems.append(f"{path} would hold more than {MAX_PINS} pins")
+    for path, group in groups.items():
+        if problems or not group["existing"]:
+            continue
+        try:
+            check = readback(reader, database, path, group["scope"], [pin["node_id"] for pin in group["existing"]])
+        except (ImprintError, OSError) as exc:
+            problems.append(f"the reader could not check the pins already in {path}: {exc}")
+            continue
+        if any(problem for problem in check["problems"] if not problem.startswith("unbound read")):
+            problems.append(f"the reader does not accept every pin already in {path}: "
+                            + "; ".join(check["problems"]) + "; repair the manifest before adding to it")
     if problems:
         raise Refusal(problems)
     return groups
@@ -933,10 +1025,10 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
     number = packet["card"]
     database, operator_id = store_identity(Path(root))
     cards = card_store_path(card_store)
-    card, card_store_sha = read_card(cards, number, packet_sha)
-    decisions, not_counted = decide(card, number, [item["statement"] for item in packet["items"]])
+    context = read_card(cards, number, packet_sha)
+    decisions, not_counted = decide(context, number, [item["statement"] for item in packet["items"]])
     plans = plan_items(database, operator_id, packet, packet_sha, decisions)
-    groups = plan_manifests(out_root, database, operator_id, plans)
+    groups = plan_manifests(out_root, database, operator_id, plans, reader)
     receipt_path = out_root / "receipts" / f"card-{number}-{packet_sha[:16]}.json"
     summary = {
         "card": number, "packet_sha256": packet_sha, "receipt": str(receipt_path),
@@ -1003,7 +1095,7 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
         "tool": {"name": "imprint-local", "version": PRODUCT_VERSION},
         "card": number, "packet": {"path": str(Path(packet_path).expanduser().resolve()), "sha256": packet_sha,
                                    "model": packet["model"], "items": len(packet["items"])},
-        "card_store": {"path": str(cards), "sha256": card_store_sha},
+        "card_store": {"path": str(cards), "sha256": context.sha256},
         "imprint_db": str(database), "operator_id": operator_id,
         "reader": {"path": str(reader), "sha256": reader_sha},
         "not_counted": not_counted,
