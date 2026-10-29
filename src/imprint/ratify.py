@@ -20,9 +20,13 @@ Packet (``imprint-ratification-packet/v1``)::
 Pattern items add ``case_ids`` (two or more Case URNs). Domain items add
 ``domain_id`` and ``public_label``; their statement becomes the description.
 
-Answer grammar, one recorded line each, case-insensitive:
-``<card>.<item> yes|no|fix[ <note>]``; ``<card> all yes``; and a bare
-``<card> yes|no|fix[ <note>]`` that counts only on a single-item card.
+The card must carry the packet's SHA-256 (``review_packet_sha256``, ``what`` or
+``objects``). A card that lists ``ratification_items`` must list exactly the
+packet's statements, and its per-item answers are the card program's
+``item_answers``, each checked against the saved message it was recorded from.
+Answer grammar, case-insensitive: ``<card>.<item> yes|no|fix[ <note>]``,
+``<card> all yes``, and a bare ``<card> yes|no|fix[ <note>]`` that counts only on
+a single-item card. A card-level no or fix on a multi-item card refuses the batch.
 """
 
 from __future__ import annotations
@@ -66,15 +70,19 @@ TYPE_KEYS = {"Pattern": frozenset({"case_ids"}), "Domain": frozenset({"domain_id
 ACTIONS = {"yes": "ratify", "no": "reject", "fix": "defer"}
 FINAL_STATES = {"yes": "ratified", "no": "rejected", "fix": "deferred"}
 MECHANISM = "ratification_packet_proposal"
-# The reader binds and returns at most 100 rows for one scope.
 MAX_ITEMS = 100
-MAX_PINS = 100
+# The reader binds at most 50 evidence refs per node; owner wake routes read at most 20 pins per manifest.
+MAX_EVIDENCE = 50
+MAX_PINS = 20
+READER_LIMIT = 100
+MAX_SCOPE_BYTES = 256
 MAX_PACKET_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_CARD_STORE_BYTES = 64 * 1024 * 1024
 READER_TIMEOUT_SECONDS = 120
-# Owners and scope values become path components under the receipts root.
+# Owners and Domain ids are plain slugs; scope values are encoded before they become path parts.
 SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+PATH_SAFE = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 # iCloud Drive syncs these by default on macOS; SYNC_MARKERS covers the other clients.
 SYNCED_HOME_DIRS = ("Documents", "Desktop", "Library/Mobile Documents")
 
@@ -118,6 +126,10 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _text_sha256(value: str) -> str:
+    return _sha256(value.encode("utf-8"))
+
+
 def _file_sha256(path: Path) -> str | None:
     if not path.exists() and not path.is_symlink():
         return None
@@ -156,6 +168,13 @@ def _key(text: str) -> str:
     return " ".join(text.casefold().split()).rstrip(".!")
 
 
+def _unquote(proof: Any) -> str | None:
+    """The card program keeps his typed text inside one pair of double quotes."""
+    if isinstance(proof, str) and len(proof) >= 2 and proof[0] == proof[-1] == '"':
+        return proof[1:-1]
+    return proof if isinstance(proof, str) else None
+
+
 # Packet -------------------------------------------------------------------
 
 
@@ -163,7 +182,8 @@ def load_packet(path: Path) -> tuple[dict[str, Any], str]:
     raw = _read_input(path, "packet", MAX_PACKET_BYTES)
     try:
         packet = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+        json.dumps(packet, ensure_ascii=False).encode("utf-8")
+    except (UnicodeError, ValueError) as exc:
         raise Refusal([f"packet is not UTF-8 JSON ({type(exc).__name__})"]) from exc
     problems = packet_problems(packet)
     if problems:
@@ -193,6 +213,12 @@ def packet_problems(packet: Any) -> list[str]:
     return problems
 
 
+def _scope_value_ok(value: Any) -> bool:
+    """The reader's own rule for one scope value."""
+    return (isinstance(value, str) and bool(value) and value == value.strip() and "\x00" not in value
+            and len(value.encode("utf-8")) <= MAX_SCOPE_BYTES)
+
+
 def _item_problems(item: Any, index: int) -> list[str]:
     if not isinstance(item, dict):
         return ["must be an object"]
@@ -215,11 +241,13 @@ def _item_problems(item: Any, index: int) -> list[str]:
     if not isinstance(scope, dict) or set(scope) != set(SCOPE_KEYS):
         problems.append("scope must have exactly client_id, project_id and domain")
     else:
-        problems.extend(f"scope.{key} must be a lowercase identifier" for key in SCOPE_KEYS
-                        if not isinstance(scope[key], str) or not SAFE_ID.fullmatch(scope[key]))
+        problems.extend(f"scope.{key} must be non-empty text without surrounding spaces, up to "
+                        f"{MAX_SCOPE_BYTES} bytes" for key in SCOPE_KEYS if not _scope_value_ok(scope[key]))
     evidence = item["evidence_ids"]
     if not isinstance(evidence, list) or not evidence:
         problems.append("evidence_ids must name at least one verbatim Evidence node")
+    elif len(evidence) > MAX_EVIDENCE:
+        problems.append(f"evidence_ids may name at most {MAX_EVIDENCE} Evidence nodes")
     elif len(set(map(str, evidence))) != len(evidence):
         problems.append("evidence_ids must be unique")
     else:
@@ -280,28 +308,52 @@ def read_card(path: Path, number: int, packet_sha: str) -> tuple[dict[str, Any],
     return card, _sha256(raw)
 
 
+def _origin(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+
+
+def _answer_records(card: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    records = [("answer", card["answer"])] if isinstance(card.get("answer"), dict) else []
+    records += [("chat_answers", entry) for entry in card.get("chat_answers") or [] if isinstance(entry, dict)]
+    answers = card.get("item_answers")
+    if isinstance(answers, dict):
+        records += [("item_answers", entry) for entry in answers.values() if isinstance(entry, dict)]
+    return records
+
+
+def flagged_proofs(card: dict[str, Any], number: int) -> list[str]:
+    """A saved message the card program found edited or gone voids the card's answers."""
+    return [f"card {number}: the saved message behind {record} {_origin(entry).get('address')} is "
+            f"{_origin(entry)['flag'].get('result')}; re-ask on a new card"
+            for record, entry in _answer_records(card)
+            if isinstance(_origin(entry).get("flag"), dict)
+            and _origin(entry)["flag"].get("result") != "intact"]
+
+
 def recorded_lines(card: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Answer lines the card program recorded, plus records that cannot count."""
-    records = []
-    if isinstance(card.get("answer"), dict):
-        records.append(("answer", card["answer"], card["answer"].get("text")))
-    for entry in card.get("chat_answers") or []:
-        if isinstance(entry, dict):
-            proof = entry.get("proof")
-            if isinstance(proof, str) and len(proof) >= 2 and proof[0] == proof[-1] == '"':
-                proof = proof[1:-1]  # the program keeps his typed line quoted
-            records.append(("chat_answers", entry, proof))
+    """Card-level answer lines the card program recorded, plus records that cannot count.
+
+    Per-item batches (``batch_sha256``) are read through ``item_answers`` instead,
+    where the card program keeps each item's latest answer.
+    """
+    batches = [entry for entry in card.get("chat_answers") or []
+               if isinstance(entry, dict) and entry.get("batch_sha256")]
+    batch_refs = {entry.get("ref") for entry in batches}
     lines, skipped = [], []
-    for record, entry, text in records:
-        origin = entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+    for record, entry in _answer_records(card):
+        if record == "item_answers" or entry.get("batch_sha256"):
+            continue
+        if record == "answer" and (entry.get("ref") in batch_refs or entry.get("reason") == "per-item answers"):
+            continue
+        text = entry.get("text") if record == "answer" else _unquote(entry.get("proof"))
         found = {"record": record, "at": entry.get("at"),
-                 "address": origin.get("address") or entry.get("ref")}
+                 "address": _origin(entry).get("address") or entry.get("ref")}
         if not isinstance(text, str) or not text.strip():
             continue
         if entry.get("channel") == "mail":
             skipped.append({**found, "line": text.strip(), "why": "a mail reply is never an answer"})
             continue
-        if (record == "chat_answers" or entry.get("source") == "chat") and not origin.get("address"):
+        if (record == "chat_answers" or entry.get("source") == "chat") and not _origin(entry).get("address"):
             skipped.append({**found, "line": text.strip(), "why": "a chat answer without its native origin"})
             continue
         lines.extend({**found, "line": " ".join(raw.split())} for raw in text.splitlines() if raw.strip())
@@ -328,10 +380,14 @@ def parse_answer(line: str, number: int, item_count: int) -> tuple[list[tuple[in
     if match:
         if int(match["n"]) != number:
             return [], f"names card {match['n']}", None
-        if item_count != 1:
-            return [], (f"a bare {match['verb'].lower()} counts only on a single-item card; "
+        verb = match["verb"].lower()
+        if item_count != 1 and verb == "yes":
+            return [], (f"a bare yes counts only on a single-item card; "
                         f"answer each item as {number}.<item> yes|no|fix"), None
-        verb, note, why = _verb(match["verb"], match["rest"])
+        if item_count != 1:
+            return [], None, (f"card {number} has a card-level {verb} ({line!r}) on a multi-item card; "
+                              "ask per item on a new card")
+        verb, note, why = _verb(verb, match["rest"])
         return ([(1, verb, note)], None, None) if why is None else ([], why, None)
     return [], "not an answer in the ratification grammar", None
 
@@ -346,25 +402,86 @@ def _verb(verb: str, rest: str) -> tuple[str, str, str | None]:
     return verb, note, None
 
 
-def decide(card: dict[str, Any], number: int, item_count: int) -> tuple[dict[int, Decision], list[dict[str, Any]]]:
+def item_answers(card: dict[str, Any], number: int, statements: list[str]) -> tuple[list[tuple[int, str, str, dict]], list[str]]:
+    """Per-item answers the card program recorded against the card's ratification_items."""
+    if "ratification_items" not in card:
+        return [], ([f"card {number} has item_answers but no ratification_items"]
+                    if card.get("item_answers") else [])
+    if card["ratification_items"] != statements:
+        return [], [f"card {number} lists ratification_items that differ from the packet's statements"]
+    items_sha = _text_sha256(json.dumps(statements, ensure_ascii=False, separators=(",", ":")))
+    batches = {entry["batch_sha256"]: entry for entry in card.get("chat_answers") or []
+               if isinstance(entry, dict) and isinstance(entry.get("batch_sha256"), str)}
+    recorded = card.get("item_answers") or {}
+    if not isinstance(recorded, dict):
+        return [], [f"card {number} item_answers is not an object"]
+    found, problems = [], []
+    for key, entry in sorted(recorded.items(), key=lambda pair: str(pair[0])):
+        where = f"card {number} item answer {key}"
+        if (not isinstance(entry, dict) or not str(key).isdigit() or entry.get("item") != int(key)
+                or not 1 <= int(key) <= len(statements)):
+            problems.append(f"{where} is malformed")
+            continue
+        item, verb, note = int(key), entry.get("verb"), (entry.get("reason") or "").strip()
+        if verb not in ACTIONS or (verb == "fix" and not WORD.search(note)):
+            problems.append(f"{where} is not a yes, a no, or a fix with its note")
+            continue
+        if verb == "yes" and WORD.search(note):
+            problems.append(f"{where} is a yes followed by words; a yes stands alone")
+            continue
+        if not _origin(entry).get("address"):
+            problems.append(f"{where} lacks its native origin")
+            continue
+        if (entry.get("statement_sha256"), entry.get("packet_sha256")) != (
+                _text_sha256(statements[item - 1]), items_sha):
+            problems.append(f"{where} was recorded against a different statement")
+            continue
+        batch = batches.get(entry.get("batch_sha256"))
+        typed = _unquote(batch.get("proof")) if batch else None
+        if typed is None or _text_sha256(typed) != entry.get("batch_sha256"):
+            problems.append(f"{where} is not backed by the saved message it was recorded from")
+            continue
+        matching = [line for line in (" ".join(raw.split()) for raw in typed.splitlines()) if line
+                    and (item, verb, _key(note)) in {(i, v, _key(n)) for i, v, n in
+                                                     parse_answer(line, number, len(statements))[0]}]
+        if not matching:
+            problems.append(f"{where} does not match the saved message it was recorded from")
+            continue
+        found.append((item, verb, note, {"record": "item_answers", "at": entry.get("at"),
+                                         "address": _origin(entry).get("address"), "line": matching[0]}))
+    return found, problems
+
+
+def decide(card: dict[str, Any], number: int, statements: list[str]) -> tuple[dict[int, Decision], list[dict[str, Any]]]:
     """Map every item to exactly one recorded decision, or refuse."""
-    lines, not_counted = recorded_lines(card)
+    count = len(statements)
+    problems = flagged_proofs(card, number)
+    if count > 1 and card.get("status") == "killed" and card.get("killed_by") == "anthony":
+        problems.append(f"card {number} was killed by a card-level no; ask per item on a new card")
     found: dict[int, dict[tuple[str, str], Decision]] = {}
-    problems = []
+
+    def add(item: int, verb: str, note: str, record: dict[str, Any]) -> None:
+        slot = found.setdefault(item, {})
+        slot.setdefault((verb, _key(note)), Decision(item, verb, note)).answers.append(record)
+
+    structured, structured_problems = item_answers(card, number, statements)
+    problems.extend(structured_problems)
+    for item, verb, note, record in structured:
+        add(item, verb, note, record)
+    lines, not_counted = recorded_lines(card)
     for record in lines:
-        answers, why, problem = parse_answer(record["line"], number, item_count)
+        answers, why, problem = parse_answer(record["line"], number, count)
         if problem:
             problems.append(problem)
         elif why:
             not_counted.append({**record, "why": why})
         for item, verb, note in answers:
-            slot = found.setdefault(item, {})
-            slot.setdefault((verb, _key(note)), Decision(item, verb, note)).answers.append(record)
+            add(item, verb, note, record)
     for item in sorted(found):
         if len(found[item]) > 1:
             problems.append(f"card {number} item {item} has conflicting answers: " + "; ".join(
                 repr(decision.answers[0]["line"]) for decision in found[item].values()))
-    unanswered = [str(item) for item in range(1, item_count + 1) if item not in found]
+    unanswered = [str(item) for item in range(1, count + 1) if item not in found]
     if unanswered:
         problems.append(f"card {number} has no recorded answer for item(s) {', '.join(unanswered)}")
     if problems:
@@ -419,7 +536,7 @@ def _evidence_problem(conn: sqlite3.Connection, evidence_id: str, operator_id: s
     content, locator, digest = payload.get("content"), payload.get("source_locator"), payload.get("content_sha256")
     if payload.get("kind") != "operator_verbatim":
         return "is not the operator's verbatim words"
-    if not _text(content) or not _text(locator) or _sha256(content.encode("utf-8")) != digest:
+    if not _text(content) or not _text(locator) or _text_sha256(content) != digest:
         return "has missing or altered content"
     receipts = conn.execute(
         "SELECT kind,locator,content_sha256,event_id FROM source_receipts WHERE source_id=?", (evidence_id,)
@@ -579,6 +696,11 @@ def current_pin(conn: sqlite3.Connection, node_id: str, operator_id: str) -> dic
 # Scope-bindings manifests -------------------------------------------------
 
 
+def _casefold_path(path: Path) -> str:
+    text = str(path)
+    return text.casefold() if sys.platform in {"darwin", "win32"} else text
+
+
 def out_root_path(value: Path) -> Path:
     root = Path(value).expanduser()
     if not root.is_absolute():
@@ -586,16 +708,26 @@ def out_root_path(value: Path) -> Path:
     resolved = root.resolve()
     home = Path.home().resolve()
     synced = [(home / name).resolve() for name in SYNCED_HOME_DIRS]
-    if resolved in {home, Path(resolved.anchor)} or any(
-            marker.lower() in str(resolved).lower() for marker in SYNC_MARKERS) or any(
-            resolved == folder or folder in resolved.parents for folder in synced):
+    candidates = [resolved, *resolved.parents]
+    inside = any(_casefold_path(candidate) == _casefold_path(folder) for candidate in candidates for folder in synced)
+    inside = inside or any(candidate.exists() and folder.exists() and os.path.samefile(candidate, folder)
+                           for candidate in candidates for folder in synced)
+    if _casefold_path(resolved) in {_casefold_path(home), _casefold_path(Path(resolved.anchor))} or inside or any(
+            marker.casefold() in str(resolved).casefold() for marker in SYNC_MARKERS):
         raise Refusal([f"--out-root {root} is the home folder or syncs off this machine"])
     return resolved
 
 
+def path_part(value: str) -> str:
+    """Encode one scope value as a reversible, case-safe file name part."""
+    encoded = "".join(char if char in PATH_SAFE else "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+                      for char in value)
+    return encoded if len(encoded) <= 120 else f"~{_text_sha256(value)}"
+
+
 def manifest_path(out_root: Path, owner: str, scope: dict[str, str]) -> Path:
-    return (out_root / "scope-bindings" / owner / scope["client_id"] / scope["project_id"]
-            / f"{scope['domain']}.json")
+    return (out_root / "scope-bindings" / owner / path_part(scope["client_id"])
+            / path_part(scope["project_id"]) / f"{path_part(scope['domain'])}.json")
 
 
 def load_manifest(path: Path, owner: str, operator_id: str, scope: dict[str, str]) -> tuple[list[dict[str, str]], str | None]:
@@ -613,15 +745,15 @@ def load_manifest(path: Path, owner: str, operator_id: str, scope: dict[str, str
             or manifest["schema"] != BINDINGS_SCHEMA or manifest["binding_kind"] != BINDINGS_KIND
             or not isinstance(bindings, list)
             or not all(isinstance(pin, dict) and set(pin) == set(PIN_KEYS) for pin in bindings)
-            or len({pin["node_id"] for pin in bindings}) != len(bindings)):
+            or len({str(pin["node_id"]) for pin in bindings}) != len(bindings)):
         raise Refusal([f"manifest {path} is not a valid {BINDINGS_SCHEMA} manifest"])
-    if (manifest["owner"], manifest["operator_id"], manifest["scope"]) != (owner, operator_id, scope) or any(
-            pin["operator_id"] != operator_id for pin in bindings):
+    if (manifest["owner"], manifest["operator_id"], manifest["scope"]) != (owner, operator_id, scope):
         raise Refusal([f"manifest {path} belongs to another owner, operator, or scope"])
     return bindings, sha
 
 
 def plan_manifests(out_root: Path, database: Path, operator_id: str, plans: list[ItemPlan]) -> dict[Path, dict[str, Any]]:
+    """Group pinned items by manifest and check every pin already in each one."""
     groups: dict[Path, dict[str, Any]] = {}
     for plan in plans:
         if plan.pinned:
@@ -633,17 +765,20 @@ def plan_manifests(out_root: Path, database: Path, operator_id: str, plans: list
     with read_only(database) as conn:
         for path, group in groups.items():
             group["existing"], group["sha256"] = load_manifest(path, group["owner"], operator_id, group["scope"])
-            pinned = {pin["node_id"]: pin for pin in group["existing"]}
-            for plan in group["plans"]:
-                if plan.node_id not in pinned:
+            pending = {plan.node_id for plan in group["plans"] if plan.steps}
+            for pin in group["existing"]:
+                if pin["node_id"] in pending:
+                    problems.append(f"{path} already pins {pin['node_id']}, which is not ratified yet")
                     continue
-                if plan.steps:
-                    problems.append(f"item {plan.item['item']}: {path} already pins {plan.node_id}, "
-                                    "which is not ratified yet")
-                elif pinned[plan.node_id] != current_pin(conn, plan.node_id, operator_id):
-                    problems.append(f"item {plan.item['item']}: the pin for {plan.node_id} in {path} "
-                                    "no longer matches the store")
-            added = sum(plan.node_id not in pinned for plan in group["plans"])
+                try:
+                    live = current_pin(conn, pin["node_id"], operator_id)
+                except ConflictError:
+                    live = None
+                if pin != live:
+                    problems.append(f"{path} holds a pin for {pin['node_id']} that no longer matches the store; "
+                                    "repair the manifest before adding to it")
+            known = {pin["node_id"] for pin in group["existing"]}
+            added = sum(plan.node_id not in known for plan in group["plans"])
             if len(group["existing"]) + added > MAX_PINS:
                 problems.append(f"{path} would hold more than {MAX_PINS} pins")
     if problems:
@@ -696,9 +831,9 @@ def run_reader(reader: Path, database: Path, scope: dict[str, str], bindings: Pa
     """One read-only reader call with an empty query; Atlas sources are absent paths."""
     with tempfile.TemporaryDirectory(prefix="imprint-ratify-") as scratch:
         command = [
-            sys.executable, "-I", "-B", str(reader),
+            sys.executable, "-I", "-B", "-X", "utf8", str(reader),
             "--client-id", scope["client_id"], "--project-id", scope["project_id"],
-            "--domain", scope["domain"], "--query", "", "--limit", str(MAX_PINS),
+            "--domain", scope["domain"], "--query", "", "--limit", str(READER_LIMIT),
             "--imprint-db", str(database),
             "--atlas-candidates-db", str(Path(scratch) / "absent-atlas-candidates.db"),
             "--atlas-ledger-db", str(Path(scratch) / "absent-atlas-ledger.db"),
@@ -706,9 +841,9 @@ def run_reader(reader: Path, database: Path, scope: dict[str, str], bindings: Pa
         if bindings is not None:
             command += ["--scope-bindings", str(bindings)]
         try:
-            completed = subprocess.run(command, cwd=scratch, capture_output=True, text=True,
+            completed = subprocess.run(command, cwd=scratch, capture_output=True, encoding="utf-8",
                                        timeout=READER_TIMEOUT_SECONDS, check=False)
-        except (OSError, subprocess.SubprocessError) as exc:
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
             raise ConflictError(f"reader could not run: {type(exc).__name__}") from exc
     try:
         result = json.loads(completed.stdout)
@@ -780,6 +915,14 @@ def _item_record(conn: sqlite3.Connection, plan: ItemPlan, pins: dict[str, dict[
     }
 
 
+def _prior_receipt(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: Path,
                  card_store: Path | None = None, dry_run: bool = False) -> dict[str, Any]:
     """Validate everything, then apply a batch. Refusals raise ``Refusal`` before any write."""
@@ -791,7 +934,7 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
     database, operator_id = store_identity(Path(root))
     cards = card_store_path(card_store)
     card, card_store_sha = read_card(cards, number, packet_sha)
-    decisions, not_counted = decide(card, number, len(packet["items"]))
+    decisions, not_counted = decide(card, number, [item["statement"] for item in packet["items"]])
     plans = plan_items(database, operator_id, packet, packet_sha, decisions)
     groups = plan_manifests(out_root, database, operator_id, plans)
     receipt_path = out_root / "receipts" / f"card-{number}-{packet_sha[:16]}.json"
@@ -832,7 +975,7 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
                 sha = write_json_atomic(path, manifest, group["sha256"])
             manifests.append({"path": str(path), "owner": group["owner"], "scope": group["scope"],
                               "pins_added": len(added), "pin_count": len(known) + len(added), "sha256": sha})
-    except (ImprintError, OSError, sqlite3.Error) as exc:
+    except Exception as exc:  # after the first write, every failure must still leave a receipt
         error, status = f"{type(exc).__name__}: {exc}", "partial"
     if status is None:
         try:
@@ -853,20 +996,24 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
             status = "readback_failed"
         else:
             status = "applied" if changed else "already_applied"
+    recorded = "applied" if status == "already_applied" else status
+    prior = _prior_receipt(receipt_path)
     receipt = {
-        "schema": RECEIPT_SCHEMA, "status": "applied" if status == "already_applied" else status,
+        "schema": RECEIPT_SCHEMA, "status": recorded,
         "tool": {"name": "imprint-local", "version": PRODUCT_VERSION},
         "card": number, "packet": {"path": str(Path(packet_path).expanduser().resolve()), "sha256": packet_sha,
                                    "model": packet["model"], "items": len(packet["items"])},
         "card_store": {"path": str(cards), "sha256": card_store_sha},
         "imprint_db": str(database), "operator_id": operator_id,
         "reader": {"path": str(reader), "sha256": reader_sha},
-        "not_counted": not_counted, "operations": performed, "items": items,
-        "manifests": manifests, "readback": checks, "error": error,
-        "started_at": started_at, "completed_at": utc_now(),
+        "not_counted": not_counted,
+        "operations": [*(prior or {}).get("operations", []), *performed],
+        "items": items, "manifests": manifests, "readback": checks, "error": error,
+        "started_at": (prior or {}).get("started_at", started_at), "completed_at": utc_now(),
     }
-    # A finished batch keeps its first receipt; a re-run that changes nothing leaves it alone.
-    if changed or error or _prior_status(receipt_path) != receipt["status"]:
+    # The receipt records what was written. A re-run that writes nothing keeps it,
+    # unless it is the first receipt or it completes an unfinished one.
+    if prior is None or changed or (prior.get("status") != "applied" and recorded == "applied"):
         try:
             write_json_atomic(receipt_path, receipt, _file_sha256(receipt_path))
         except (ImprintError, OSError) as exc:
@@ -878,10 +1025,3 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
                                                   "unbound_claims": check["unbound_claim_count"]}
                                                  for check in checks],
             "error": error}
-
-
-def _prior_status(path: Path) -> str | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8")).get("status")
-    except (OSError, ValueError, AttributeError):
-        return None

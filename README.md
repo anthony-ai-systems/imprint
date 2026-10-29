@@ -167,15 +167,21 @@ statements, and numbered items, each with an owner, a Principle, Belief, Value,
 Rule, Domain or Pattern statement, an exact `client_id`/`project_id`/`domain`
 scope, the operator's verbatim Evidence IDs, and limits). It reads the card store
 (`--card-store`, else `$AGENTS_CARD_STORE`, else
-`~/.local/share/thirty-second-card/state/asks.json`) without writing it, requires
-the card to name the packet's SHA-256, and counts only answer lines the card
-program recorded: `<card>.<item> yes|no|fix[ <note>]`, `<card> all yes`, or a bare
-answer on a single-item card. It refuses before any write when an item has no
-answer, answers conflict, or evidence or scope is missing. Every item becomes an
-evidenced inferred candidate; a yes is then ratified by the configured operator
-and pinned in `<out-root>/scope-bindings/<owner>/<client_id>/<project_id>/<domain>.json`
-(Domain items are ratified but not pinned, because the reader does not bind them),
-a no is rejected, and a fix is deferred with its note. Receipts go to
+`~/.local/share/thirty-second-card/state/asks.json`) without writing it. The card
+must name the packet's SHA-256, and a card with `ratification_items` must list
+exactly the packet's statements. Only answers the card program recorded count:
+its per-item `item_answers`, each checked against the saved message behind it, and
+recorded lines in the grammar `<card>.<item> yes|no|fix[ <note>]`, `<card> all yes`,
+or a bare answer on a single-item card. It refuses before any write when an item
+has no answer, answers conflict, a proof is flagged as tampered or missing, a
+multi-item card carries a card-level no or fix, or evidence or scope is missing.
+Every item becomes an evidenced inferred candidate; a yes is then ratified by the
+configured operator and pinned in the owner's manifest
+`<out-root>/scope-bindings/<owner>/<client_id>/<project_id>/<domain>.json` (scope
+values are percent-encoded; at most 20 pins; Domain items are ratified but not
+pinned, because the reader does not bind them), a no is rejected, and a fix is
+deferred with its note. An owner whose wake route pins a bindings file registers
+the manifest path and SHA-256 the receipt reports. Receipts go to
 `<out-root>/receipts/`; `--out-root` is required and may not be the home folder or
 a synced folder. The readback runs `--reader`, the native judgment reader,
 read-only: a bound read with an empty query must return the new claims and an

@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,7 @@ import pytest
 from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.cli import main
 from imprint.errors import ImprintError
-from imprint.ratify import Refusal, apply_packet, node_id_for, parse_answer
+from imprint.ratify import Refusal, apply_packet, node_id_for, parse_answer, path_part
 from imprint.store import ImprintStore
 
 
@@ -61,6 +63,10 @@ print(json.dumps(result))
 '''
 
 
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 class Batch:
     """One synthetic Imprint store, card store, reader and receipts root."""
 
@@ -80,6 +86,7 @@ class Batch:
         self.cards = tmp_path / "card-state" / "asks.json"
         self.out = tmp_path / "ratify-out"
         self.packet = tmp_path / "packet.json"
+        self.statements: list[str] = []
         if reader is None:
             reader = tmp_path / "stub_reader.py"
             reader.write_text(STUB_READER)
@@ -91,48 +98,100 @@ class Batch:
             case_description="Synthetic review of a draft", raw_operator_text=text,
             call_type="prefer", capture_mechanism="explicit_cli", captured_by="imprint-test",
             contextual_evidence=([{"kind": "context", "content": context,
-                                  "source_locator": "synthetic:thread"}] if context else ()),
+                                   "source_locator": "synthetic:thread"}] if context else ()),
         )
         self.store.apply_capture(envelope)
         extra = envelope["evidence"][1]["evidence_id"] if context else None
         return envelope["evidence"][0]["evidence_id"], envelope["case"]["case_id"], extra
 
     def item(self, number: int, statement: str, evidence: list[str], *, node_type: str = "Principle",
-             **extra) -> dict:
+             scope: dict | None = None, **extra) -> dict:
         return {"item": number, "owner": "example-owner", "node_type": node_type, "statement": statement,
-                "scope": dict(SCOPE), "evidence_ids": evidence,
+                "scope": dict(scope or SCOPE), "evidence_ids": evidence,
                 "limits": ["Synthetic drafts only."], **extra}
 
     def write_packet(self, items: list[dict], *, card: int = CARD) -> str:
         raw = json.dumps({"schema": "imprint-ratification-packet/v1", "card": card,
                           "model": "synthetic-model", "items": items}, indent=2).encode()
         self.packet.write_bytes(raw)
+        self.statements = [item["statement"] for item in items]
         return hashlib.sha256(raw).hexdigest()
 
-    def write_card(self, lines: list[str], sha: str, *, card: int = CARD, **fields) -> None:
-        answers = [{
-            "at": f"2026-10-28T12:{index:02d}:00", "source": "chat", "where": "fully-aware",
-            "verb": "yes", "reason": "", "proof": f'"{line}"', "ref": f"t3:synthetic-thread:message-{index}",
-            "origin": {"address": f"t3:synthetic-thread:message-{index}", "shape": "typed"},
-            "result": "recorded",
-        } for index, line in enumerate(lines)]
-        record = {"n": card, "kind": "ask", "owner": "example-owner", "status": "out",
+    def write_card(self, sha: str, *, batches: tuple = (), lines: tuple = (), card: int = CARD,
+                   per_item: bool = True, **fields) -> dict:
+        """Record answers the way the card program does: per-item batches and card-level lines."""
+        record = {"n": card, "kind": "ask", "pen": "agent", "owner": "example-owner", "status": "out",
                   "what": "Ratify synthetic judgments.", "objects": [f"Ratification packet sha256 {sha}"],
-                  "chat_answers": answers, **fields}
+                  "chat_answers": []}
+        if per_item:
+            record["ratification_items"] = list(self.statements)
+        for index, text in enumerate(batches):
+            self._record_batch(record, text, index)
+        for index, line in enumerate(lines, start=len(batches)):
+            address = f"t3:synthetic-thread:message-{index}"
+            record["chat_answers"].append({
+                "at": f"2026-10-28T12:{index:02d}:00", "source": "chat", "where": "fully-aware",
+                "verb": line.split()[-1].lower(), "reason": "", "proof": f'"{line}"', "ref": address,
+                "origin": {"address": address, "shape": "typed"}, "result": "recorded"})
+        record.update(fields)
         self.cards.parent.mkdir(parents=True, exist_ok=True)
         self.cards.write_text(json.dumps({"next": card + 1, "cards": [record]}))
+        return record
+
+    def _record_batch(self, record: dict, text: str, index: int) -> None:
+        statements = record["ratification_items"]
+        items_sha = _sha(json.dumps(statements, ensure_ascii=False, separators=(",", ":")))
+        address = f"t3:synthetic-thread:message-{index}"
+        origin = {"address": address, "fingerprint": _sha(text), "shape": "typed"}
+        actions = []
+        for row in text.splitlines():
+            one = re.fullmatch(r"([1-9]\d*)\.([1-9]\d*)\s+(yes|no|fix)(?:\s+(.*))?", row.strip(), re.I)
+            if one:
+                actions.append((int(one[2]), one[3].lower(), (one[4] or "").strip()))
+            elif re.fullmatch(r"([1-9]\d*)\s+all\s+yes", row.strip(), re.I):
+                actions += [(item, "yes", "") for item in range(1, len(statements) + 1)]
+            else:
+                actions.append((1, "yes", ""))
+        answers = record.setdefault("item_answers", {})
+        for item, verb, note in actions:
+            answers[str(item)] = {
+                "item": item, "verb": verb, "reason": note, "source": "chat", "where": "fully-aware",
+                "at": f"2026-10-28T11:{index:02d}:00", "ref": address, "origin": dict(origin),
+                "statement_sha256": _sha(statements[item - 1]), "packet_sha256": items_sha,
+                "batch_sha256": _sha(text)}
+        record["chat_answers"].append({
+            "at": f"2026-10-28T11:{index:02d}:00", "source": "chat", "where": "fully-aware", "verb": "items",
+            "reason": "", "proof": f'"{text}"', "ref": address, "origin": dict(origin),
+            "batch_sha256": _sha(text), "packet_sha256": items_sha,
+            "items": [{"item": item, "verb": verb, "reason": note} for item, verb, note in actions]})
+        if len(answers) == len(statements):
+            record["answer"] = {"at": "2026-10-28T11:59:00", "channel": "chat", "source": "chat",
+                                "verb": "yes", "reason": "per-item answers", "text": text,
+                                "proof": f'"{text}"', "ref": address, "origin": dict(origin)}
+
+    def edit_card(self, change) -> None:
+        state = json.loads(self.cards.read_text())
+        change(state["cards"][0])
+        self.cards.write_text(json.dumps(state))
 
     def run(self, **overrides) -> dict:
         arguments = {"root": self.root, "packet_path": self.packet, "out_root": self.out,
                      "reader_path": self.reader, "card_store": self.cards}
         return apply_packet(**{**arguments, **overrides})
 
+    def refused(self, **overrides) -> list[str]:
+        before = self.snapshot()
+        with pytest.raises(Refusal) as refusal:
+            self.run(**overrides)
+        assert self.snapshot() == before
+        return refusal.value.reasons
+
     def node(self, node_type: str, sha: str, item: int) -> str:
         return node_id_for(node_type, self.operator, sha, item)
 
     def manifest(self, owner: str = "example-owner", scope: dict = SCOPE) -> Path:
-        return (self.out / "scope-bindings" / owner / scope["client_id"] / scope["project_id"]
-                / f"{scope['domain']}.json")
+        return (self.out / "scope-bindings" / owner / path_part(scope["client_id"])
+                / path_part(scope["project_id"]) / f"{path_part(scope['domain'])}.json")
 
     def heads(self) -> dict[str, dict]:
         return {row["node_id"]: row for row in self.store.current_nodes()}
@@ -143,7 +202,7 @@ class Batch:
                       for name in ("events", "nodes", "node_versions", "source_receipts")}
         files = {str(path.relative_to(self.tmp)): path.read_bytes()
                  for path in sorted(self.out.rglob("*")) if path.is_file()} if self.out.exists() else {}
-        return {"tables": tables, "files": files, "cards": self.cards.read_bytes()}
+        return {"tables": tables, "files": files, "cards": self.cards.read_bytes() if self.cards.exists() else b""}
 
 
 def _three_item_batch(batch: Batch) -> str:
@@ -157,10 +216,13 @@ def _three_item_batch(batch: Batch) -> str:
     ])
 
 
+MIXED = "9001.1 yes\n9001.2 NO not a standing rule\n9001.3 fix name the source first"
+
+
 def test_mixed_packet_ratifies_rejects_and_defers(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes", "9001.2 NO not a standing rule", "9001.3 fix name the source first"], sha)
+    batch.write_card(sha, batches=(MIXED,))
     cards_before = batch.cards.read_bytes()
 
     result = batch.run()
@@ -175,8 +237,9 @@ def test_mixed_packet_ratifies_rejects_and_defers(tmp_path):
     assert (candidate["authority_tier"], candidate["provenance"]["model"]) == ("inferred_candidate", "synthetic-model")
     assert candidate["evidence"] == json.loads(batch.packet.read_text())["items"][0]["evidence_ids"]
     assert no not in heads
-    assert [event["event_type"] for event in batch.store.node_history(no)["dispositions"]] == ["rejected"]
-    assert batch.store.node_history(no)["dispositions"][0]["payload"]["reason"].endswith(": not a standing rule")
+    rejection = batch.store.node_history(no)["dispositions"]
+    assert [event["event_type"] for event in rejection] == ["rejected"]
+    assert rejection[0]["payload"]["reason"].endswith(": not a standing rule")
     assert heads[fix]["provenance_status"] == "inferred"
     deferral = batch.store.node_history(fix)["dispositions"]
     assert [event["event_type"] for event in deferral] == ["deferred"]
@@ -202,7 +265,7 @@ def test_mixed_packet_ratifies_rejects_and_defers(tmp_path):
 def test_rerun_of_the_same_packet_changes_nothing(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes", "9001.2 no", "9001.3 fix tighten the wording"], sha)
+    batch.write_card(sha, batches=(MIXED,))
     assert batch.run()["status"] == "applied"
     before = batch.snapshot()
 
@@ -213,10 +276,26 @@ def test_rerun_of_the_same_packet_changes_nothing(tmp_path):
     assert batch.snapshot() == before
 
 
+def test_rerun_keeps_the_receipt_when_only_the_readback_changes(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=(MIXED,))
+    receipt = Path(batch.run()["receipt"])
+    before = batch.snapshot()
+    broken = tmp_path / "broken_reader.py"
+    broken.write_text("import sys\nprint('{}')\nsys.exit(2)\n")
+
+    again = batch.run(reader_path=broken)
+
+    assert again["status"] == "readback_failed" and "reader exited 2" in again["error"]
+    assert batch.snapshot() == before
+    assert json.loads(receipt.read_text())["status"] == "applied"
+
+
 def test_interrupted_batch_resumes_to_the_same_end_state(tmp_path, monkeypatch):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes", "9001.2 no", "9001.3 fix tighten the wording"], sha)
+    batch.write_card(sha, batches=(MIXED,))
 
     def interrupted(self, node_id, **kwargs):
         raise ImprintError("simulated interruption")
@@ -230,8 +309,9 @@ def test_interrupted_batch_resumes_to_the_same_end_state(tmp_path, monkeypatch):
     resumed = batch.run()
 
     assert (resumed["status"], resumed["changed"]) == ("applied", True)
-    assert [item["operation"] for item in json.loads(Path(resumed["receipt"]).read_text())["operations"]] == [
-        "reject", "append", "defer"]
+    operations = json.loads(Path(resumed["receipt"]).read_text())["operations"]
+    assert [(entry["item"], entry["operation"]) for entry in operations] == [
+        (1, "append"), (1, "ratify"), (2, "append"), (2, "reject"), (3, "append"), (3, "defer")]
     assert batch.node("Rule", sha, 2) not in batch.heads()
     assert batch.run()["status"] == "already_applied"
 
@@ -239,41 +319,36 @@ def test_interrupted_batch_resumes_to_the_same_end_state(tmp_path, monkeypatch):
 def test_refuses_an_item_without_a_recorded_answer(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes", "9001.3 no"], sha)
-    before = batch.snapshot()
+    batch.write_card(sha, batches=("9001.1 yes\n9001.3 no",))
 
-    with pytest.raises(Refusal) as refused:
-        batch.run()
-
-    assert "card 9001 has no recorded answer for item(s) 2" in refused.value.reasons
-    assert batch.snapshot() == before and not batch.out.exists()
+    assert "card 9001 has no recorded answer for item(s) 2" in batch.refused()
+    assert not batch.out.exists()
 
 
 def test_counts_only_answers_the_card_program_recorded(tmp_path):
     batch = Batch(tmp_path)
     evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
     sha = batch.write_packet([batch.item(1, "Keep weekly status notes short.", [evidence])])
-    batch.write_card([], sha, history=[{"event": "note", "note": "9001 yes"}], fix="9001 yes",
+    batch.write_card(sha, per_item=False, history=[{"event": "note", "note": "9001 yes"}], fix="9001 yes",
                      their_words={"quote": "9001 yes"},
-                     unproven=[{"channel": "mail", "verb": "yes", "ref": "mail:synthetic"}])
-    card = json.loads(batch.cards.read_text())
-    card["cards"][0]["chat_answers"] = [{"at": "2026-10-28T12:00:00", "source": "chat", "proof": '"9001 yes"'}]
-    batch.cards.write_text(json.dumps(card))
+                     unproven=[{"channel": "mail", "verb": "yes", "ref": "mail:synthetic"}],
+                     chat_answers=[{"at": "2026-10-28T12:00:00", "source": "chat", "proof": '"9001 yes"'}])
 
-    with pytest.raises(Refusal) as refused:
-        batch.run()
+    reasons = batch.refused()
 
-    assert "card 9001 has no recorded answer for item(s) 1" in refused.value.reasons
-    assert any("without its native origin" in reason for reason in refused.value.reasons)
+    assert "card 9001 has no recorded answer for item(s) 1" in reasons
+    assert any("without its native origin" in reason for reason in reasons)
     assert not batch.out.exists()
 
 
 @pytest.mark.parametrize("defect, expected", [
     ("no evidence", "evidence_ids must name at least one verbatim Evidence node"),
+    ("too much evidence", "evidence_ids may name at most 50 Evidence nodes"),
     ("unknown evidence", "is not in the store"),
     ("context evidence", "is not the operator's verbatim words"),
     ("no scope", "missing scope"),
     ("partial scope", "scope must have exactly client_id, project_id and domain"),
+    ("padded scope", "scope.domain must be non-empty text without surrounding spaces"),
 ])
 def test_refuses_missing_evidence_or_scope(tmp_path, defect, expected):
     batch = Batch(tmp_path)
@@ -281,92 +356,173 @@ def test_refuses_missing_evidence_or_scope(tmp_path, defect, expected):
     item = batch.item(1, "Keep weekly status notes short.", [verbatim])
     if defect == "no evidence":
         item["evidence_ids"] = []
+    elif defect == "too much evidence":
+        item["evidence_ids"] = [new_urn("evidence") for _ in range(51)]
     elif defect == "unknown evidence":
         item["evidence_ids"] = [new_urn("evidence")]
     elif defect == "context evidence":
         item["evidence_ids"] = [context]
     elif defect == "no scope":
         del item["scope"]
-    else:
+    elif defect == "partial scope":
         del item["scope"]["project_id"]
-    batch.write_card(["9001 yes"], batch.write_packet([item]))
-    before = batch.snapshot()
+    else:
+        item["scope"]["domain"] = " example-domain"
+    batch.write_card(batch.write_packet([item]), batches=("9001 yes",))
 
-    with pytest.raises(Refusal) as refused:
-        batch.run()
+    reasons = batch.refused()
 
-    assert any(expected in reason for reason in refused.value.reasons), refused.value.reasons
-    assert batch.snapshot() == before and not batch.out.exists()
+    assert any(expected in reason for reason in reasons), reasons
+    assert not batch.out.exists()
+
+
+def test_refuses_text_that_cannot_be_stored(tmp_path):
+    batch = Batch(tmp_path)
+    evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
+    raw = json.dumps({"schema": "imprint-ratification-packet/v1", "card": CARD, "model": "synthetic-model",
+                      "items": [batch.item(1, "Keep notes short.", [evidence])]})
+    batch.packet.write_text(raw.replace("Keep notes short.", "Keep notes short \\ud800"))
+    batch.write_card(hashlib.sha256(batch.packet.read_bytes()).hexdigest(), per_item=False, lines=("9001 yes",))
+
+    assert any("packet is not UTF-8 JSON" in reason for reason in batch.refused())
 
 
 def test_bare_yes_counts_only_on_a_single_item_card(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001 yes"], sha)
-    before = batch.snapshot()
+    batch.write_card(sha, per_item=False, lines=("9001 yes",))
 
-    with pytest.raises(Refusal) as refused:
-        batch.run()
+    reasons = batch.refused()
 
-    assert "card 9001 has no recorded answer for item(s) 1, 2, 3" in refused.value.reasons
-    assert any("a bare yes counts only on a single-item card" in reason for reason in refused.value.reasons)
-    assert batch.snapshot() == before
+    assert "card 9001 has no recorded answer for item(s) 1, 2, 3" in reasons
+    assert any("a bare yes counts only on a single-item card" in reason for reason in reasons)
+
+    for name, record in (("legacy", {"per_item": False, "lines": ("Card 9001 YES",)}),
+                         ("per-item", {"batches": ("9001 yes",)})):
+        single = Batch(tmp_path / name)
+        evidence, _, _ = single.evidence("Keep weekly status notes to five lines.")
+        sha = single.write_packet([single.item(1, "Keep weekly status notes short.", [evidence])])
+        single.write_card(sha, **record)
+        assert single.run()["status"] == "applied"
+        assert single.heads()[single.node("Principle", sha, 1)]["provenance_status"] == "ratified"
+
+
+def test_card_level_no_or_fix_on_a_multi_item_card_refuses(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=("9001 all yes",), lines=("9001 no",), status="killed", killed_by="anthony")
+    reasons = batch.refused()
+    assert "card 9001 was killed by a card-level no; ask per item on a new card" in reasons
+    assert any("card-level no" in reason for reason in reasons)
+
+    batch.write_card(sha, batches=("9001 all yes",), lines=("9001 fix item 2 is too broad",), status="edited")
+    assert any("card-level fix" in reason for reason in batch.refused())
+
+    batch.write_card(sha, batches=("9001 all yes",), status="killed", killed_by="anthony",
+                     answer={"channel": "imessage", "text": "9001 no", "at": "2026-10-28T13:00:00"})
+    assert len(batch.refused()) >= 2
+    assert not batch.out.exists()
+
+
+def test_latest_item_answer_wins_and_card_level_conflicts_refuse(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=("9001.1 yes\n9001.2 fix shorter\n9001.3 yes", "9001.2 yes"))
+
+    result = batch.run()
+
+    assert result["status"] == "applied" and result["decisions"] == {"1": "yes", "2": "yes", "3": "yes"}
+    assert result["readback"][0]["bound_claims"] == 3
+    pinned = [pin["node_id"] for pin in json.loads(batch.manifest().read_text())["bindings"]]
+    assert pinned == [batch.node("Principle", sha, 1), batch.node("Rule", sha, 2), batch.node("Belief", sha, 3)]
 
     single = Batch(tmp_path / "single")
     evidence, _, _ = single.evidence("Keep weekly status notes to five lines.")
     sha = single.write_packet([single.item(1, "Keep weekly status notes short.", [evidence])])
-    single.write_card(["Card 9001 YES"], sha)
-    assert single.run()["status"] == "applied"
-    assert single.heads()[single.node("Principle", sha, 1)]["provenance_status"] == "ratified"
+    single.write_card(sha, batches=("9001 yes",), lines=("9001 no",), status="killed", killed_by="anthony")
+    assert any("item 1 has conflicting answers" in reason for reason in single.refused())
 
 
-def test_all_yes_approves_every_item_and_conflicting_answers_refuse(tmp_path):
+def test_refuses_flagged_or_mismatched_item_answers(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001 all yes", "9001.2 no"], sha)
-    with pytest.raises(Refusal) as refused:
-        batch.run()
-    assert any("item 2 has conflicting answers" in reason for reason in refused.value.reasons)
-    assert not batch.out.exists()
 
-    batch.write_card(["9001 all yes", "9001.2 yes"], sha)
-    result = batch.run()
-    assert result["status"] == "applied" and result["readback"][0]["bound_claims"] == 3
-    pinned = [pin["node_id"] for pin in json.loads(batch.manifest().read_text())["bindings"]]
-    assert pinned == [batch.node("Principle", sha, 1), batch.node("Rule", sha, 2), batch.node("Belief", sha, 3)]
+    def flag(card):
+        card["item_answers"]["2"]["origin"]["flag"] = {"result": "tampered", "detail": "edited"}
+
+    def restate(card):
+        card["item_answers"]["2"]["statement_sha256"] = _sha("A statement he never saw.")
+
+    def unbacked(card):
+        card["chat_answers"] = []
+
+    def reverb(card):
+        card["item_answers"]["2"]["verb"] = "no"
+
+    def relist(card):
+        card["ratification_items"][1] = "Book reviews on any day."
+
+    for change, expected in ((flag, "is tampered"), (restate, "recorded against a different statement"),
+                             (unbacked, "is not backed by the saved message"),
+                             (reverb, "does not match the saved message"),
+                             (relist, "ratification_items that differ from the packet's statements")):
+        batch.write_card(sha, batches=("9001 all yes",))
+        batch.edit_card(change)
+        assert any(expected in reason for reason in batch.refused()), expected
+    assert not batch.out.exists()
 
 
 def test_refuses_a_card_that_does_not_show_this_packet(tmp_path):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001 all yes"], sha, objects=["Some other packet"], what="Ratify something.")
-    with pytest.raises(Refusal) as refused:
-        batch.run()
-    assert any("does not name this packet's sha256" in reason for reason in refused.value.reasons)
+    batch.write_card(sha, batches=("9001 all yes",), objects=["Some other packet"], what="Ratify something.")
+    assert any("does not name this packet's sha256" in reason for reason in batch.refused())
 
-    batch.write_card(["9001 all yes"], sha, killed_by="owner", withdrawn_at="2026-10-28T13:00:00")
-    with pytest.raises(Refusal) as refused:
-        batch.run()
-    assert "card 9001 was withdrawn by its owner" in refused.value.reasons
+    batch.write_card(sha, batches=("9001 all yes",), killed_by="owner", withdrawn_at="2026-10-28T13:00:00")
+    assert "card 9001 was withdrawn by its owner" in batch.refused()
     assert not batch.out.exists()
 
 
-def test_second_packet_appends_to_the_owner_manifest(tmp_path):
+def test_second_packet_appends_and_stale_pins_refuse_first(tmp_path):
     batch = Batch(tmp_path)
     first_evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
     first = batch.write_packet([batch.item(1, "Keep weekly status notes short.", [first_evidence])])
-    batch.write_card(["9001 yes"], first)
+    batch.write_card(first, batches=("9001 yes",))
     assert batch.run()["status"] == "applied"
 
     second_evidence, _, _ = batch.evidence("Lead every summary with the decision.")
     second = batch.write_packet([batch.item(1, "Summaries open with the decision.", [second_evidence])],
                                 card=9002)
-    batch.write_card(["9002.1 yes"], second, card=9002)
+    batch.write_card(second, batches=("9002.1 yes",), card=9002)
     result = batch.run()
 
     assert result["status"] == "applied" and result["readback"][0]["bound_claims"] == 2
     pinned = [pin["node_id"] for pin in json.loads(batch.manifest().read_text())["bindings"]]
     assert pinned == [batch.node("Principle", first, 1), batch.node("Principle", second, 1)]
+
+    batch.store.tombstone_node(batch.node("Principle", first, 1), reason="Synthetic retirement.")
+    third_evidence, _, _ = batch.evidence("Put the ask in the first line.")
+    third = batch.write_packet([batch.item(1, "Lead with the ask.", [third_evidence])], card=9003)
+    batch.write_card(third, batches=("9003 yes",), card=9003)
+    assert any("no longer matches the store" in reason for reason in batch.refused())
+    assert any("no longer matches the store" in reason for reason in batch.refused(dry_run=True))
+
+
+def test_scope_values_the_reader_accepts_are_encoded_into_paths(tmp_path):
+    batch = Batch(tmp_path)
+    scope = {"client_id": "Example Client", "project_id": "ABC1-example", "domain": "web/../design"}
+    evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
+    sha = batch.write_packet([batch.item(1, "Keep weekly status notes short.", [evidence], scope=scope)])
+    batch.write_card(sha, batches=("9001 yes",))
+
+    result = batch.run()
+
+    assert result["status"] == "applied"
+    path = batch.manifest(scope=scope)
+    assert path.relative_to(batch.out).parts == (
+        "scope-bindings", "example-owner", "%45xample%20%43lient", "%41%42%431-example", "web%2F%2E%2E%2Fdesign.json")
+    assert json.loads(path.read_text())["scope"] == scope
+    assert path_part("x" * 200).startswith("~")
 
 
 def test_pattern_items_are_pinned_and_domain_items_are_not(tmp_path):
@@ -378,7 +534,7 @@ def test_pattern_items_are_pinned_and_domain_items_are_not(tmp_path):
         batch.item(2, "Status reporting for internal reviews.", [one], node_type="Domain",
                    domain_id="status-reporting", public_label="Status reporting"),
     ])
-    batch.write_card(["9001 all yes"], sha)
+    batch.write_card(sha, batches=("9001 all yes",))
 
     result = batch.run()
 
@@ -395,26 +551,29 @@ def test_pattern_items_are_pinned_and_domain_items_are_not(tmp_path):
 def test_dry_run_and_synced_receipt_roots_write_nothing(tmp_path, monkeypatch):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001 all yes"], sha)
+    batch.write_card(sha, batches=("9001 all yes",))
     before = batch.snapshot()
 
     plan = batch.run(dry_run=True)
 
     assert plan["status"] == "dry_run" and [entry["steps"] for entry in plan["pending"]] == [["append", "ratify"]] * 3
     assert batch.snapshot() == before and not batch.out.exists()
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    for synced in ("Documents/ratify", "Desktop", "Library/Mobile Documents/ratify", "Dropbox/ratify"):
-        with pytest.raises(Refusal):
-            batch.run(out_root=tmp_path / "home" / synced)
-        assert not (tmp_path / "home").exists()
-    with pytest.raises(Refusal):
-        batch.run(out_root=Path("relative/ratify"))
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    synced = ["Documents/ratify", "Desktop", "Library/Mobile Documents/ratify", "Dropbox/ratify", "."]
+    if sys.platform in {"darwin", "win32"}:
+        synced.append("documents/ratify")
+    for name in synced:
+        batch.refused(out_root=home / name)
+        assert not home.exists()
+    batch.refused(out_root=Path("relative/ratify"))
 
 
 def test_cli_requires_an_explicit_config_and_reports_refusals(tmp_path, capsys, monkeypatch):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes"], sha)
+    batch.write_card(sha, batches=("9001.1 yes",))
     arguments = ["ratify", "apply", "--packet", str(batch.packet), "--out-root", str(batch.out),
                  "--reader", str(batch.reader)]
     monkeypatch.setenv("AGENTS_CARD_STORE", str(batch.cards))
@@ -425,7 +584,7 @@ def test_cli_requires_an_explicit_config_and_reports_refusals(tmp_path, capsys, 
     refused = json.loads(capsys.readouterr().out)
     assert refused["status"] == "refused" and "card 9001 has no recorded answer for item(s) 2, 3" in refused["reasons"]
 
-    batch.write_card(["9001.1 yes", "9001.2 yes", "9001.3 yes"], sha)
+    batch.write_card(sha, batches=("9001.1 yes\n9001.2 yes\n9001.3 yes",))
     assert main(["--config", str(batch.config), *arguments]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "applied"
     assert main(["--config", str(batch.config), *arguments]) == 0
@@ -443,6 +602,9 @@ def test_cli_requires_an_explicit_config_and_reports_refusals(tmp_path, capsys, 
     ("9001.1 fix", ([], "a fix needs its note", None)),
     ("9001.1 yesterday", ([], "not an answer in the ratification grammar", None)),
     ("9002.1 yes", ([], "names card 9002", None)),
+    ("9001 yes", ([], "a bare yes counts only on a single-item card; answer each item as 9001.<item> yes|no|fix",
+                  None)),
+    ("9001 no", ([], None, "card 9001 has a card-level no ('9001 no') on a multi-item card; ask per item on a new card")),
     ("9001.4 yes", ([], None, "answer '9001.4 yes' names item 4, but the packet has 3 item(s)")),
 ])
 def test_answer_grammar(line, expected):
@@ -454,7 +616,7 @@ def test_answer_grammar(line, expected):
 def test_readback_through_the_native_reader(tmp_path):
     batch = Batch(tmp_path, reader=Path(os.environ["IMPRINT_RATIFY_READER"]))
     sha = _three_item_batch(batch)
-    batch.write_card(["9001.1 yes", "9001.2 no", "9001.3 fix tighten the wording"], sha)
+    batch.write_card(sha, batches=(MIXED,))
 
     result = batch.run()
 
