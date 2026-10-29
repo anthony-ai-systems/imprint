@@ -21,12 +21,12 @@ Pattern items add ``case_ids`` (two or more Case URNs). Domain items add
 ``domain_id`` and ``public_label``; their statement becomes the description.
 
 The card must carry the packet's SHA-256 (``review_packet_sha256``, ``what`` or
-``objects``). A card that lists ``ratification_items`` must list exactly the
-packet's statements, and its per-item answers are the card program's
-``item_answers``, each checked against the saved message it was recorded from.
-Answer grammar, case-insensitive: ``<card>.<item> yes|no|fix[ <note>]``,
-``<card> all yes``, and a bare ``<card> yes|no|fix[ <note>]`` that counts only on
-a single-item card. A card-level no or fix on a multi-item card refuses the batch.
+``objects``) and list exactly the packet's statements as ``ratification_items``.
+Per-item answers are the card program's ``item_answers``, each checked against
+the saved message it was recorded from. Answer grammar, case-insensitive:
+``<card>.<item> yes|no|fix[ <note>]``, ``<card> all yes``, and a bare
+``<card> yes|no|fix[ <note>]`` that counts only on a single-item card. Any other
+card-level answer refuses the batch.
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ PATH_SAFE = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 SYNCED_HOME_DIRS = ("Documents", "Desktop", "Library/Mobile Documents")
 
 _CARD = r"^(?:card\s*)?#?(?P<n>\d+)"
-_GAP = r"(?:\s*[-:,)]+\s*|\s+)"
+_GAP = r"(?:\s*[-:.,)]+\s*|\s+)"
 _VERB = r"(?P<verb>yes|no|fix)\b(?P<rest>.*)$"
 ITEM_ANSWER = re.compile(_CARD + r"\.(?P<item>\d+)" + _GAP + _VERB, re.I)
 ALL_YES = re.compile(_CARD + r"\s+all\s+yes\W*$", re.I)
@@ -97,7 +97,7 @@ WORD = re.compile(r"[^\W_]")
 ITEM_ROW = re.compile(r"^([1-9]\d*)\.([1-9]\d*)\s+(yes|no|fix)(?:\s+(.*))?$", re.I)
 ALL_ROW = re.compile(r"^([1-9]\d*)\s+all\s+yes$", re.I)
 BARE_ROW = re.compile(r"^(?:card\s*)?#?(\d+)\s*[-:.,)]*\s*(yes|no|fix)\b[\s:,.!-]*(.*?)$", re.I | re.S)
-# History events the card program writes for a card-level answer from Anthony.
+# History events the card program writes for the operator's own card-level answer.
 CARD_LEVEL_EVENTS = frozenset({"yes", "killed", "edit", "sent by him"})
 
 
@@ -475,8 +475,8 @@ def batch_answers(typed: str, number: int, item_count: int) -> list[tuple[int, s
 def item_answers(card: dict[str, Any], number: int, statements: list[str]) -> tuple[list[tuple[int, str, str, dict]], list[str]]:
     """Per-item answers the card program recorded against the card's ratification_items."""
     if "ratification_items" not in card:
-        return [], ([f"card {number} has item_answers but no ratification_items"]
-                    if card.get("item_answers") else [])
+        return [], [f"card {number} has no ratification_items; a ratification card must list the packet's "
+                    "statements so every answer is tied to the words the operator saw"]
     if card["ratification_items"] != statements:
         return [], [f"card {number} lists ratification_items that differ from the packet's statements"]
     items_sha = _text_sha256(json.dumps(statements, ensure_ascii=False, separators=(",", ":")))
@@ -524,7 +524,6 @@ def item_answers(card: dict[str, Any], number: int, statements: list[str]) -> tu
 def decide(context: CardContext, number: int, statements: list[str]) -> tuple[dict[int, Decision], list[dict[str, Any]]]:
     """Map every item to exactly one recorded decision, or refuse."""
     card, count = context.card, len(statements)
-    per_item = "ratification_items" in card
     problems = flagged_proofs(context, number)
     found: dict[int, dict[tuple[str, str], Decision]] = {}
 
@@ -545,21 +544,19 @@ def decide(context: CardContext, number: int, statements: list[str]) -> tuple[di
             not_counted.append({**record, "why": why})
         for item, verb, note in answers:
             add(item, verb, note, record)
-    if per_item:
-        # The card program can drop a texted card-level answer when a later item batch completes the card.
-        events = [entry for entry in card.get("history") or []
-                  if isinstance(entry, dict) and entry.get("event") in CARD_LEVEL_EVENTS]
-        if count > 1 and events:
-            problems.append(f"card {number} history shows a card-level answer on a multi-item card; "
-                            "re-ask on a new card")
-        elif len(events) > len(records):
-            problems.append(f"card {number} history shows a card-level answer the card no longer holds; "
-                            "re-ask on a new card")
+    # The card program can drop a texted card-level answer when a later item batch completes the card.
+    events = [entry for entry in card.get("history") or []
+              if isinstance(entry, dict) and entry.get("event") in CARD_LEVEL_EVENTS]
+    if count > 1 and events:
+        problems.append(f"card {number} history shows a card-level answer on a multi-item card; "
+                        "re-ask on a new card")
+    elif len(events) > len(records):
+        problems.append(f"card {number} history shows a card-level answer the card no longer holds; "
+                        "re-ask on a new card")
     verbs = {decision.verb for slot in found.values() for decision in slot.values()}
+    # The card program records the operator's own kill as killed_by "anthony".
     if card.get("status") == "killed" and card.get("killed_by") == "anthony" and (count > 1 or "yes" in verbs):
         problems.append(f"card {number} was killed by a card-level no; ask per item on a new card")
-    if not per_item and card.get("status") == "edited" and verbs - {"fix"}:
-        problems.append(f"card {number} was sent back for an edit; re-ask on a new card")
     for item in sorted(found):
         if len(found[item]) > 1:
             problems.append(f"card {number} item {item} has conflicting answers: " + "; ".join(

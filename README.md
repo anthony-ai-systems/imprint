@@ -168,8 +168,8 @@ Rule, Domain or Pattern statement, an exact `client_id`/`project_id`/`domain`
 scope, the operator's verbatim Evidence IDs, and limits). It reads the card store
 (`--card-store`, else `$AGENTS_CARD_STORE`, else
 `~/.local/share/thirty-second-card/state/asks.json`) without writing it. The card
-must name the packet's SHA-256, and a card with `ratification_items` must list
-exactly the packet's statements. Only answers the card program recorded count:
+must name the packet's SHA-256 and list exactly the packet's statements as
+`ratification_items`. Only answers the card program recorded count:
 per-item answers (`<card>.<item> yes|no|fix[ <note>]` or `<card> all yes`) through
 its `item_answers`, each checked against the saved message behind it, and a bare
 `<card> yes|no|fix[ <note>]` on a single-item card. It refuses before any write

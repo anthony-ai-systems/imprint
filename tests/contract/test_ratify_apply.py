@@ -340,7 +340,7 @@ def test_counts_only_answers_the_card_program_recorded(tmp_path):
     batch = Batch(tmp_path)
     evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
     sha = batch.write_packet([batch.item(1, "Keep weekly status notes short.", [evidence])])
-    batch.write_card(sha, per_item=False, history=[{"event": "note", "note": "9001 yes"}], fix="9001 yes",
+    batch.write_card(sha, history=[{"event": "note", "note": "9001 yes"}], fix="9001 yes",
                      their_words={"quote": "9001 yes"},
                      unproven=[{"channel": "mail", "verb": "yes", "ref": "mail:synthetic"}],
                      chat_answers=[{"at": "2026-10-28T12:00:00", "source": "chat", "proof": '"9001 yes"'}])
@@ -408,14 +408,27 @@ def test_bare_yes_counts_only_on_a_single_item_card(tmp_path):
     assert "card 9001 has no recorded answer for item(s) 1, 2, 3" in reasons
     assert any("a bare yes counts only on a single-item card" in reason for reason in reasons)
 
-    for name, record in (("legacy", {"per_item": False, "lines": ("Card 9001 YES",)}),
-                         ("per-item", {"batches": ("9001 yes",)})):
-        single = Batch(tmp_path / name)
-        evidence, _, _ = single.evidence("Keep weekly status notes to five lines.")
-        sha = single.write_packet([single.item(1, "Keep weekly status notes short.", [evidence])])
-        single.write_card(sha, **record)
-        assert single.run()["status"] == "applied"
-        assert single.heads()[single.node("Principle", sha, 1)]["provenance_status"] == "ratified"
+    single = Batch(tmp_path / "single")
+    evidence, _, _ = single.evidence("Keep weekly status notes to five lines.")
+    sha = single.write_packet([single.item(1, "Keep weekly status notes short.", [evidence])])
+    single.write_card(sha, batches=("Card 9001 YES",))
+    assert single.run()["status"] == "applied"
+    assert single.heads()[single.node("Principle", sha, 1)]["provenance_status"] == "ratified"
+
+
+def test_refuses_a_card_that_does_not_list_the_packet_statements(tmp_path):
+    batch = Batch(tmp_path)
+    evidence, _, _ = batch.evidence("Keep weekly status notes to five lines.")
+    sha = batch.write_packet([batch.item(1, "Status notes may run to ten lines.", [evidence])])
+    batch.write_card(sha, per_item=False, lines=("9001 yes",), draft="keep weekly status notes to five lines",
+                     review_packet_sha256=sha)
+
+    assert any("has no ratification_items" in reason for reason in batch.refused())
+    batch.write_card(sha, per_item=False, kind="decision", sentence="Status notes may run to ten lines.",
+                     answer={"at": "2026-10-28T13:00:00", "channel": "imessage", "proof": "his own number",
+                             "ref": "imessage:synthetic", "text": "9001 yes"})
+    assert any("has no ratification_items" in reason for reason in batch.refused())
+    assert not batch.out.exists()
 
 
 def test_card_level_no_or_fix_on_a_multi_item_card_refuses(tmp_path):
