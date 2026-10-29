@@ -385,6 +385,18 @@ def build_parser() -> argparse.ArgumentParser:
         if action == "edge-defer":
             command.add_argument("--revisit-after")
 
+    ratify = subs.add_parser("ratify", help="apply a card's recorded answers to a ratification packet")
+    ratify_subs = ratify.add_subparsers(dest="ratify_action", required=True)
+    ratify_apply = ratify_subs.add_parser("apply")
+    ratify_apply.add_argument("--packet", type=Path, required=True)
+    ratify_apply.add_argument("--out-root", type=Path, required=True,
+                              help="folder for receipts and scope-bindings manifests")
+    ratify_apply.add_argument("--reader", type=Path, required=True,
+                              help="native judgment reader run read-only for the readback")
+    ratify_apply.add_argument("--card-store", type=Path,
+                              help="card store asks.json, read only; default $AGENTS_CARD_STORE")
+    ratify_apply.add_argument("--dry-run", action="store_true")
+
     ontology = subs.add_parser("ontology", help="write closed, versioned semantic contracts")
     ontology_subs = ontology.add_subparsers(dest="ontology_action", required=True)
     ontology_node = ontology_subs.add_parser("add-node")
@@ -539,6 +551,21 @@ def main(argv: list[str] | None = None) -> int:
             from . import __version__
             print(__version__)
             return 0
+        if args.command == "ratify":
+            # Ratification writes authority: name the store explicitly, and never mint an identity.
+            if args.config is None or not args.config.is_file():
+                raise ValidationError("ratify requires --config naming an existing Imprint config")
+            from .ratify import Refusal, apply_packet
+            try:
+                result = apply_packet(
+                    root=root, packet_path=args.packet, out_root=args.out_root,
+                    reader_path=args.reader, card_store=args.card_store, dry_run=args.dry_run,
+                )
+            except Refusal as exc:
+                _write_json({"status": "refused", "reasons": exc.reasons})
+                return 2
+            _write_json(result)
+            return 0 if result["status"] in {"applied", "already_applied", "dry_run"} and not result.get("error") else 2
         store.expected_operator_id = _operator_urn(root)
         store.expected_node_id = str(config.get("node_id", "primary"))
         if args.command == "delivery-commit":

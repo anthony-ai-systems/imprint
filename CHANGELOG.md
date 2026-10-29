@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `imprint ratify apply`: apply a ratification card's recorded per-item answers to a typed-knowledge batch packet, pin ratified rules in the owner's scope-bindings manifest, and prove them through the native judgment reader. Re-runs are idempotent.
+
 ## 3.0.1 — 2026-07-15
 
 - Close JSON-LD import authority smuggling and preserve non-mutating dry-runs.

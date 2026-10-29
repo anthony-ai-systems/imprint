@@ -115,6 +115,7 @@ imprint review list
 imprint review ratify NODE_ID --by OPERATOR_ID
 imprint review reject NODE_ID --by OPERATOR_ID --reason "not a real pattern"
 imprint review defer NODE_ID --by OPERATOR_ID --reason "needs more evidence" --revisit-after RFC3339
+imprint --config CONFIG ratify apply --packet PACKET.json --out-root DIR --reader READER.py --dry-run
 imprint ontology add-node --input TYPED_NODE.json --valid-from RFC3339
 imprint ontology add-relation --input TYPED_RELATION.json --valid-from RFC3339
 imprint consent grant --input CONSENT_GRANT.json --valid-from RFC3339
@@ -159,6 +160,29 @@ Typed ontology inputs use ontology schema `3.1.0`; they fail closed on unknown
 fields, invalid authority, cross-operator relationships, and missing evidence.
 Transcript, Screenpipe, financial, behavioral, and connector observations also
 require a current source-specific `ConsentGrant`.
+
+`ratify apply` applies one ratification card to a batch packet
+(`imprint-ratification-packet/v1`: the card number, the model that drafted the
+statements, and numbered items, each with an owner, a Principle, Belief, Value,
+Rule, Domain or Pattern statement, an exact `client_id`/`project_id`/`domain`
+scope, the operator's verbatim Evidence IDs, and limits). It reads the card store
+(`--card-store`, else `$AGENTS_CARD_STORE`, else
+`~/.local/share/thirty-second-card/state/asks.json`) without writing it, requires
+the card to name the packet's SHA-256, and counts only answer lines the card
+program recorded: `<card>.<item> yes|no|fix[ <note>]`, `<card> all yes`, or a bare
+answer on a single-item card. It refuses before any write when an item has no
+answer, answers conflict, or evidence or scope is missing. Every item becomes an
+evidenced inferred candidate; a yes is then ratified by the configured operator
+and pinned in `<out-root>/scope-bindings/<owner>/<client_id>/<project_id>/<domain>.json`
+(Domain items are ratified but not pinned, because the reader does not bind them),
+a no is rejected, and a fix is deferred with its note. Receipts go to
+`<out-root>/receipts/`; `--out-root` is required and may not be the home folder or
+a synced folder. The readback runs `--reader`, the native judgment reader,
+read-only: a bound read with an empty query must return the new claims and an
+unbound read must return none. Real multi-word bound queries return nothing until
+the reader's search fix ships (Dots, work order item 3a). Node IDs derive from the
+packet bytes, so re-running a packet resumes an interrupted batch or changes
+nothing; `--dry-run` prints the plan and writes nothing.
 
 ## Uninstall safely
 
