@@ -11,7 +11,10 @@ Imprint separates witnessing from interpretation:
 4. **Ratification:** explicit operator action may promote eligible extracted or
    inferred material.
 5. **Retrieval:** selects only eligible current records under a deterministic
-   byte budget and emits provenance with every item.
+   byte budget and emits provenance with every item. An installation may opt
+   in to a remote relevance selector (Jev) that ranks the same eligible
+   judgments at prompt time; it never widens eligibility or the byte budget and
+   falls back to deterministic retrieval on any failure.
 
 Nodes and edges carry one of `captured`, `extracted`, `inferred`, or `ratified`.
 The store preserves valid time and system time, plus supersession,

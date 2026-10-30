@@ -13,6 +13,55 @@ dependency. If a future or optional adapter is enabled, its provider receives th
 content explicitly sent to it and may charge usage fees under that provider's
 terms. No optional adapter is enabled by installation.
 
+### Optional Jev relevance selector
+
+The selector is off by default (`selector.mode: "deterministic"`). Only when an
+installation sets `selector.mode` to `jev` or `shadow` does Imprint send one
+HTTPS `POST` per non-empty prompt to the configured endpoint
+(`https://api.typesafe.ai/v1/systemone` by default). Two paths send it: the
+UserPromptSubmit hook, and `imprint retrieve --prompt ...` run by hand or by a
+script. Exactly this leaves the machine:
+
+- the request body keys `model`, `state`, and `questions`, nothing else;
+- `state`: the prompt text, at most 8,000 characters. If
+  `short_prompt_context` is enabled and the prompt is short, `state` also
+  contains up to `max_chars` of the previous assistant reply, which can quote
+  anything the assistant wrote (code, file names, people, figures);
+- `questions`: at most `prefilter_keep` (default 150) entries named `c0`,
+  `c1`, ... Each asks "Does this judgment apply to the current turn?" and
+  quotes one judgment statement, at most 400 characters: the operator's own
+  Verdict words, or the statement of a Principle, Belief, Value, Rule, or
+  Pattern. Statements are sent as written, so they can contain whatever the
+  operator wrote in them;
+- the key in the `Authorization: Bearer` header, plus `Content-Type` and an
+  `imprint-local/<version>` `User-Agent`.
+
+Never sent by Imprint itself (the prompt, the optional reply excerpt, and each
+statement are sent as written, with whatever they contain): record, case,
+evidence, source-receipt, or session ids (Imprint URNs inside statements are
+replaced with `[ref]`); case summaries; ontology paths; domain ids; the hook's
+working directory and transcript path; referred parties, names, amounts,
+prices, and metrics from business, observation, or outcome records; and
+self-model, chosen/default future, ingested, and consent records.
+
+The endpoint operator (TypeSafe, or OpenRouter if configured) processes that
+content and may log, retain, or bill for it under its own terms. Review the
+provider's data-use and retention terms before enabling the selector, and keep
+`exclude_domains` or a narrower `node_types` for judgments that must not leave
+the machine. Those records are still delivered locally when their domain
+matches. Both settings limit only judgment statements: the prompt is sent even
+when it matches an excluded domain, so use `IMPRINT_SELECTOR=off` for work
+whose prompts must stay local. `IMPRINT_SELECTOR=off` (or any non-empty value
+other than `jev` or `shadow`) disables it immediately. The local decision log
+(`logs/jev-selector.jsonl`) records only ids, scores, timings, and outcomes,
+never prompt or judgment text; `logs/jev-selector-transfer.json` holds only
+the last transfer and success timestamps.
+
+On POSIX the optional `api_key_file` must be a private regular file owned by
+the current user. On Windows, Imprint checks only that it is a regular file,
+not its owner or ACL; there, prefer the key environment variable or keep the
+file in a directory only your account can read.
+
 Explicit local judgment capture is the only consent-exempt source. Transcripts,
 conversation imports, Screenpipe, financial records, behavioral telemetry,
 business systems, customer results, and external connectors are denied by

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
+  prompt-time retrieval. The default `selector.mode` stays `deterministic` with
+  no network request; `jev` and `shadow` are opt-in, `IMPRINT_SELECTOR=off`
+  forces deterministic retrieval, egress is limited to the prompt (plus an
+  optional previous-reply excerpt) and short judgment statements (see
+  `docs/privacy-and-recovery.md`), selections never exceed the byte budget,
+  never-sent records are still delivered locally, every failure returns
+  the deterministic behavior minus records Jev already delivered to the
+  session, decisions are logged without
+  content, and health reports the selector's network state truthfully.
 - Add `imprint ratify apply`: apply a ratification card's recorded per-item answers to a typed-knowledge batch packet, pin ratified rules in the owner's scope-bindings manifest, and prove them through the native judgment reader. Re-runs are idempotent.
 
 ## 3.0.1 — 2026-07-15

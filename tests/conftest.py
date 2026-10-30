@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from typing import NamedTuple
@@ -67,6 +69,57 @@ def isolated_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("IMPRINT_CONFIG", str(tmp_path / "imprint-isolated-config.json"))
     monkeypatch.setenv("IMPRINT_DATA_ROOT", str(data_root))
     return data_root
+
+
+class NetworkBlocked(OSError):
+    """Raised by every outbound network primitive while the suite runs."""
+
+
+_NETWORK_FAMILIES = {socket.AF_INET, getattr(socket, "AF_INET6", socket.AF_INET)}
+# Socket methods that can put a packet on the wire: connect for streams, and
+# sendto/sendmsg for connectionless datagrams that never call connect().
+_SOCKET_SENDS = tuple(name for name in ("connect", "connect_ex", "sendto", "sendmsg") if hasattr(socket.socket, name))
+# Every module-level resolver or connector that can reach a name server.
+_RESOLVERS = (
+    "create_connection", "getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr", "getnameinfo",
+)
+
+
+def _blocked(*args, **kwargs):
+    raise NetworkBlocked("outbound network is disabled for the test suite")
+
+
+def _guarded(real):
+    def guarded(self, *args, **kwargs):
+        if self.family in _NETWORK_FAMILIES:
+            _blocked()
+        return real(self, *args, **kwargs)
+
+    return guarded
+
+
+_GUARDED_SENDS = {name: _guarded(getattr(socket.socket, name)) for name in _SOCKET_SENDS}
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make outbound network impossible in-process for every test.
+
+    Inet sockets cannot connect or send datagrams, every name-resolution
+    function and ``create_connection`` fail, and ``urllib.request.urlopen``
+    raises. Subprocesses spawned by tests inherit ``IMPRINT_SELECTOR=off``,
+    which forces deterministic retrieval, and no selector API key from the
+    developer's environment. Tests that exercise the selector in-process
+    remove the override explicitly.
+    """
+    for name, guarded in _GUARDED_SENDS.items():
+        monkeypatch.setattr(socket.socket, name, guarded)
+    for name in _RESOLVERS:
+        monkeypatch.setattr(socket, name, _blocked)
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
+    monkeypatch.setenv("IMPRINT_SELECTOR", "off")
+    for name in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

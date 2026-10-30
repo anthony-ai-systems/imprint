@@ -201,6 +201,36 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
     }
 
 
+def last_assistant_text(path_value: str, *, tail_limit: int = 2 * 1024 * 1024) -> str | None:
+    """Return the newest main-thread assistant text in a native transcript.
+
+    Reuses the descriptor-bound snapshot reader, so the read is bounded by
+    ``MAX_TRANSCRIPT_BYTES`` (or ``tail_limit`` above it). The walk starts at
+    the end and tolerates partial or malformed lines: callers use this only
+    for optional context, never as captured evidence.
+    """
+    snapshot = _read_native_transcript_snapshot(path_value, tail_limit=tail_limit)
+    lines = snapshot.data.split(b"\n")
+    if snapshot.offset:
+        lines = lines[1:]  # a tail read may start mid-line
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            item = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(item, dict) or item.get("type") != "assistant" or item.get("isSidechain") is True:
+            continue
+        message = item.get("message")
+        if not isinstance(message, dict):
+            continue
+        text = _message_text(message.get("content"))
+        if text.strip():
+            return text
+    return None
+
+
 def parse_native_stop_transcript(path_value: str) -> dict[str, str | None]:
     return _parse_native_stop_snapshot(
         _read_native_transcript_snapshot(path_value),
