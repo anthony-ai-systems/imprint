@@ -92,29 +92,62 @@ def keyed(monkeypatch, value="synthetic-test-key"):
 
 # -- network guard -----------------------------------------------------------
 
+BLOCKED = "outbound network is disabled for the test suite"
+
+
 def test_suite_network_guard_is_active():
-    with pytest.raises(OSError):
+    # Every call below must be stopped by the suite guard itself, not by a
+    # real lookup or connection failing, hence the exact message.
+    for name in ("gethostbyname", "gethostbyname_ex", "gethostbyaddr"):
+        with pytest.raises(OSError, match=BLOCKED):
+            getattr(socket, name)("api.typesafe.ai")
+    with pytest.raises(OSError, match=BLOCKED):
+        socket.getnameinfo(("192.0.2.1", 443), 0)
+    with pytest.raises(OSError, match=BLOCKED):
         socket.create_connection(("192.0.2.1", 443), timeout=0.1)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=BLOCKED):
         socket.getaddrinfo("api.typesafe.ai", 443)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match=BLOCKED):
         urllib.request.urlopen("https://api.typesafe.ai/v1/systemone", timeout=0.1)
     raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match=BLOCKED):
             raw.connect(("192.0.2.1", 443))
-        with pytest.raises(OSError):
+        with pytest.raises(OSError, match=BLOCKED):
             raw.connect_ex(("192.0.2.1", 443))
     finally:
         raw.close()
+    datagram = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(OSError, match=BLOCKED):
+            datagram.sendto(b"x", ("192.0.2.1", 53))
+        if hasattr(datagram, "sendmsg"):
+            with pytest.raises(OSError, match=BLOCKED):
+                datagram.sendmsg([b"x"], [], 0, ("192.0.2.1", 53))
+    finally:
+        datagram.close()
 
 
 def test_default_transport_cannot_reach_the_network(monkeypatch):
     # The real transport is exercised end to end and is stopped by the guard.
     keyed(monkeypatch)
+    guard, attempts = socket.create_connection, []
+
+    def spy(address, *args, **kwargs):
+        attempts.append(address)
+        try:
+            return guard(address, *args, **kwargs)
+        except OSError as exc:
+            attempts.append(str(exc))
+            raise
+
+    monkeypatch.setattr(socket, "create_connection", spy)
     result = JevSelector(settings(timeout_seconds=2)).select("release safely", [item("a", "release safely")])
     assert result.outcome == "fallback"
     assert result.fallback_reason == "http_error"
+    # One connection attempt (to the endpoint, or a configured proxy), and the
+    # guard stopped it.
+    assert len(attempts) == 2 and attempts[1] == BLOCKED
 
 
 # -- prefilter and egress text ----------------------------------------------

@@ -220,7 +220,7 @@ def test_egress_body_contains_no_identifiers_or_descriptive_fields(tmp_path, tra
     raw = call["raw"].decode("utf-8")
     for forbidden in (
         "urn:imprint", "Example Holdings", "4,200", "/srv/projects", "synthetic-session",
-        "evidence", "judgment\", \"Verdict", "synthetic-test-key",
+        "evidence", '"judgment","Verdict"', "Verdict", "synthetic-test-key",
     ):
         assert forbidden not in raw
     for question in body["questions"].values():
