@@ -184,10 +184,11 @@ def test_only_eligible_selectable_judgments_are_sent(tmp_path, transport, fake_r
     assert len(sent) == 3
     assert set(decision.response["selected_ids"]) == {"good", "principle", "selected-domain"}
     assert decision.response["eligible_count"] == 3
-    # Narrowing node_types narrows what leaves the machine.
+    # Narrowing node_types narrows what leaves the machine, not what the
+    # matched domain delivers: its unsent Verdict is still injected locally.
     decision = _select(tmp_path, state="different turn", domain="chosen", node_types=["Principle"])
     assert len(transport.calls[-1]["body"]["questions"]) == 1
-    assert decision.response["selected_ids"] == ["principle"]
+    assert decision.response["selected_ids"] == ["selected-domain", "principle"]
 
 
 def test_chosen_future_is_eligible_deterministically_but_never_sent(tmp_path, transport, fake_records):
@@ -271,6 +272,42 @@ def test_an_oversized_single_pick_is_omitted_not_truncated(tmp_path, transport, 
     fake_records["records"] = [record("huge", "huge " + "y" * 6000), record("small", "small judgment")]
     decision = _select(tmp_path, budget=4096)
     assert decision.response["selected_ids"] == ["small"]
+
+
+def test_picks_that_do_not_fit_the_budget_report_no_picks(tmp_path, transport, fake_records):
+    fake_records["records"] = [record("huge", "huge " + "y" * 6000)]
+    decision = _select(tmp_path, budget=4096)
+    assert (decision.method, decision.outcome) == ("jev", "no_picks")
+    assert decision.response["selector_outcome"] == "no_picks"
+    assert (decision.response["payload"], decision.response["selected_ids"]) == ("", [])
+
+
+def test_never_sent_domain_records_are_delivered_locally_ahead_of_picks(tmp_path, transport, fake_records):
+    """exclude_domains and node_types bound egress, not local delivery."""
+    fake_records["records"] = [
+        record("general", "ship safely"),
+        record("private-rule", "private domain rule", section="domain", domain_id="private"),
+        record("private-price", "Price: 4200 USD", section="domain", domain_id="private",
+               ontology_partition="business_declared", ontology_type="Price", judgment_statement=None),
+    ]
+    decision = _select(tmp_path, domain="private", exclude_domains=["private"])
+    assert transport.sent_statements() == {"ship safely"}
+    assert decision.outcome == "picked"
+    lines = [json.loads(line) for line in decision.response["payload"].splitlines()]
+    assert [line["record_id"] for line in lines] == ["private-price", "private-rule", "general"]
+    assert ["selector" in line for line in lines] == [False, False, True]
+    assert decision.response["eligible_count"] == 3
+    assert sum(decision.response["section_bytes"].values()) == decision.response["selected_bytes"]
+    # Jev answering "nothing applies" still leaves the domain's own records.
+    transport.scorer = lambda _: 0.05
+    quiet = _select(tmp_path, state="another turn", domain="private", exclude_domains=["private"])
+    assert quiet.outcome == "no_picks"
+    assert quiet.response["selected_ids"] == ["private-price", "private-rule"]
+    # They count as delivered for the session afterward.
+    _commit(tmp_path, quiet)
+    transport.scorer = lambda _: 0.9
+    later = _select(tmp_path, state="third turn", domain="private", exclude_domains=["private"])
+    assert later.response["selected_ids"] == ["general"]
 
 
 def test_no_picks_injects_nothing(tmp_path, monkeypatch, fake_records):
@@ -777,6 +814,25 @@ def test_no_picks_hook_injects_nothing(tmp_path, transport, monkeypatch, capsys)
     }, monkeypatch, capsys)
     assert (body["status"], body["selector_outcome"]) == ("delivered", "no_picks")
     assert body["hookSpecificOutput"]["additionalContext"] == ""
+
+
+def test_excluded_or_unselected_domain_records_are_still_injected(tmp_path, transport, monkeypatch, capsys):
+    """A setting that means "never send" must not mean "never deliver"."""
+    rule = "Cite every failed source in the research domain."
+    event = {"cwd": "Projects/Research/Current", "prompt": "review the failed source"}
+    for name, overrides in (("excluded", {"exclude_domains": ["research"]}), ("narrowed", {"node_types": ["Verdict"]})):
+        (tmp_path / name).mkdir()
+        config = _config(tmp_path / name, selector=selector_config("jev", **overrides))
+        _seed(config, monkeypatch, capsys)
+        for scorer, outcome, count in ((lambda _: 0.9, "picked", 3), (lambda _: 0.05, "no_picks", 1)):
+            transport.scorer = scorer
+            body = _hook(config, "user-prompt-submit", {**event, "session_id": f"{name}-{outcome}"}, monkeypatch, capsys)
+            assert (body["status"], body["selector_method"], body["selector_outcome"]) == ("delivered", "jev", outcome)
+            assert rule not in transport.sent_statements()
+            lines = [json.loads(line) for line in body["hookSpecificOutput"]["additionalContext"].splitlines()]
+            assert len(lines) == count
+            assert lines[0]["text"] == rule and "selector" not in lines[0]
+            assert all("selector" in line for line in lines[1:])
 
 
 def test_an_unimportable_selector_module_is_todays_behavior(tmp_path, transport, monkeypatch, capsys):

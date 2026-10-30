@@ -176,25 +176,49 @@ def _already_delivered(snapshot_id: str) -> dict[str, object]:
     return {"status": "already_delivered", "snapshot_id": snapshot_id, "payload": "", "selected_ids": []}
 
 
+class _FixedSource:
+    """A retrieval source over records one call has already filtered."""
+
+    def __init__(self, records: Sequence[RetrievalRecord]):
+        self._records = tuple(records)
+
+    def retrieval_candidates(self, snapshot_id: str) -> tuple[RetrievalRecord, ...]:
+        return self._records
+
+
 def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
-    eligible_count: int, budget: int,
+    eligible_count: int, budget: int, local: RetrievalResult | None = None,
 ) -> dict[str, object]:
-    """Render picks in score order, never exceeding the selector budget."""
+    """Render ``local`` (the matched domain's never-sent records, ranked
+    deterministically) and then picks in score order, never exceeding the
+    selector budget. Picks that cannot fit report ``no_picks``."""
     rendered: list[bytes] = []
     selected_ids: list[str] = []
     section_bytes = {"core": 0, "general": 0, "domain": 0}
     selected_by_partition: dict[str, list[str]] = {}
     total = 0
+    if local is not None:
+        rendered.append(local.payload)
+        total += len(local.payload)
+        selected_ids.extend(local.selected_ids)
+        for section, size in local.section_bytes.items():
+            section_bytes[section] += size
+        for partition, ids in local.selected_by_partition.items():
+            selected_by_partition.setdefault(partition, []).extend(ids)
+    delivered_picks = 0
     for rank, (record, score) in enumerate(picks, 1):
         line = _render(record, selector={"mode": "jev", "rank": rank, "score": round(score, 4)})
         if total + len(line) > budget:
             continue
         total += len(line)
+        delivered_picks += 1
         rendered.append(line)
         selected_ids.append(record.record_id)
         section_bytes[record.section] += len(line)
         selected_by_partition.setdefault(record.ontology_partition, []).append(record.record_id)
+    if outcome == "picked" and not delivered_picks:
+        outcome = "no_picks"  # Jev picked only records larger than the budget left
     payload = b"".join(rendered)
     if len(payload) > budget:  # defensive invariant
         raise RuntimeError("selector budget invariant violated")
@@ -228,7 +252,9 @@ def select_prompt_payload(
     ``shadow`` (Jev is called and logged; the caller always delivers its
     deterministic behavior). Eligibility is the deterministic engine's, then
     narrowed to selectable judgment types, minus excluded domains and records
-    already delivered in this session under any snapshot.
+    already delivered in this session under any snapshot. Those filters bound
+    only what is sent: the matched domain's never-sent records are delivered
+    locally ahead of the picks, as deterministic retrieval would deliver them.
     """
     shadow = mode == "shadow"
     failed_method = "shadow" if shadow else "deterministic_fallback"
@@ -295,16 +321,17 @@ def select_prompt_payload(
         delivered_ids = set() if refresh else receipts.delivered_ids(session_ref)
         node_types = set(jev["node_types"])
         excluded_domains = set(jev["exclude_domains"])
-        pool = [
-            item for item in engine.eligible_candidates(
-                snapshot_id=context.snapshot_id, selected_domain=explicit_domain,
-            )
+        candidates = engine.eligible_candidates(
+            snapshot_id=context.snapshot_id, selected_domain=explicit_domain,
+        )
+        sendable = {
+            item.record_id for item in candidates
             if item.ontology_partition == JUDGMENT_PARTITION
             and item.ontology_type in node_types
             and item.domain_id not in excluded_domains
-            and item.record_id not in delivered_ids
             and egress_text(item) is not None
-        ]
+        }
+        pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
         result = JevSelector(settings).select(state, pool)
         if result.outcome == "fallback":
             record(result)
@@ -313,12 +340,24 @@ def select_prompt_payload(
             record(result)
             return SelectorDecision("shadow", result.outcome, context=context)
         assert scope is not None
+        # Records Imprint never sends (an excluded domain, an unselected type,
+        # no statement) keep the matched domain's deterministic injection.
+        local_records = [
+            item for item in candidates
+            if item.section == "domain" and item.record_id not in sendable
+            and item.record_id not in delivered_ids
+        ]
+        local = RetrievalEngine(_FixedSource(local_records), engine.config).retrieve(
+            snapshot_id=context.snapshot_id, query=state, selected_domain=explicit_domain,
+        ) if local_records else None
         response = _jev_response(
-            context.snapshot_id, scope, result.picks, result.outcome, len(pool), selector_budget,
+            context.snapshot_id, scope, result.picks, result.outcome,
+            len(pool) + len(local_records), selector_budget, local,
         )
+        outcome = str(response["selector_outcome"])
         if refresh:
             record(result)
-            return SelectorDecision("jev", result.outcome, response=response, context=context)
+            return SelectorDecision("jev", outcome, response=response, context=context)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
             record(result)
@@ -328,7 +367,7 @@ def select_prompt_payload(
             )
         assert cached is not None
         record(result)
-        return SelectorDecision("jev", result.outcome, response=cached, context=context)
+        return SelectorDecision("jev", outcome, response=cached, context=context)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn
         # fell back, even though the request itself succeeded.
