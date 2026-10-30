@@ -77,6 +77,11 @@ def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
 # the memory payload must be refreshed rather than suppressed by the latch.
 _REFRESHING_SESSION_SOURCES = frozenset({"resume", "compact"})
 _PREVIOUS_REPLY_LABEL = "Previous assistant reply:"
+# Wall-clock budget, from the start of main(), for UserPromptSubmit to finish
+# its optional selector request. The hook bridge kills the CLI at its
+# HOOK_TIMEOUT_SECONDS (10); the rest covers interpreter start-up and the
+# deterministic fallback, so a slow endpoint can never empty the hook output.
+HOOK_SELECTOR_BUDGET_SECONDS = 6.0
 
 
 def _selector_state(prompt: str, event: dict, selector: dict) -> str:
@@ -541,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = time.monotonic()
     parser = build_parser()
     args = parser.parse_args(argv)
     # Facts the failure receipt must carry out of a partially completed action.
@@ -1051,6 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
                         state=_selector_state(prompt, event, config["selector"]),
                         explicit_domain=domain, budget=int(config["context_budget_bytes"]),
                         selector=config["selector"], mode=selector_mode,
+                        deadline=started + HOOK_SELECTOR_BUDGET_SECONDS,
                     )
                     selector_fields = decision.fields()
                     context = decision.context

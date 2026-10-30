@@ -835,6 +835,44 @@ def test_excluded_or_unselected_domain_records_are_still_injected(tmp_path, tran
             assert all("selector" in line for line in lines[1:])
 
 
+def test_hook_selector_deadline_stays_inside_the_bridge_budget(tmp_path, monkeypatch, capsys):
+    """timeout_seconds may be 30, but the hook bridge kills its child at 10."""
+    release = threading.Event()
+    calls = []
+
+    def hang(endpoint, body, headers, timeout):
+        calls.append(timeout)
+        release.wait(60)
+        raise TimeoutError
+
+    config = _config(tmp_path, selector=selector_config("jev", timeout_seconds=30))
+    _seed(config, monkeypatch, capsys)
+    monkeypatch.setattr(jev, "http_post", hang)
+    monkeypatch.setattr(cli, "HOOK_SELECTOR_BUDGET_SECONDS", 0.5)
+    started = time.monotonic()
+    try:
+        body = _hook(config, "user-prompt-submit", {
+            "session_id": "s1", "cwd": "Projects/Research/Current", "prompt": "review",
+        }, monkeypatch, capsys)
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5
+    assert len(calls) == 1 and calls[0] <= 0.5
+    assert (body["status"], body["selector_method"], body["fallback_reason"]) == (
+        "delivered", "deterministic_fallback", "timeout",
+    )
+    assert "research domain" in body["hookSpecificOutput"]["additionalContext"]
+
+
+def test_hook_selector_budget_leaves_the_fallback_room_inside_the_bridge():
+    spec = importlib.util.spec_from_file_location(
+        "imprint_jev_budget_bridge", Path(__file__).resolve().parents[2] / "hooks" / "_bridge.py",
+    )
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    assert 0 < cli.HOOK_SELECTOR_BUDGET_SECONDS <= bridge.HOOK_TIMEOUT_SECONDS - 4
+
+
 def test_an_unimportable_selector_module_is_todays_behavior(tmp_path, transport, monkeypatch, capsys):
     enabled = selector_config("jev", short_prompt_context={"enabled": True, "below_chars": 200, "max_chars": 100})
     config = _config(tmp_path, selector=enabled)

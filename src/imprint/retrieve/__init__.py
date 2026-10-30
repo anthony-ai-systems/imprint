@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -245,6 +246,7 @@ def _jev_response(
 def select_prompt_payload(
     store, *, root: Path, session_id: str, state: str, explicit_domain: str | None,
     budget: int, selector: Mapping[str, Any], mode: str, refresh: bool = False,
+    deadline: float | None = None,
 ) -> SelectorDecision:
     """Run the optional relevance selector for one turn. Never raises.
 
@@ -255,6 +257,9 @@ def select_prompt_payload(
     already delivered in this session under any snapshot. Those filters bound
     only what is sent: the matched domain's never-sent records are delivered
     locally ahead of the picks, as deterministic retrieval would deliver them.
+
+    ``deadline`` (a ``time.monotonic()`` value) caps the configured
+    ``timeout_seconds`` for callers with a hard wall-clock limit of their own.
     """
     shadow = mode == "shadow"
     failed_method = "shadow" if shadow else "deterministic_fallback"
@@ -332,6 +337,8 @@ def select_prompt_payload(
             and egress_text(item) is not None
         }
         pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
+        if deadline is not None:
+            settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
         result = JevSelector(settings).select(state, pool)
         if result.outcome == "fallback":
             record(result)
