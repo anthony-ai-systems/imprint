@@ -39,10 +39,12 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   - `deterministic`: today's behavior. SessionStart delivers core and general
     context; UserPromptSubmit injects the matched domain once per session and
     snapshot, or skips when no domain matches.
-  - `jev`: every non-empty UserPromptSubmit asks Jev which eligible judgments
-    apply to the turn, even when no domain matches, and injects the picks.
+  - `jev`: every non-empty UserPromptSubmit (and `imprint retrieve --prompt`)
+    asks Jev which eligible judgments apply to the turn, even when no domain
+    matches, and injects the picks.
   - `shadow`: calls Jev and logs the decision, but always delivers exactly the
-    `deterministic` context. Use it to evaluate picks before switching.
+    `deterministic` context, including after compact or resume. Use it to
+    evaluate picks before switching.
 - `selector.jev.endpoint`: `https://api.typesafe.ai/v1/systemone`. Must be an
   `https://` URL without embedded credentials. Redirects are refused.
 - `selector.jev.model`: `jev-1.13.0`.
@@ -52,12 +54,16 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   owned by the current user with no group or other permission bits (`0600`).
   Surrounding whitespace is stripped. The environment variable wins over the
   file. The key is sent only in the `Authorization` header and is never
-  logged or echoed.
+  logged or echoed. On Windows, Imprint checks only that the path is a regular
+  file, not its owner or ACL; there, prefer the environment variable or keep
+  the file in a directory only your account can read.
 - `selector.jev.top`: 1–150; default 20. Most picks Jev may return.
 - `selector.jev.score_floor`: 0–1; default 0.55. Minimum Jev `noul` score.
 - `selector.jev.timeout_seconds`: above 0, at most 30; default 3. A total
   wall-clock deadline for one selection, including key resolution and
-  parsing. Keep it well under the 10-second hook bridge limit.
+  parsing. On the UserPromptSubmit hook the request is also abandoned 6
+  seconds after the hook command starts, whatever this value, so the
+  deterministic fallback always fits inside the 10-second hook bridge limit.
 - `selector.jev.prefilter_keep`: 1–10,000; default 150. A local IDF lexical
   prefilter keeps this many candidates (ties prefer newer records) before
   anything is sent; it bounds the request size.
@@ -68,7 +74,8 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   maximum `Verdict`, `Principle`, `Belief`, `Value`, `Rule`, `Pattern`.
   Business, observation, outcome, consent, self-model, chosen/default future,
   and ingested records can never be sent.
-- `selector.jev.exclude_domains`: domain ids whose records are never sent.
+- `selector.jev.exclude_domains`: domain ids whose records are never sent. The
+  prompt itself is still sent when it matches an excluded domain.
 - `selector.jev.short_prompt_context`: `{"enabled": false, "below_chars": 200,
   "max_chars": 1500}`. When enabled, a prompt shorter than `below_chars`
   (1–2,000) is followed in the request by the last `max_chars` (1–4,000)
@@ -87,21 +94,27 @@ Selection semantics:
 - Candidates pass exactly the deterministic eligibility rules (authority,
   provenance, chosen/default future partitions, domain binding) before any
   selector filter. Domain records still require the matched domain.
+- `node_types` and `exclude_domains` limit what is sent, not what is
+  delivered. The matched domain's records that are never sent (an excluded
+  domain, a type outside `node_types`, or a non-judgment record) are injected
+  first, ranked and rendered exactly as deterministic retrieval does (no
+  `selector` field); Jev's picks fill the rest of the budget.
 - Records already delivered to the session, under any store snapshot, are
   excluded. The newest 256 committed receipts are scanned; unreadable ones are
   skipped.
 - Each delivered line is the ordinary JSON retrieval line plus
   `"selector": {"mode": "jev", "rank": N, "score": S}`.
-- If Jev answers but nothing clears `score_floor`, nothing is injected.
+- If Jev answers but nothing clears `score_floor`, or nothing it picked fits
+  the budget, no pick is injected and `selector_outcome` is `no_picks`.
 - A missing or unsafe key, timeout, HTTP error, malformed answer, no
   candidates, or any internal exception returns exactly the deterministic
   behavior for that prompt and records the reason.
 - Replaying the same prompt (same text, excerpt, and domain) reuses its
   receipt instead of calling Jev again. Its file is
   `receipts/<session>/<snapshot>-domain-jev-<24 hex>.json`.
-- In `jev` and `shadow` mode, SessionStart with `source` `compact` or `resume`
-  forgets the session's delivery receipts and then delivers normally, because
-  the host context was wiped. In `deterministic` mode the existing refresh
+- In `jev` mode, SessionStart with `source` `compact` or `resume` forgets the
+  session's delivery receipts and then delivers normally, because the host
+  context was wiped. In `deterministic` and `shadow` mode the existing refresh
   behavior is unchanged. SessionStart never calls Jev.
 - Hook output carries content-free `selector_method` (`deterministic`, `jev`,
   `deterministic_fallback`, or `shadow`), `selector_outcome`, and
@@ -112,20 +125,30 @@ Decision log: with `log_decisions`, each selector call appends one line to
 `<operator root>/logs/jev-selector.jsonl` (private file mode) with the time,
 hashed session reference, receipt scope, candidates sent, picked record ids and
 scores, elapsed milliseconds, echoed model, token usage, outcome, and fallback
-reason. It never contains prompt text, judgment text, or the key. At 5 MiB the
-file rotates once to `jev-selector.jsonl.1`.
+reason. It never contains prompt text, judgment text, or the key. The line is
+written once the turn's delivery is settled, so a failure after Jev answered
+is one `fallback` line. At 5 MiB the file rotates once to
+`jev-selector.jsonl.1`.
 
 Health reports `selector_mode`, `selector_key_present` (a boolean; the key file
 is checked but not read), `selector_endpoint_host`, `selector_last_success_ts`,
 `selector_fallbacks_24h`, and `network_state`: `offline` in deterministic mode,
-otherwise `idle` until the decision log records a sent request and
-`transferred` after one.
+otherwise `idle` until a request is sent and `transferred` after one. Each
+sent request also updates `<operator root>/logs/jev-selector-transfer.json`
+(private file mode), which holds only the last transfer and last success
+timestamps. It is written even when `log_decisions` is `false`, so turning the
+log off or rotating it cannot hide a transfer. `selector_fallbacks_24h` counts
+decision-log lines (current and rotated file), so it stays 0 when
+`log_decisions` is `false`.
 
 ## Environment overrides
 
 - `IMPRINT_CONFIG`: config path.
-- `IMPRINT_SELECTOR`: `off` or `deterministic` forces deterministic retrieval
-  over any config. It can only turn the selector off; no value turns it on.
+- `IMPRINT_SELECTOR`: any non-empty value other than `jev` or `shadow` (for
+  example `off`, `deterministic`, `0`, `false`, or `disabled`) forces
+  deterministic retrieval over any config. `jev` and `shadow` leave the
+  configured mode in force. It can only turn the selector off; no value turns
+  it on.
 - `IMPRINT_DATA_ROOT`: default data root used when config omits `data_root`.
 - `IMPRINT_INSTALL_ROOT`: installer/application destination.
 - `CLAUDE_SETTINGS_PATH`: Claude Code settings path used by installers.

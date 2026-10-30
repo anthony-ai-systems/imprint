@@ -5,8 +5,10 @@
 - Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
   prompt-time retrieval. The default `selector.mode` stays `deterministic` with
   no network request; `jev` and `shadow` are opt-in, `IMPRINT_SELECTOR=off`
-  forces deterministic retrieval, egress is limited to the prompt and short
-  judgment statements, selections never exceed the byte budget, every failure
+  forces deterministic retrieval, egress is limited to the prompt (plus an
+  optional previous-reply excerpt) and short judgment statements (see
+  `docs/privacy-and-recovery.md`), selections never exceed the byte budget,
+  never-sent domain records are still delivered locally, every failure
   returns exactly the deterministic behavior, decisions are logged without
   content, and health reports the selector's network state truthfully.
 
