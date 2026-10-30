@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import ValidationError
 from .paths import default_data_root, operator_root, validate_data_root
@@ -21,7 +23,37 @@ DEFAULTS = {
     "spool_retention_days": 30,
     "domains": [],
     "experimental": {"digest": False, "profile_learning": False},
+    # Optional relevance selection for prompt-time retrieval. The shipped mode
+    # is deterministic: no network request is possible until an installation
+    # opts in to "jev" or "shadow" in its own config.
+    "selector": {
+        "mode": "deterministic",
+        "jev": {
+            "endpoint": "https://api.typesafe.ai/v1/systemone",
+            "model": "jev-1.13.0",
+            "api_key_env": "TYPESAFE_API_KEY",
+            "api_key_file": None,
+            "top": 20,
+            "score_floor": 0.55,
+            "timeout_seconds": 3,
+            "prefilter_keep": 150,
+            "budget_bytes": None,
+            "node_types": ["Verdict", "Principle", "Belief", "Value", "Rule", "Pattern"],
+            "exclude_domains": [],
+            "short_prompt_context": {"enabled": False, "below_chars": 200, "max_chars": 1500},
+            "log_decisions": True,
+        },
+    },
 }
+
+SELECTOR_MODES = frozenset({"deterministic", "jev", "shadow"})
+SELECTOR_ENV = "IMPRINT_SELECTOR"
+# Judgment-partition record types whose own statement can be sent to a remote
+# selector. Business, observation, outcome, self-model, direction and
+# ingested records are not selectable, whatever the config says.
+SELECTOR_NODE_TYPES = frozenset({"Verdict", "Principle", "Belief", "Value", "Rule", "Pattern"})
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
 
 # Keys the loader recognizes. ``data_root`` and ``hooks_dir`` are written by the
 # installers but are not part of the portable defaults. Unknown keys are rejected
@@ -34,6 +66,116 @@ SAFE_LOCAL_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 def _is_int(value: Any) -> bool:
     """JSON booleans are Python integers, but never valid numeric settings."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def effective_selector_mode(selector: Any) -> str:
+    """Resolve the selector mode. The environment can only turn it off.
+
+    ``IMPRINT_SELECTOR=off`` (or ``deterministic``) forces deterministic
+    retrieval whatever the config says; no environment value can enable a
+    network selector that the config leaves deterministic.
+    """
+    override = os.environ.get(SELECTOR_ENV, "").strip().lower()
+    if override in {"off", "deterministic"}:
+        return "deterministic"
+    mode = selector.get("mode") if isinstance(selector, dict) else None
+    return mode if mode in {"jev", "shadow"} else "deterministic"
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _merge_selector(defaults: dict[str, Any], loaded: Any) -> Any:
+    """Overlay a partial selector object on its defaults, one level per object.
+
+    Unknown keys are carried through so validation can reject them instead of
+    silently dropping a misspelled setting. Non-objects pass through unchanged
+    for the same reason.
+    """
+    if not isinstance(loaded, dict):
+        return loaded
+    merged = copy.deepcopy(defaults)
+    for key, value in loaded.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _merge_selector(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _validate_selector(data: dict[str, Any]) -> None:
+    selector = data.get("selector")
+    if not isinstance(selector, dict) or set(selector) != set(DEFAULTS["selector"]):
+        raise ValidationError("selector must contain exactly mode and jev")
+    if selector["mode"] not in SELECTOR_MODES:
+        raise ValidationError("selector mode must be deterministic, jev, or shadow")
+    jev = selector["jev"]
+    expected = DEFAULTS["selector"]["jev"]
+    if not isinstance(jev, dict) or set(jev) != set(expected):
+        raise ValidationError("selector jev contains unknown or missing fields")
+    endpoint = jev["endpoint"]
+    if not isinstance(endpoint, str) or any(ch.isspace() or ord(ch) < 32 for ch in endpoint):
+        raise ValidationError("selector jev endpoint must be an https:// URL")
+    try:
+        parts = urlsplit(endpoint)
+        parts.port  # raises ValueError for a malformed port
+    except ValueError as exc:
+        raise ValidationError("selector jev endpoint must be an https:// URL") from exc
+    if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.fragment:
+        # Credentials travel only in the Authorization header, never in a URL.
+        raise ValidationError("selector jev endpoint must be an https:// URL without credentials")
+    if not isinstance(jev["model"], str) or _MODEL_NAME.fullmatch(jev["model"]) is None:
+        raise ValidationError("selector jev model must be a model name")
+    if not isinstance(jev["api_key_env"], str) or _ENV_NAME.fullmatch(jev["api_key_env"]) is None:
+        raise ValidationError("selector jev api_key_env must be an environment variable name")
+    key_file = jev["api_key_file"]
+    if key_file is not None:
+        if not isinstance(key_file, str) or not key_file.strip() or "\x00" in key_file:
+            raise ValidationError("selector jev api_key_file must be null or an absolute path")
+        if not Path(key_file).expanduser().is_absolute():
+            raise ValidationError("selector jev api_key_file must be null or an absolute path")
+    if not _is_int(jev["top"]) or not 1 <= jev["top"] <= 150:
+        raise ValidationError("selector jev top must be 1..150")
+    if not _is_number(jev["score_floor"]) or not 0 <= jev["score_floor"] <= 1:
+        raise ValidationError("selector jev score_floor must be 0..1")
+    if not _is_number(jev["timeout_seconds"]) or not 0 < jev["timeout_seconds"] <= 30:
+        raise ValidationError("selector jev timeout_seconds must be above 0 and at most 30")
+    if not _is_int(jev["prefilter_keep"]) or not 1 <= jev["prefilter_keep"] <= 10000:
+        raise ValidationError("selector jev prefilter_keep must be 1..10000")
+    budget = jev["budget_bytes"]
+    if budget is not None:
+        # The selector budget obeys the same bounds as context_budget_bytes.
+        if not _is_int(budget) or not 4096 <= budget <= 131072:
+            raise ValidationError("selector jev budget_bytes must be null or 4096..131072")
+        if budget > 32768 and data.get("allow_higher_budget") is not True:
+            raise ValidationError("selector jev budget_bytes above 32768 requires allow_higher_budget=true")
+    node_types = jev["node_types"]
+    if (
+        not isinstance(node_types, list) or not node_types
+        or any(not isinstance(item, str) for item in node_types)
+        or len(set(node_types)) != len(node_types)
+        or set(node_types) - SELECTOR_NODE_TYPES
+    ):
+        raise ValidationError(
+            f"selector jev node_types must be a non-empty unique subset of {sorted(SELECTOR_NODE_TYPES)}"
+        )
+    excluded = jev["exclude_domains"]
+    if not isinstance(excluded, list) or any(
+        not isinstance(item, str) or SAFE_LOCAL_ID.fullmatch(item) is None for item in excluded
+    ):
+        raise ValidationError("selector jev exclude_domains must be an array of safe domain ids")
+    context = jev["short_prompt_context"]
+    if not isinstance(context, dict) or set(context) != set(expected["short_prompt_context"]):
+        raise ValidationError("selector jev short_prompt_context must contain enabled, below_chars, max_chars")
+    if not isinstance(context["enabled"], bool):
+        raise ValidationError("selector jev short_prompt_context enabled must be a boolean")
+    if not _is_int(context["below_chars"]) or not 1 <= context["below_chars"] <= 2000:
+        raise ValidationError("selector jev short_prompt_context below_chars must be 1..2000")
+    if not _is_int(context["max_chars"]) or not 1 <= context["max_chars"] <= 4000:
+        raise ValidationError("selector jev short_prompt_context max_chars must be 1..4000")
+    if not isinstance(jev["log_decisions"], bool):
+        raise ValidationError("selector jev log_decisions must be a boolean")
 
 
 def _validate_config(data: dict[str, Any]) -> None:
@@ -83,6 +225,7 @@ def _validate_config(data: dict[str, Any]) -> None:
         hooks_dir = Path(data["hooks_dir"]).expanduser()
         if not hooks_dir.is_absolute() or "\x00" in data["hooks_dir"]:
             raise ValidationError("hooks_dir must be an absolute safe path")
+    _validate_selector(data)
 
 
 def config_path() -> Path:
@@ -97,7 +240,7 @@ def config_path() -> Path:
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
     target = path or config_path()
-    data = dict(DEFAULTS)
+    data = copy.deepcopy(DEFAULTS)
     if target.exists():
         try:
             loaded = json.loads(target.read_text())
@@ -110,6 +253,9 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
             raise ValidationError(
                 f"unknown config keys: {sorted(unknown)}; namespace extensions with a dot"
             )
+        if "selector" in loaded:
+            # A partial selector object overlays the defaults instead of replacing them.
+            loaded["selector"] = _merge_selector(DEFAULTS["selector"], loaded["selector"])
         data.update(loaded)
     _validate_config(data)
     try:
