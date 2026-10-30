@@ -48,6 +48,13 @@ DEFAULTS = {
 
 SELECTOR_MODES = frozenset({"deterministic", "jev", "shadow"})
 SELECTOR_ENV = "IMPRINT_SELECTOR"
+# Environment values that leave the configured selector mode in force. Every
+# other non-empty value is read as "off", so a mistyped kill switch fails safe.
+_SELECTOR_ENV_KEEPS_CONFIG = frozenset({"jev", "shadow"})
+# Most characters of turn text a remote selector may receive. Defined here,
+# not in the selector module, so hook code can bound the text without
+# importing anything that is able to reach the network.
+SELECTOR_STATE_LIMIT = 8000
 # Judgment-partition record types whose own statement can be sent to a remote
 # selector. Business, observation, outcome, self-model, direction and
 # ingested records are not selectable, whatever the config says.
@@ -71,12 +78,14 @@ def _is_int(value: Any) -> bool:
 def effective_selector_mode(selector: Any) -> str:
     """Resolve the selector mode. The environment can only turn it off.
 
-    ``IMPRINT_SELECTOR=off`` (or ``deterministic``) forces deterministic
-    retrieval whatever the config says; no environment value can enable a
-    network selector that the config leaves deterministic.
+    Any non-empty ``IMPRINT_SELECTOR`` other than ``jev`` or ``shadow`` (for
+    example ``off``, ``deterministic``, ``0``, ``false``, or ``disabled``)
+    forces deterministic retrieval whatever the config says. ``jev`` and
+    ``shadow`` leave the configured mode in force: no environment value can
+    enable a network selector that the config leaves deterministic.
     """
     override = os.environ.get(SELECTOR_ENV, "").strip().lower()
-    if override in {"off", "deterministic"}:
+    if override and override not in _SELECTOR_ENV_KEEPS_CONFIG:
         return "deterministic"
     mode = selector.get("mode") if isinstance(selector, dict) else None
     return mode if mode in {"jev", "shadow"} else "deterministic"

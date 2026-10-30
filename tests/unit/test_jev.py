@@ -487,7 +487,17 @@ def test_deterministic_hooks_do_not_import_the_selector():
     (" OFF ", "jev", "deterministic"),
     ("jev", "deterministic", "deterministic"),
     ("shadow", "deterministic", "deterministic"),
-    ("garbage", "jev", "jev"),
+    ("jev", "jev", "jev"),
+    ("shadow", "jev", "jev"),
+    ("", "jev", "jev"),
+    ("  ", "shadow", "shadow"),
+    # Any other value is read as "off": a kill switch must fail safe.
+    ("0", "jev", "deterministic"),
+    ("false", "jev", "deterministic"),
+    ("no", "shadow", "deterministic"),
+    ("none", "jev", "deterministic"),
+    ("disabled", "jev", "deterministic"),
+    ("garbage", "jev", "deterministic"),
 ])
 def test_environment_can_only_turn_the_selector_off(monkeypatch, override, configured, expected):
     if override is None:

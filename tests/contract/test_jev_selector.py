@@ -7,9 +7,12 @@ guard in ``conftest.py`` makes any real connection fail.
 from __future__ import annotations
 
 import copy
+import importlib.util
 import io
 import json
 import os
+import sys
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -723,6 +726,25 @@ def test_no_picks_hook_injects_nothing(tmp_path, transport, monkeypatch, capsys)
     }, monkeypatch, capsys)
     assert (body["status"], body["selector_outcome"]) == ("delivered", "no_picks")
     assert body["hookSpecificOutput"]["additionalContext"] == ""
+
+
+def test_an_unimportable_selector_module_is_todays_behavior(tmp_path, transport, monkeypatch, capsys):
+    enabled = selector_config("jev", short_prompt_context={"enabled": True, "below_chars": 200, "max_chars": 100})
+    config = _config(tmp_path, selector=enabled)
+    _seed(config, monkeypatch, capsys)
+    monkeypatch.setitem(sys.modules, "imprint.retrieve.jev", None)
+    body = _hook(config, "user-prompt-submit", {
+        "session_id": "s1", "cwd": "Projects/Research/Current", "prompt": "review",
+        "transcript_path": str(tmp_path / "absent.jsonl"),
+    }, monkeypatch, capsys)
+    assert (body["status"], body["selector_method"], body["fallback_reason"]) == (
+        "delivered", "deterministic_fallback", "exception",
+    )
+    assert "research domain" in body["hookSpecificOutput"]["additionalContext"]
+    assert cli.main(["--config", str(config), "retrieve", "--session", "cli", "--prompt", "failed source"]) == 0
+    retrieved = json.loads(capsys.readouterr().out)
+    assert (retrieved["status"], retrieved["fallback_reason"]) == ("delivered", "exception")
+    assert transport.calls == []
 
 
 def test_hook_egress_from_a_real_store_carries_only_statements(tmp_path, transport, monkeypatch, capsys):

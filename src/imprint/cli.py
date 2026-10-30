@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
-from .config import load_config, resolved_operator_root
+from .config import SELECTOR_STATE_LIMIT, load_config, resolved_operator_root
 from .errors import ImprintError, ValidationError
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
@@ -86,9 +86,7 @@ def _selector_state(prompt: str, event: dict, selector: dict) -> str:
     ``max_chars`` (the tail) of the newest assistant reply, read through the
     bounded transcript reader. Any failure simply omits the excerpt.
     """
-    from .retrieve.jev import STATE_LIMIT
-
-    state = prompt[:STATE_LIMIT]
+    state = prompt[:SELECTOR_STATE_LIMIT]
     try:
         settings = selector["jev"]["short_prompt_context"]
         path = event.get("transcript_path")
@@ -103,8 +101,8 @@ def _selector_state(prompt: str, event: dict, selector: dict) -> str:
                 excerpt = reply[-int(settings["max_chars"]):]
                 state = f"{state}\n\n{_PREVIOUS_REPLY_LABEL}\n{excerpt}"
     except Exception:
-        state = prompt[:STATE_LIMIT]
-    return state[:STATE_LIMIT]
+        state = prompt[:SELECTOR_STATE_LIMIT]
+    return state[:SELECTOR_STATE_LIMIT]
 
 
 def _validate_hook_event(event: dict, expected: str) -> None:
@@ -929,10 +927,9 @@ def main(argv: list[str] | None = None) -> int:
             context = None
             if selector_mode != "deterministic" and args.prompt.strip():
                 from .retrieve import select_prompt_payload
-                from .retrieve.jev import STATE_LIMIT
                 decision = select_prompt_payload(
                     store, root=root, session_id=args.session,
-                    state=args.prompt[:STATE_LIMIT], explicit_domain=args.domain,
+                    state=args.prompt[:SELECTOR_STATE_LIMIT], explicit_domain=args.domain,
                     budget=int(config["context_budget_bytes"]),
                     selector=config["selector"], mode=selector_mode, refresh=args.refresh,
                 )

@@ -33,13 +33,13 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from imprint import __version__
-from imprint.config import SELECTOR_ENV, effective_selector_mode
+from imprint.config import SELECTOR_STATE_LIMIT, effective_selector_mode
 from imprint.permissions import secure_directory, secure_file
 
 from .engine import _parse_time
 from .models import RetrievalRecord
 
-STATE_LIMIT = 8000
+STATE_LIMIT = SELECTOR_STATE_LIMIT
 STATEMENT_LIMIT = 400
 QUESTION_PREFIX = "Does this judgment apply to the current turn? Judgment: "
 MAX_RESPONSE_BYTES = 1024 * 1024
