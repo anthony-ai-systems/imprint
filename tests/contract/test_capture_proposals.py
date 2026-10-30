@@ -65,3 +65,40 @@ def test_model_authority_escalation_is_rejected(mutation):
     mutation(bad)
     with pytest.raises(ValidationError):
         validate_proposal(bad)
+
+
+@pytest.mark.parametrize("text", [
+    "No, delete the opening sentence.",
+    "No, update the heading to name the benefit.",
+    "No, drop the vague language.",
+    "I prefer to insert a concrete example here.",
+    "No, alter the order of these paragraphs.",
+])
+def test_editorial_feedback_is_not_mistaken_for_sql(text):
+    value = captured("No, use the smaller card.", reason=text, status="supplied")
+    proposal = route_capture_to_proposal(value, detect_explicit_feedback(text))
+    assert proposal["payload"]["reason"] == text
+    assert proposal["provenance"]["authority_tier"] == "inferred_candidate"
+
+
+@pytest.mark.parametrize("text", [
+    "DELETE FROM events",
+    "INSERT INTO events VALUES (1)",
+    "UPDATE events SET payload = 'x'",
+    "UPDATE main.events SET payload = 'x'",
+    'UPDATE "events" SET payload = \'x\'',
+    "INSERT OR REPLACE INTO events VALUES (1)",
+    "UPDATE OR IGNORE events SET payload = 'x'",
+    "UPDATE events AS e SET payload = 'x'",
+    "UPDATE events e SET payload = 'x'",
+    "UPDATE events SET (payload, kind) = ('x', 'y')",
+    "UPDATE events INDEXED BY event_index SET payload = 'x'",
+    "UPDATE events NOT INDEXED SET payload = 'x'",
+    "DROP TABLE events",
+    "DROP DATABASE imprint",
+    "ALTER TABLE events ADD COLUMN value TEXT",
+])
+def test_sql_in_feedback_remains_rejected(text):
+    value = captured("No, use the smaller card.", reason=text, status="supplied")
+    with pytest.raises(ValidationError, match="forbidden transition or SQL"):
+        route_capture_to_proposal(value, detect_explicit_feedback(text))

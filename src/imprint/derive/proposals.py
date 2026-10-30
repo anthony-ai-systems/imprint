@@ -19,6 +19,19 @@ PROPOSAL_TYPES = frozenset({
 ALLOWED_TRANSITIONS = frozenset({"extract", "infer", "route"})
 _FORBIDDEN_TRANSITIONS = {"captured", "ratified", "purged", "purge", "migrated", "migration", "tombstoned"}
 _FORBIDDEN_KEYS = re.compile(r"(?:^|_)(?:sql|query|path|database|db|command|writer|purge|migration)(?:$|_)", re.I)
+_SQL_IDENTIFIER = r'(?:[a-z_][\w$]*|"[^"]+"|`[^`]+`|\[[^\]]+\])'
+_SQL_CONFLICT = r'(?:\s+or\s+(?:rollback|abort|replace|fail|ignore))?'
+_SQL_COLUMNS = r'(?:' + _SQL_IDENTIFIER + r'|\(\s*' + _SQL_IDENTIFIER + r'(?:\s*,\s*' + _SQL_IDENTIFIER + r')*\s*\))'
+_SQL_CONTROL = re.compile(
+    r"\b(?:insert" + _SQL_CONFLICT + r"\s+into|delete\s+from|"
+    + r"(?:drop|alter)\s+(?:table|database|schema|index|view|trigger))\b"
+    + r"|\bupdate" + _SQL_CONFLICT + r"\s+" + _SQL_IDENTIFIER
+    + r"(?:\s*\.\s*" + _SQL_IDENTIFIER + r")*"
+    + r"(?:\s+(?:as\s+)?" + _SQL_IDENTIFIER + r")?"
+    + r"(?:\s+(?:indexed\s+by\s+" + _SQL_IDENTIFIER + r"|not\s+indexed))?"
+    + r"\s+set\s+" + _SQL_COLUMNS + r"\s*=",
+    re.I,
+)
 _TOP = {"record_schema_version", "proposal_id", "source_input_event_id", "proposal_type", "proposed_transition", "references", "payload", "provenance", "extensions"}
 
 
@@ -44,7 +57,9 @@ def _scan_authority(value: Any, path: str = "proposal") -> None:
             _scan_authority(child, f"{path}[{index}]")
     elif isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in _FORBIDDEN_TRANSITIONS or re.search(r"\b(?:insert|update|delete|drop|alter)\s+(?:into|table|from|\w+)", lowered):
+        # Editorial verbs are ordinary evidence. Reject recognizable SQL
+        # syntax, not every sentence containing "delete" or "update".
+        if lowered in _FORBIDDEN_TRANSITIONS or _SQL_CONTROL.search(value):
             raise ValidationError(f"proposal contains forbidden transition or SQL at {path}")
         if value.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", value) or "../" in value or "..\\" in value:
             raise ValidationError(f"proposal contains an arbitrary path at {path}")
