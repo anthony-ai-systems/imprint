@@ -1004,10 +1004,12 @@ def main(argv: list[str] | None = None) -> int:
                 # the payload is redelivered instead of returning already_delivered.
                 refresh = str(event.get("source") or "") in _REFRESHING_SESSION_SOURCES
                 from .config import effective_selector_mode
-                if refresh and effective_selector_mode(config.get("selector")) != "deterministic":
-                    # A relevance selector latches per-turn deliveries for the
-                    # session; a wiped context forgets all of them and then takes
-                    # the ordinary once-delivery path. SessionStart never calls Jev.
+                if refresh and effective_selector_mode(config.get("selector")) == "jev":
+                    # Jev latches per-turn deliveries for the session; a wiped
+                    # context forgets all of them and then takes the ordinary
+                    # once-delivery path. Shadow delivers exactly the
+                    # deterministic context, so it keeps the refresh contract.
+                    # SessionStart never calls Jev.
                     try:
                         from .retrieve import reset_payload_delivery
                         reset_payload_delivery(root=root, session_id=session)

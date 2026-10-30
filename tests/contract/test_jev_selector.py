@@ -943,6 +943,32 @@ def test_compact_and_resume_reset_receipts_only_with_a_selector(tmp_path, transp
         assert "research domain" in replay["hookSpecificOutput"]["additionalContext"]
 
 
+def test_shadow_keeps_the_deterministic_refresh_contract(tmp_path, transport, monkeypatch, capsys):
+    """Shadow must deliver exactly what deterministic mode does, including
+    after compact/resume, so it never resets the session's receipts."""
+    config = _config(tmp_path)
+    _seed(config, monkeypatch, capsys)
+    event = {"cwd": "Projects/Research/Current", "prompt": "review"}
+
+    def session(name):
+        bodies = [
+            _hook(config, "session-start", {"session_id": name, "source": "startup"}, monkeypatch, capsys),
+            _hook(config, "user-prompt-submit", {**event, "session_id": name}, monkeypatch, capsys),
+        ]
+        for source in ("compact", "resume"):
+            bodies.append(_hook(config, "session-start", {"session_id": name, "source": source}, monkeypatch, capsys))
+            bodies.append(_hook(config, "user-prompt-submit", {**event, "session_id": name}, monkeypatch, capsys))
+        return [_strip_selector(body) for body in bodies]
+
+    expected = session("today")
+    assert [body["status"] for body in expected] == [
+        "delivered", "delivered", "delivered", "already_delivered", "delivered", "already_delivered",
+    ]
+    _set_selector(config, selector_config("shadow"))
+    assert session("shadowed") == expected
+    assert transport.calls
+
+
 def test_short_prompt_context_respects_caps_and_changes_the_scope(tmp_path, transport, monkeypatch, capsys):
     reply = "Earlier text. " * 300 + "Should I rename the public flag now?"
     transcript = tmp_path / "transcript.jsonl"
