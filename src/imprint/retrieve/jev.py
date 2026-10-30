@@ -299,7 +299,10 @@ def _score(answer: Any) -> float | None:
     value = answer.get("noul")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except (OverflowError, ValueError):  # an integer too large for a float
+        return None
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         return None
     return value

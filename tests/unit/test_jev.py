@@ -338,6 +338,7 @@ def test_all_answers_below_floor_is_no_picks(monkeypatch):
     {"type": "noul", "noul": 1.5},
     {"type": "noul", "noul": "0.9"},
     {"type": "noul", "noul": None},
+    {"type": "noul", "noul": 10 ** 400},
     {"noul": 0.9},
     {"type": "score", "noul": 0.9},
     0.9,
@@ -361,6 +362,15 @@ def test_one_malformed_answer_does_not_discard_valid_ones(monkeypatch):
     raw = json.dumps({"answers": {"c0": {"type": "noul", "noul": "x"}, "c1": {"type": "noul", "noul": 0.8}}}).encode()
     result = JevSelector(settings(), transport=FakeTransport(raw=raw)).select("one", [item("a", "one"), item("b", "one")])
     assert [x.record_id for x, _ in result.picks] == ["b"]
+
+
+def test_an_overflowing_score_is_dropped_without_discarding_valid_ones(monkeypatch):
+    keyed(monkeypatch)
+    raw = json.dumps({"answers": {
+        "c0": {"type": "noul", "noul": 0.9}, "c1": {"type": "noul", "noul": 10 ** 400},
+    }}).encode()
+    result = JevSelector(settings(), transport=FakeTransport(raw=raw)).select("one", [item("a", "one"), item("b", "one")])
+    assert (result.outcome, [x.record_id for x, _ in result.picks]) == ("picked", ["a"])
 
 
 @pytest.mark.parametrize("raw", [
