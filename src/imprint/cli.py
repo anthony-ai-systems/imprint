@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
-from .config import load_config, resolved_operator_root
+from .config import SELECTOR_STATE_LIMIT, load_config, resolved_operator_root
 from .errors import ImprintError, ValidationError
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
@@ -76,6 +76,38 @@ def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
 # SessionStart re-fires with these sources after the context window was wiped;
 # the memory payload must be refreshed rather than suppressed by the latch.
 _REFRESHING_SESSION_SOURCES = frozenset({"resume", "compact"})
+_PREVIOUS_REPLY_LABEL = "Previous assistant reply:"
+# Wall-clock budget, from the start of main(), for UserPromptSubmit to finish
+# its optional selector request. The hook bridge kills the CLI at its
+# HOOK_TIMEOUT_SECONDS (10); the rest covers interpreter start-up and the
+# deterministic fallback, so a slow endpoint can never empty the hook output.
+HOOK_SELECTOR_BUDGET_SECONDS = 6.0
+
+
+def _selector_state(prompt: str, event: dict, selector: dict) -> str:
+    """Turn text for the optional selector; the reply excerpt is best effort.
+
+    When enabled, a prompt shorter than ``below_chars`` is followed by at most
+    ``max_chars`` (the tail) of the newest assistant reply, read through the
+    bounded transcript reader. Any failure simply omits the excerpt.
+    """
+    state = prompt[:SELECTOR_STATE_LIMIT]
+    try:
+        settings = selector["jev"]["short_prompt_context"]
+        path = event.get("transcript_path")
+        if (
+            settings["enabled"] is True
+            and len(prompt.strip()) < settings["below_chars"]
+            and isinstance(path, str) and path
+        ):
+            from .capture.transcript import last_assistant_text
+            reply = (last_assistant_text(path) or "").strip()
+            if reply:
+                excerpt = reply[-int(settings["max_chars"]):]
+                state = f"{state}\n\n{_PREVIOUS_REPLY_LABEL}\n{excerpt}"
+    except Exception:
+        state = prompt[:SELECTOR_STATE_LIMIT]
+    return state[:SELECTOR_STATE_LIMIT]
 
 
 def _validate_hook_event(event: dict, expected: str) -> None:
@@ -514,6 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = time.monotonic()
     parser = build_parser()
     args = parser.parse_args(argv)
     # Facts the failure receipt must carry out of a partially completed action.
@@ -893,7 +926,35 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "retrieve":
             from .retrieve import retrieve_payload
+            from .config import effective_selector_mode
             store.initialize()
+            selector_mode = effective_selector_mode(config.get("selector"))
+            selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+            context = None
+            exclude_ids: frozenset[str] = frozenset()
+            if selector_mode != "deterministic" and args.prompt.strip():
+                from .retrieve import select_prompt_payload
+                decision = select_prompt_payload(
+                    store, root=root, session_id=args.session,
+                    state=args.prompt[:SELECTOR_STATE_LIMIT], explicit_domain=args.domain,
+                    budget=int(config["context_budget_bytes"]),
+                    selector=config["selector"], mode=selector_mode, refresh=args.refresh,
+                    local_sections=frozenset({"core", "general", "domain"}),
+                )
+                selector_fields = decision.fields()
+                context = decision.context
+                exclude_ids = decision.exclude_ids
+                if decision.response is not None:
+                    selected = {**decision.response, **selector_fields}
+                    if not args.refresh and selected.get("status") == "delivered":
+                        _emit_retrieval_json(
+                            selected, root=root, session_id=args.session,
+                            snapshot_id=str(selected["snapshot_id"]),
+                            domain_id=str(selected["receipt_scope"]),
+                        )
+                    else:
+                        _write_json(selected)
+                    return 0
             result = retrieve_payload(
                 store,
                 root=root,
@@ -902,7 +963,10 @@ def main(argv: list[str] | None = None) -> int:
                 explicit_domain=args.domain,
                 budget=int(config["context_budget_bytes"]),
                 refresh=args.refresh,
+                context=context,
+                exclude_ids=exclude_ids,
             )
+            result = {**result, **selector_fields}
             if not args.refresh and result.get("status") == "delivered":
                 _emit_retrieval_json(
                     result, root=root, session_id=args.session,
@@ -943,6 +1007,19 @@ def main(argv: list[str] | None = None) -> int:
                 # event.source and refresh (bypass the once-delivery latch) so
                 # the payload is redelivered instead of returning already_delivered.
                 refresh = str(event.get("source") or "") in _REFRESHING_SESSION_SOURCES
+                from .config import effective_selector_mode
+                if refresh and effective_selector_mode(config.get("selector")) == "jev":
+                    # Jev latches per-turn deliveries for the session; a wiped
+                    # context forgets all of them and then takes the ordinary
+                    # once-delivery path. Shadow delivers exactly the
+                    # deterministic context, so it keeps the refresh contract.
+                    # SessionStart never calls Jev.
+                    try:
+                        from .retrieve import reset_payload_delivery
+                        reset_payload_delivery(root=root, session_id=session)
+                        refresh = False
+                    except Exception:
+                        pass  # keep the deterministic refresh contract
                 result = retrieve_payload(
                     store, root=root, session_id=session, prompt="",
                     budget=int(config["context_budget_bytes"]), refresh=refresh,
@@ -975,10 +1052,52 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt,
                 )
                 domain = selection.domain_id
+                from .config import effective_selector_mode
+                selector_mode = effective_selector_mode(config.get("selector"))
+                selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+                context = None
+                exclude_ids: frozenset[str] = frozenset()
+                if selector_mode != "deterministic" and prompt.strip():
+                    from .retrieve import select_prompt_payload
+                    decision = select_prompt_payload(
+                        store, root=root, session_id=session,
+                        state=_selector_state(prompt, event, config["selector"]),
+                        explicit_domain=domain, budget=int(config["context_budget_bytes"]),
+                        selector=config["selector"], mode=selector_mode,
+                        deadline=started + HOOK_SELECTOR_BUDGET_SECONDS,
+                    )
+                    selector_fields = decision.fields()
+                    context = decision.context
+                    exclude_ids = decision.exclude_ids
+                    if decision.response is not None:
+                        selected = decision.response
+                        response = {
+                            "hook_schema_version": "1.0.0",
+                            "status": selected["status"],
+                            "domain_id": domain,
+                            "selection_method": selection.method,
+                            **selector_fields,
+                            "hookSpecificOutput": {
+                                "hookEventName": "UserPromptSubmit",
+                                "additionalContext": selected.get("payload", ""),
+                            },
+                        }
+                        if selected.get("status") == "delivered":
+                            _emit_retrieval_json(
+                                response, root=root, session_id=session,
+                                snapshot_id=str(selected["snapshot_id"]),
+                                domain_id=str(selected["receipt_scope"]),
+                            )
+                        else:
+                            _write_json(response)
+                        return 0
+                # Deterministic behavior, and the exact fallback for every
+                # selector failure: domain-only injection, or skip.
                 if domain is None:
                     _write_json({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": selection.diagnostic_code,
+                        **selector_fields,
                         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""},
                     })
                     return 0
@@ -986,12 +1105,14 @@ def main(argv: list[str] | None = None) -> int:
                     store, root=root, session_id=session,
                     prompt=prompt, explicit_domain=domain,
                     budget=int(config["context_budget_bytes"]), domain_only=True,
+                    context=context, exclude_ids=exclude_ids,
                 )
                 response = {
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
                     "domain_id": domain,
                     "selection_method": selection.method,
+                    **selector_fields,
                     "hookSpecificOutput": {
                         "hookEventName": "UserPromptSubmit",
                         "additionalContext": result.get("payload", ""),

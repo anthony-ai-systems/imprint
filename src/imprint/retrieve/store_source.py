@@ -72,6 +72,26 @@ def _text(node_type: str, payload: dict) -> str | None:
     return None
 
 
+# Statement-bearing fields per selectable judgment type. Legacy imported
+# Principles carry their words in ``text``.
+_STATEMENT_FIELDS = {
+    "Verdict": ("raw_operator_text",),
+    "Principle": ("statement", "text"),
+    "Belief": ("statement",),
+    "Value": ("statement",),
+    "Rule": ("statement",),
+    "Pattern": ("statement",),
+}
+
+
+def _judgment_statement(node_type: str, payload: dict) -> str | None:
+    for key in _STATEMENT_FIELDS.get(node_type, ()):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _confidence(payload: dict) -> float | None:
     confidence = payload.get("confidence")
     if isinstance(confidence, dict):
@@ -179,5 +199,6 @@ class StoreRetrievalSource:
                 ontology_path=_path(node["node_type"], payload, partition),
                 confidence=_confidence(payload),
                 disclosure=_disclosure(status, authority),
+                judgment_statement=_judgment_statement(node["node_type"], payload),
             ))
         return records

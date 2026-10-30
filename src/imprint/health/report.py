@@ -54,6 +54,11 @@ class HealthInputs:
     network_state: Literal["offline", "idle", "transferred"] = "offline"
     last_transfer_age_seconds: int = -1
     database_state: Literal["healthy", "busy", "failed"] = "healthy"
+    selector_mode: Literal["deterministic", "jev", "shadow"] = "deterministic"
+    selector_key_present: bool = False
+    selector_endpoint_host: str = ""
+    selector_last_success_ts: str = ""
+    selector_fallbacks_24h: int = 0
 
 
 @dataclass(frozen=True)
@@ -175,6 +180,12 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "projection_snapshot_present": values.projection_snapshot_present,
         "retrieval_budget_bytes": values.retrieval_budget_bytes,
         "selected_bytes": max(0, values.selected_bytes),
+        "selector_endpoint_host": values.selector_endpoint_host,
+        "selector_evidence": "effective_config_plus_decision_log_tail_and_transfer_marker",
+        "selector_fallbacks_24h": max(0, values.selector_fallbacks_24h),
+        "selector_key_present": values.selector_key_present,
+        "selector_last_success_ts": values.selector_last_success_ts,
+        "selector_mode": values.selector_mode,
         "spool_depth": max(0, values.spool_depth),
         "spool_unacknowledged_count": max(0, unacknowledged_spool_count),
         "spool_retention_days": max(1, values.spool_retention_days),
