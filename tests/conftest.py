@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from typing import NamedTuple
@@ -67,6 +69,51 @@ def isolated_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("IMPRINT_CONFIG", str(tmp_path / "imprint-isolated-config.json"))
     monkeypatch.setenv("IMPRINT_DATA_ROOT", str(data_root))
     return data_root
+
+
+class NetworkBlocked(OSError):
+    """Raised by every outbound network primitive while the suite runs."""
+
+
+_REAL_SOCKET_CONNECT = socket.socket.connect
+_REAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
+_NETWORK_FAMILIES = {socket.AF_INET, getattr(socket, "AF_INET6", socket.AF_INET)}
+
+
+def _blocked(*args, **kwargs):
+    raise NetworkBlocked("outbound network is disabled for the test suite")
+
+
+def _guarded_connect(self, address):
+    if self.family in _NETWORK_FAMILIES:
+        _blocked()
+    return _REAL_SOCKET_CONNECT(self, address)
+
+
+def _guarded_connect_ex(self, address):
+    if self.family in _NETWORK_FAMILIES:
+        _blocked()
+    return _REAL_SOCKET_CONNECT_EX(self, address)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make outbound network impossible in-process for every test.
+
+    Inet sockets cannot connect, name resolution and ``create_connection``
+    fail, and ``urllib.request.urlopen`` raises. Subprocesses spawned by tests
+    inherit ``IMPRINT_SELECTOR=off``, which forces deterministic retrieval, and
+    no selector API key from the developer's environment. Tests that exercise
+    the selector in-process remove the override explicitly.
+    """
+    monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
+    monkeypatch.setattr(socket, "create_connection", _blocked)
+    monkeypatch.setattr(socket, "getaddrinfo", _blocked)
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked)
+    monkeypatch.setenv("IMPRINT_SELECTOR", "off")
+    for name in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
