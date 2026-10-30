@@ -931,6 +931,7 @@ def main(argv: list[str] | None = None) -> int:
             selector_mode = effective_selector_mode(config.get("selector"))
             selector_fields: dict[str, object] = {"selector_method": "deterministic"}
             context = None
+            exclude_ids: frozenset[str] = frozenset()
             if selector_mode != "deterministic" and args.prompt.strip():
                 from .retrieve import select_prompt_payload
                 decision = select_prompt_payload(
@@ -938,9 +939,11 @@ def main(argv: list[str] | None = None) -> int:
                     state=args.prompt[:SELECTOR_STATE_LIMIT], explicit_domain=args.domain,
                     budget=int(config["context_budget_bytes"]),
                     selector=config["selector"], mode=selector_mode, refresh=args.refresh,
+                    local_sections=frozenset({"core", "general", "domain"}),
                 )
                 selector_fields = decision.fields()
                 context = decision.context
+                exclude_ids = decision.exclude_ids
                 if decision.response is not None:
                     selected = {**decision.response, **selector_fields}
                     if not args.refresh and selected.get("status") == "delivered":
@@ -961,6 +964,7 @@ def main(argv: list[str] | None = None) -> int:
                 budget=int(config["context_budget_bytes"]),
                 refresh=args.refresh,
                 context=context,
+                exclude_ids=exclude_ids,
             )
             result = {**result, **selector_fields}
             if not args.refresh and result.get("status") == "delivered":
@@ -1052,6 +1056,7 @@ def main(argv: list[str] | None = None) -> int:
                 selector_mode = effective_selector_mode(config.get("selector"))
                 selector_fields: dict[str, object] = {"selector_method": "deterministic"}
                 context = None
+                exclude_ids: frozenset[str] = frozenset()
                 if selector_mode != "deterministic" and prompt.strip():
                     from .retrieve import select_prompt_payload
                     decision = select_prompt_payload(
@@ -1063,6 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     selector_fields = decision.fields()
                     context = decision.context
+                    exclude_ids = decision.exclude_ids
                     if decision.response is not None:
                         selected = decision.response
                         response = {
@@ -1099,7 +1105,7 @@ def main(argv: list[str] | None = None) -> int:
                     store, root=root, session_id=session,
                     prompt=prompt, explicit_domain=domain,
                     budget=int(config["context_budget_bytes"]), domain_only=True,
-                    context=context,
+                    context=context, exclude_ids=exclude_ids,
                 )
                 response = {
                     "hook_schema_version": "1.0.0",

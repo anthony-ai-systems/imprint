@@ -216,8 +216,20 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     unsafe_permissions = unsafe_private_permissions(root)
     temporary_residue = _temporary_residue(root)
     hook_failure_files = _hook_failure_files(root)
-    from imprint.retrieve.jev import selector_health
-    selector = selector_health(root, config.get("selector"))
+    from imprint.config import effective_selector_mode
+    selector_mode = effective_selector_mode(config.get("selector"))
+    selector: dict[str, object] = {
+        "mode": selector_mode, "key_present": False, "endpoint_host": "",
+        "network_state": "offline" if selector_mode == "deterministic" else "idle",
+        "last_transfer_age_seconds": -1, "last_success_ts": "", "fallbacks_24h": 0,
+    }
+    try:
+        # A selector that cannot load reports content-free unknown evidence;
+        # health never crashes on it.
+        from imprint.retrieve.jev import selector_health
+        selector = selector_health(root, config.get("selector"))
+    except Exception:
+        pass
     report = evaluate_health(HealthInputs(
         compiler_count=1 if config.get("compiler") else 0,
         database_ok=database_ok,

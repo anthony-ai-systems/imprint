@@ -35,7 +35,8 @@ prompt (optionally with a short excerpt of the previous assistant reply) and
 short judgment statements to its configured HTTPS endpoint so each prompt
 receives the most relevant judgments; `shadow` calls it and logs the result
 but delivers the deterministic context unchanged. Every selector failure
-falls back to exactly the deterministic behavior. See
+falls back to the deterministic behavior, without repeating records Jev
+already delivered to the session. See
 [`docs/configuration.md`](docs/configuration.md) and
 [`docs/privacy-and-recovery.md`](docs/privacy-and-recovery.md) for what is sent.
 

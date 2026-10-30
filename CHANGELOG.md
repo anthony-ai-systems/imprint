@@ -8,8 +8,9 @@
   forces deterministic retrieval, egress is limited to the prompt (plus an
   optional previous-reply excerpt) and short judgment statements (see
   `docs/privacy-and-recovery.md`), selections never exceed the byte budget,
-  never-sent domain records are still delivered locally, every failure
-  returns exactly the deterministic behavior, decisions are logged without
+  never-sent records are still delivered locally, every failure returns
+  the deterministic behavior minus records Jev already delivered to the
+  session, decisions are logged without
   content, and health reports the selector's network state truthfully.
 
 ## 3.0.1 — 2026-07-15

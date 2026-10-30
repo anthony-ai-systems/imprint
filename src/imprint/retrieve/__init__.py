@@ -67,17 +67,25 @@ class RetrievalContext:
 def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", explicit_domain: str | None = None,
                      budget: int = 32 * 1024, refresh: bool = False,
                      domain_only: bool = False,
-                     context: RetrievalContext | None = None) -> dict[str, object]:
-    """Build one bounded payload per session/snapshot with an atomic receipt."""
+                     context: RetrievalContext | None = None,
+                     exclude_ids: frozenset[str] = frozenset()) -> dict[str, object]:
+    """Build one bounded payload per session/snapshot with an atomic receipt.
+
+    ``exclude_ids`` drops records the selector already delivered into this
+    session, so a selector fallback never re-injects them.
+    """
     context = context or RetrievalContext.read(store)
     snapshot_id = context.snapshot_id
     safe_session = _session_ref(session_id)
     receipts = DeliveryReceipts(Path(root) / "receipts")
     source = context.source
-    if domain_only:
+    if domain_only or exclude_ids:
         class DomainOnlySource:
             def retrieval_candidates(self, requested_snapshot_id):
-                return tuple(item for item in source.retrieval_candidates(requested_snapshot_id) if item.section == "domain")
+                return tuple(
+                    item for item in source.retrieval_candidates(requested_snapshot_id)
+                    if (not domain_only or item.section == "domain") and item.record_id not in exclude_ids
+                )
         retrieval_source = DomainOnlySource()
     else:
         retrieval_source = source
@@ -145,7 +153,9 @@ class SelectorDecision:
 
     ``response`` is set only when Jev owns the delivery. Otherwise the caller
     delivers exactly its deterministic behavior, reusing ``context`` so the
-    store is not read twice.
+    store is not read twice, minus ``exclude_ids``: records Jev already
+    delivered into this session, which today's once-per-session latch would
+    never repeat.
     """
 
     method: str
@@ -153,6 +163,7 @@ class SelectorDecision:
     fallback_reason: str | None = None
     response: dict[str, object] | None = None
     context: RetrievalContext | None = None
+    exclude_ids: frozenset[str] = frozenset()
 
     def fields(self) -> dict[str, object]:
         """Content-free diagnostics for hook and CLI output."""
@@ -246,7 +257,7 @@ def _jev_response(
 def select_prompt_payload(
     store, *, root: Path, session_id: str, state: str, explicit_domain: str | None,
     budget: int, selector: Mapping[str, Any], mode: str, refresh: bool = False,
-    deadline: float | None = None,
+    deadline: float | None = None, local_sections: frozenset[str] = frozenset({"domain"}),
 ) -> SelectorDecision:
     """Run the optional relevance selector for one turn. Never raises.
 
@@ -255,8 +266,11 @@ def select_prompt_payload(
     deterministic behavior). Eligibility is the deterministic engine's, then
     narrowed to selectable judgment types, minus excluded domains and records
     already delivered in this session under any snapshot. Those filters bound
-    only what is sent: the matched domain's never-sent records are delivered
+    only what is sent: never-sent records in ``local_sections`` (the hook's
+    matched domain; every section for ``imprint retrieve``) are delivered
     locally ahead of the picks, as deterministic retrieval would deliver them.
+    When every sendable record was already delivered, the turn is ``no_picks``
+    without a request.
 
     ``deadline`` (a ``time.monotonic()`` value) caps the configured
     ``timeout_seconds`` for callers with a hard wall-clock limit of their own.
@@ -273,7 +287,12 @@ def select_prompt_payload(
     context: RetrievalContext | None = None
     scope: str | None = None
     result: SelectionResult | None = None
+    delivered_ids: set[str] = set()
     session_ref = _session_ref(session_id)
+
+    def already_sent() -> frozenset[str]:
+        # Shadow never delivers, so only jev mode has picks to keep out.
+        return frozenset() if shadow else frozenset(delivered_ids)
     try:
         jev = selector["jev"]
         log = bool(jev.get("log_decisions", True))
@@ -339,19 +358,25 @@ def select_prompt_payload(
         pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
         if deadline is not None:
             settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
-        result = JevSelector(settings).select(state, pool)
+        if sendable and not pool:
+            # Everything relevant is already in this session's context.
+            result = SelectionResult(outcome="no_picks")
+        else:
+            result = JevSelector(settings).select(state, pool)
         if result.outcome == "fallback":
             record(result)
-            return SelectorDecision(failed_method, "fallback", result.fallback_reason, context=context)
+            return SelectorDecision(
+                failed_method, "fallback", result.fallback_reason, context=context, exclude_ids=already_sent(),
+            )
         if shadow:
             record(result)
             return SelectorDecision("shadow", result.outcome, context=context)
         assert scope is not None
         # Records Imprint never sends (an excluded domain, an unselected type,
-        # no statement) keep the matched domain's deterministic injection.
+        # no statement) keep their deterministic delivery.
         local_records = [
             item for item in candidates
-            if item.section == "domain" and item.record_id not in sendable
+            if item.section in local_sections and item.record_id not in sendable
             and item.record_id not in delivered_ids
         ]
         local = RetrievalEngine(_FixedSource(local_records), engine.config).retrieve(
@@ -381,7 +406,7 @@ def select_prompt_payload(
         record(SelectionResult(fallback_reason="exception") if result is None else replace(
             result, picks=(), outcome="fallback", fallback_reason="exception",
         ))
-        return SelectorDecision(failed_method, "fallback", "exception", context=context)
+        return SelectorDecision(failed_method, "fallback", "exception", context=context, exclude_ids=already_sent())
 
 
 __all__ = [

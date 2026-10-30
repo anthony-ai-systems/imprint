@@ -95,20 +95,23 @@ Selection semantics:
   provenance, chosen/default future partitions, domain binding) before any
   selector filter. Domain records still require the matched domain.
 - `node_types` and `exclude_domains` limit what is sent, not what is
-  delivered. The matched domain's records that are never sent (an excluded
-  domain, a type outside `node_types`, or a non-judgment record) are injected
-  first, ranked and rendered exactly as deterministic retrieval does (no
-  `selector` field); Jev's picks fill the rest of the budget.
+  delivered. Records that are never sent (an excluded domain, a type outside
+  `node_types`, or a non-judgment record) are injected first: the matched
+  domain's for the prompt hook, every section's for `imprint retrieve`. They
+  are ranked and rendered as deterministic retrieval does (no `selector`
+  field); Jev's picks fill the rest of the budget.
 - Records already delivered to the session, under any store snapshot, are
   excluded. The newest 256 committed receipts are scanned; unreadable ones are
-  skipped.
+  skipped. When every sendable record was already delivered, the prompt is
+  `no_picks` and Jev is not called.
 - Each delivered line is the ordinary JSON retrieval line plus
   `"selector": {"mode": "jev", "rank": N, "score": S}`.
 - If Jev answers but nothing clears `score_floor`, or nothing it picked fits
   the budget, no pick is injected and `selector_outcome` is `no_picks`.
 - A missing or unsafe key, timeout, HTTP error, malformed answer, no
-  candidates, or any internal exception returns exactly the deterministic
-  behavior for that prompt and records the reason.
+  candidates, or any internal exception returns the deterministic behavior
+  for that prompt, minus records Jev already delivered to the session, and
+  records the reason.
 - Replaying the same prompt (same text, excerpt, and domain) reuses its
   receipt instead of calling Jev again. Its file is
   `receipts/<session>/<snapshot>-domain-jev-<24 hex>.json`.

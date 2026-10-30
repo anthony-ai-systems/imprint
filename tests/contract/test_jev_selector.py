@@ -379,8 +379,10 @@ def test_deterministic_session_start_deliveries_are_excluded(tmp_path, transport
     assert decision.response["selected_ids"] == ["domain-rule"]
     # With everything already delivered there is nothing to send at all.
     _commit(tmp_path, decision)
+    # Nothing is repeated and nothing falls back to re-injecting it.
     empty = _select(tmp_path, state="alpha again", store=store, domain="research")
-    assert (empty.outcome, empty.fallback_reason) == ("fallback", "no_candidates")
+    assert (empty.method, empty.outcome, empty.fallback_reason) == ("jev", "no_picks", None)
+    assert empty.response["payload"] == ""
     assert len(transport.calls) == 1
 
 
@@ -577,6 +579,7 @@ def test_health_network_state_is_truthful(tmp_path, transport, fake_records, mon
 
     fake_records["records"] = [record("a", "ship safely")]
     _commit(root, _select(root))  # the hook commits after flushing the payload
+    fake_records["records"].append(record("b", "review safely"))  # something left to send
     monkeypatch.delenv(KEY_ENV)
     _select(root, state="another turn")
     report = health_report(root, store, config)
@@ -1037,6 +1040,82 @@ def test_retrieve_command_honors_the_selector(tmp_path, transport, monkeypatch, 
     deterministic = run()
     assert deterministic["selector_method"] == "deterministic"
     assert len(transport.calls) == 2
+
+
+
+def test_already_delivered_pool_is_no_picks_without_a_request(tmp_path, transport, fake_records):
+    fake_records["records"] = [
+        record("d1", "Cite every failed source", section="domain", domain_id="research"),
+        record("g1", "Report omissions before conclusions"),
+    ]
+    first = _select(tmp_path, domain="research")
+    assert first.outcome == "picked"
+    _commit(tmp_path, first)
+    again = _select(tmp_path, state="review the sources again", domain="research")
+    assert (again.method, again.outcome) == ("jev", "no_picks")
+    assert again.response["payload"] == ""
+    assert len(transport.calls) == 1
+
+
+def test_fallback_never_reinjects_what_jev_delivered(tmp_path, transport, fake_records):
+    fake_records["records"] = [
+        record("d1", "Cite every failed source", section="domain", domain_id="research"),
+    ]
+    first = _select(tmp_path, domain="research")
+    _commit(tmp_path, first)
+    fake_records["records"].append(record("d2", "Name the missing dataset", section="domain", domain_id="research"))
+    transport.error = OSError("synthetic outage")
+    failed = _select(tmp_path, state="a different turn", domain="research")
+    assert (failed.method, failed.outcome, failed.fallback_reason) == ("deterministic_fallback", "fallback", "http_error")
+    assert failed.exclude_ids == frozenset({"d1"})
+    shadow = _select(tmp_path, state="a third turn", domain="research", mode="shadow")
+    assert shadow.exclude_ids == frozenset()  # shadow never delivered anything
+
+
+def test_jev_domain_context_is_not_injected_twice(tmp_path, transport, monkeypatch, capsys):
+    config = _config(tmp_path, selector=selector_config("jev"))
+    _seed(config, monkeypatch, capsys)
+    rule = "Cite every failed source in the research domain."
+    event = {"session_id": "s1", "cwd": "Projects/Research/Current"}
+    first = _hook(config, "user-prompt-submit", {**event, "prompt": "review the failed source"}, monkeypatch, capsys)
+    assert first["selector_outcome"] == "picked"
+    assert rule in first["hookSpecificOutput"]["additionalContext"]
+    again = _hook(config, "user-prompt-submit", {**event, "prompt": "review sources again"}, monkeypatch, capsys)
+    assert (again["selector_method"], again["selector_outcome"]) == ("jev", "no_picks")
+    assert again["hookSpecificOutput"]["additionalContext"] == ""
+    transport.error = OSError("synthetic outage")
+    failed = _hook(config, "user-prompt-submit", {**event, "prompt": "and once more"}, monkeypatch, capsys)
+    assert rule not in failed["hookSpecificOutput"]["additionalContext"]
+    assert len(transport.calls) == 1
+
+
+def test_retrieve_command_keeps_never_sent_records_in_every_section(tmp_path, transport, monkeypatch, capsys):
+    config = _config(tmp_path)
+    _seed(config, monkeypatch, capsys)
+
+    def run(session, *args):
+        assert cli.main(["--config", str(config), "retrieve", "--session", session, *args]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    deterministic = run("plain", "--prompt", "failed source", "--domain", "research")
+    assert len(deterministic["selected_ids"]) == 3
+    _set_selector(config, selector_config("jev", node_types=["Rule"]))
+    narrowed = run("narrowed", "--prompt", "failed source", "--domain", "research")
+    assert narrowed["selector_outcome"] == "picked"
+    assert set(narrowed["selected_ids"]) == set(deterministic["selected_ids"])
+    assert all("Verdict" not in text for text in transport.sent_statements())
+
+
+@pytest.mark.parametrize("mode", ["deterministic", "jev"])
+def test_health_survives_an_unimportable_selector(tmp_path, monkeypatch, mode):
+    from imprint.health import health_report
+
+    root = tmp_path / "operator"
+    config = {**copy.deepcopy(DEFAULTS), "selector": selector_config(mode)}
+    monkeypatch.setitem(sys.modules, "imprint.retrieve.jev", None)
+    metrics = health_report(root, ImprintStore(root / "imprint.db"), config)["metrics"]
+    assert metrics["selector_mode"] == mode
+    assert metrics["network_state"] == ("offline" if mode == "deterministic" else "idle")
 
 
 # -- synthetic performance check ---------------------------------------------------------
