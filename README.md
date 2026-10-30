@@ -28,6 +28,16 @@ Core operation is offline and has no telemetry. Digest generation and profile
 learning are **experimental and disabled by default**. Passive Screenpipe
 observation is roadmap-only and is not included or claimed by this release.
 
+The one opt-in network exception is the optional Jev relevance selector. With
+the shipped default (`selector.mode: "deterministic"`) Imprint makes no network
+request. An installation that sets `selector.mode` to `jev` sends the current
+prompt and short judgment statements to its configured HTTPS endpoint so each
+prompt receives the most relevant judgments; `shadow` calls it and logs the
+result but delivers the deterministic context unchanged. Every selector failure
+falls back to exactly the deterministic behavior. See
+[`docs/configuration.md`](docs/configuration.md) and
+[`docs/privacy-and-recovery.md`](docs/privacy-and-recovery.md) for what is sent.
+
 ## Requirements
 
 - Python 3.10 or newer, including Python 3.14, with `venv` and `pip`.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
+  prompt-time retrieval. The default `selector.mode` stays `deterministic` with
+  no network request; `jev` and `shadow` are opt-in, `IMPRINT_SELECTOR=off`
+  forces deterministic retrieval, egress is limited to the prompt and short
+  judgment statements, selections never exceed the byte budget, every failure
+  returns exactly the deterministic behavior, decisions are logged without
+  content, and health reports the selector's network state truthfully.
+
 ## 3.0.1 — 2026-07-15
 
 - Close JSON-LD import authority smuggling and preserve non-mutating dry-runs.
