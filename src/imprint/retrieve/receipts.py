@@ -6,12 +6,16 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 
 from imprint.permissions import secure_directory, secure_file
 
 _SAFE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+# Bounds for the cross-snapshot session dedup scan (newest files first).
+DELIVERED_SCAN_FILES = 256
+DELIVERED_SCAN_BYTES = 1024 * 1024
 
 
 class DeliveryReceipts:
@@ -167,6 +171,51 @@ class DeliveryReceipts:
             except OSError:
                 pass
             return False
+
+    def reset_session(self, session_id: str) -> None:
+        """Forget this session's delivery latches after the host wiped its context."""
+        directory = self.root / self._safe(session_id, "session id")
+        if not directory.is_dir() or directory.is_symlink():
+            return
+        for path in directory.glob("*.json"):
+            path.unlink(missing_ok=True)
+
+    def delivered_ids(
+        self, session_id: str, *, max_files: int = DELIVERED_SCAN_FILES,
+        max_bytes: int = DELIVERED_SCAN_BYTES,
+    ) -> set[str]:
+        """Return record ids committed to this session under any snapshot.
+
+        Only committed 1.1.0 responses count; pending caches were never shown.
+        The scan is bounded to the newest ``max_files`` regular files of at
+        most ``max_bytes`` each, and a corrupt or foreign file is skipped:
+        exclusion is advisory and must never fail a prompt.
+        """
+        directory = self.root / self._safe(session_id, "session id")
+        if not directory.is_dir() or directory.is_symlink():
+            return set()
+        entries: list[tuple[float, str, Path]] = []
+        for path in directory.glob("*.json"):
+            if path.name.endswith(".pending.json") or path.name.startswith("."):
+                continue
+            try:
+                status = path.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
+                continue
+            entries.append((status.st_mtime, path.name, path))
+        entries.sort(key=lambda item: (-item[0], item[1]))
+        seen: set[str] = set()
+        for _, _, path in entries[:max(0, max_files)]:
+            try:
+                response = self._decode_prepared(path)
+            except Exception:  # corrupt, foreign, or vanished: skip, never fail
+                continue
+            selected = response.get("selected_ids")
+            if isinstance(selected, list):
+                seen.update(item for item in selected if isinstance(item, str))
+        return seen
 
     def claim_session_start(self, session_id: str, snapshot_id: str) -> bool:
         return self._claim(session_id, snapshot_id, "session_start", None)

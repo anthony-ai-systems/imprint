@@ -128,9 +128,9 @@ def _section_limits(total: int) -> dict[str, int]:
     return limits
 
 
-def _render(record: RetrievalRecord) -> bytes:
+def _render(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
     authority = "imported_floor" if record.authority_tier == "imported_floor" else record.provenance_status
-    value = {
+    value: dict[str, object] = {
         "authority": authority,
         "case_ids": list(record.case_ids),
         "case_summaries": list(record.case_summaries),
@@ -146,6 +146,9 @@ def _render(record: RetrievalRecord) -> bytes:
         "source_receipt_ids": list(record.source_receipt_ids),
         "text": record.text,
     }
+    if selector is not None:
+        # Additive: deterministic output never carries this key.
+        value["selector"] = selector
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
@@ -191,6 +194,46 @@ class RetrievalEngine:
             )
         return partitions
 
+    def _mode_and_partitions(
+        self,
+        ontology_partitions: Sequence[str] | None,
+        authority_mode: AuthorityMode | None,
+    ) -> tuple[AuthorityMode, tuple[str, ...]]:
+        mode = authority_mode or self.config.authority_mode
+        if mode not in {"authoritative", "analytical"}:
+            raise ValueError("unsupported retrieval authority mode")
+        return mode, self._partitions(ontology_partitions, mode)
+
+    def _eligible(
+        self,
+        snapshot_id: str,
+        selected_domain: str | None,
+        partitions: tuple[str, ...],
+        mode: AuthorityMode,
+    ) -> list[RetrievalRecord]:
+        return [
+            item for item in self.source.retrieval_candidates(snapshot_id)
+            if eligible(item, selected_domain, mode)
+            and (not partitions or item.ontology_partition in partitions)
+        ]
+
+    def eligible_candidates(
+        self,
+        *,
+        snapshot_id: str,
+        selected_domain: str | None = None,
+        ontology_partitions: Sequence[str] | None = None,
+        authority_mode: AuthorityMode | None = None,
+    ) -> list[RetrievalRecord]:
+        """Return the records retrieve() may consider, unranked.
+
+        This is the single eligibility gate (authority, provenance, the
+        chosen_future/default_future partition rules, and domain binding) for
+        any selector that ranks candidates differently.
+        """
+        mode, partitions = self._mode_and_partitions(ontology_partitions, authority_mode)
+        return self._eligible(snapshot_id, selected_domain, partitions, mode)
+
     def retrieve(
         self,
         *,
@@ -200,15 +243,8 @@ class RetrievalEngine:
         ontology_partitions: Sequence[str] | None = None,
         authority_mode: AuthorityMode | None = None,
     ) -> RetrievalResult:
-        mode = authority_mode or self.config.authority_mode
-        if mode not in {"authoritative", "analytical"}:
-            raise ValueError("unsupported retrieval authority mode")
-        partitions = self._partitions(ontology_partitions, mode)
-        candidates = [
-            item for item in self.source.retrieval_candidates(snapshot_id)
-            if eligible(item, selected_domain, mode)
-            and (not partitions or item.ontology_partition in partitions)
-        ]
+        mode, partitions = self._mode_and_partitions(ontology_partitions, authority_mode)
+        candidates = self._eligible(snapshot_id, selected_domain, partitions, mode)
         candidates.sort(
             key=lambda item: _rank_key(
                 item, query, selected_domain, self.config.tokenizer_version

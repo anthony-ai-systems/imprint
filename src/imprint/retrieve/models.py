@@ -61,6 +61,11 @@ class RetrievalRecord:
     ontology_path: tuple[str, ...] = ()
     confidence: float | None = None
     disclosure: str = "authority_unclassified"
+    # The judgment's own words only (a statement, or the operator's verbatim
+    # Verdict text). Unlike ``text`` it never falls back to names, amounts,
+    # metrics, or other descriptive fields, so it is the sole record content an
+    # optional remote selector may receive. None means "never send".
+    judgment_statement: str | None = None
 
 
 class RetrievalSource(Protocol):
