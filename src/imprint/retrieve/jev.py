@@ -24,6 +24,7 @@ import math
 import os
 import re
 import stat
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -47,6 +48,8 @@ MAX_KEY_FILE_BYTES = 4096
 DECISION_LOG_NAME = "jev-selector.jsonl"
 DECISION_LOG_MAX_BYTES = 5 * 1024 * 1024
 DECISION_LOG_TAIL_BYTES = 2 * 1024 * 1024
+TRANSFER_MARKER_NAME = "jev-selector-transfer.json"
+MAX_MARKER_BYTES = 4096
 FALLBACK_REASONS = frozenset({
     "missing_key", "key_file_unsafe", "timeout", "http_error",
     "bad_response", "exception", "no_candidates",
@@ -60,6 +63,7 @@ _STOP = frozenset(
 _URN = re.compile(r"urn:imprint:[A-Za-z0-9:._-]+")
 _KEY = re.compile(r"[\x21-\x7e]{1,4096}")
 _ECHOED_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
 # Mode resolution lives in config so deterministic hooks never import this module.
@@ -486,29 +490,92 @@ def log_decision(root: Path, entry: Mapping[str, object]) -> None:
         pass
 
 
+def transfer_marker_path(root: Path) -> Path:
+    return Path(root) / "logs" / TRANSFER_MARKER_NAME
+
+
+def _read_marker(path: Path) -> dict[str, str]:
+    """The marker's timestamps; anything unreadable or unexpected is absent."""
+    try:
+        status = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > MAX_MARKER_BYTES:
+            return {}
+        with path.open("rb") as handle:
+            value = json.loads(handle.read(MAX_MARKER_BYTES + 1))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key] for key in ("last_success_ts", "last_transfer_ts")
+        if isinstance(value.get(key), str) and _STAMP.fullmatch(value[key])
+    }
+
+
+def record_transfer(root: Path, *, success: bool) -> None:
+    """Note that request bytes left the machine. Never raises.
+
+    Written whatever ``log_decisions`` says, and never rotated, so health can
+    report transfers truthfully. It holds two timestamps and nothing else.
+    """
+    try:
+        path = transfer_marker_path(root)
+        if not path.parent.is_dir():
+            secure_directory(path.parent)
+        stamp = _utc_stamp()
+        value = {
+            "last_success_ts": stamp if success else _read_marker(path).get("last_success_ts"),
+            "last_transfer_ts": stamp,
+        }
+        data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".imprint-jev-", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(data)
+            secure_file(temporary)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _tail_lines(path: Path, limit: int) -> tuple[list[bytes], int]:
+    """Complete lines from the last ``limit`` bytes of one log file, and the
+    number of bytes read. A missing or irregular file has none."""
+    if limit <= 0:
+        return [], 0
+    try:
+        status = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(status.st_mode):
+            return [], 0
+        with path.open("rb") as handle:
+            offset = max(0, status.st_size - limit)
+            handle.seek(offset)
+            data = handle.read(limit)
+    except OSError:
+        return [], 0
+    lines = data.split(b"\n")
+    if offset:
+        lines = lines[1:]  # the first line of a tail read may be partial
+    return lines, len(data)
+
+
 def decision_log_summary(root: Path, *, now: datetime | None = None) -> dict[str, object]:
-    """Content-free counts from the bounded tail of the decision log."""
+    """Content-free counts from the newest ``DECISION_LOG_TAIL_BYTES`` of the
+    decision log, continuing into the rotated file when the current one is
+    shorter, so a rotation cannot hide recent lines."""
     current = now or datetime.now(timezone.utc)
     summary: dict[str, object] = {
         "last_success_ts": None, "last_transfer_ts": None, "fallbacks_24h": 0,
     }
     path = decision_log_path(root)
-    try:
-        status = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(status.st_mode):
-            return summary
-        with path.open("rb") as handle:
-            offset = max(0, status.st_size - DECISION_LOG_TAIL_BYTES)
-            handle.seek(offset)
-            data = handle.read(DECISION_LOG_TAIL_BYTES)
-    except OSError:
-        return summary
-    lines = data.split(b"\n")
-    if offset:
-        lines = lines[1:]  # the first line of a tail read may be partial
+    lines, used = _tail_lines(path, DECISION_LOG_TAIL_BYTES)
+    rotated, _ = _tail_lines(path.with_name(DECISION_LOG_NAME + ".1"), DECISION_LOG_TAIL_BYTES - used)
     cutoff = current - timedelta(hours=24)
     fallbacks = 0
-    for raw in lines:
+    for raw in rotated + lines:
         try:
             entry = json.loads(raw)
         except (ValueError, RecursionError):
@@ -551,12 +618,20 @@ def selector_health(root: Path, selector: Mapping[str, Any] | None, *, now: date
     if mode == "deterministic":
         return value
     summary = decision_log_summary(root, now=current)
-    last_transfer = summary["last_transfer_ts"]
+    # The marker covers transfers the decision log cannot show: logging
+    # disabled, or lines rotated away.
+    marker = _read_marker(transfer_marker_path(root))
+
+    def latest(name: str) -> str | None:
+        stamps = [item for item in (summary[name], marker.get(name)) if isinstance(item, str)]
+        return max(stamps) if stamps else None
+
+    last_transfer = latest("last_transfer_ts")
     value["network_state"] = "transferred" if last_transfer else "idle"
-    if isinstance(last_transfer, str):
+    if last_transfer is not None:
         age = int((current - _parse_time(last_transfer)).total_seconds())
         value["last_transfer_age_seconds"] = max(0, age)
-    value["last_success_ts"] = summary["last_success_ts"] or ""
+    value["last_success_ts"] = latest("last_success_ts") or ""
     value["fallbacks_24h"] = summary["fallbacks_24h"]
     return value
 
@@ -578,7 +653,9 @@ __all__ = [
     "http_post",
     "log_decision",
     "prefilter",
+    "record_transfer",
     "request_body",
     "resolve_api_key",
     "selector_health",
+    "transfer_marker_path",
 ]

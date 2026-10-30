@@ -181,7 +181,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "retrieval_budget_bytes": values.retrieval_budget_bytes,
         "selected_bytes": max(0, values.selected_bytes),
         "selector_endpoint_host": values.selector_endpoint_host,
-        "selector_evidence": "effective_config_plus_decision_log_tail",
+        "selector_evidence": "effective_config_plus_decision_log_tail_and_transfer_marker",
         "selector_fallbacks_24h": max(0, values.selector_fallbacks_24h),
         "selector_key_present": values.selector_key_present,
         "selector_last_success_ts": values.selector_last_success_ts,

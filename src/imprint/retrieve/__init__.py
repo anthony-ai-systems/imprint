@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -235,18 +235,33 @@ def select_prompt_payload(
     try:
         from .jev import (
             STATE_LIMIT, JevSelector, JevSettings, SelectionResult, decision_entry,
-            egress_text, log_decision,
+            egress_text, log_decision, record_transfer,
         )
     except Exception:
         return SelectorDecision(failed_method, "fallback", "exception")
     context: RetrievalContext | None = None
     scope: str | None = None
+    result: SelectionResult | None = None
     session_ref = _session_ref(session_id)
     try:
         jev = selector["jev"]
         log = bool(jev.get("log_decisions", True))
     except Exception:
         jev, log = None, False
+
+    def record(value: SelectionResult) -> None:
+        """Exactly one content-free decision line per call, written once its
+        delivery is settled, plus the transfer marker whenever bytes left."""
+        try:
+            if log:
+                log_decision(root, decision_entry(
+                    value, mode=mode, session_ref=session_ref, receipt_scope=scope,
+                ))
+            if value.request_sent:
+                record_transfer(root, success=value.outcome in {"picked", "no_picks"})
+        except Exception:
+            pass
+
     try:
         if mode not in {"jev", "shadow"} or not isinstance(jev, Mapping):
             raise ValueError("selector is not enabled")
@@ -291,34 +306,35 @@ def select_prompt_payload(
             and egress_text(item) is not None
         ]
         result = JevSelector(settings).select(state, pool)
-        if log:
-            log_decision(root, decision_entry(
-                result, mode=mode, session_ref=session_ref, receipt_scope=scope,
-            ))
         if result.outcome == "fallback":
+            record(result)
             return SelectorDecision(failed_method, "fallback", result.fallback_reason, context=context)
         if shadow:
+            record(result)
             return SelectorDecision("shadow", result.outcome, context=context)
         assert scope is not None
         response = _jev_response(
             context.snapshot_id, scope, result.picks, result.outcome, len(pool), selector_budget,
         )
         if refresh:
+            record(result)
             return SelectorDecision("jev", result.outcome, response=response, context=context)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
+            record(result)
             return SelectorDecision(
                 "jev", "already_delivered",
                 response=_already_delivered(context.snapshot_id), context=context,
             )
         assert cached is not None
+        record(result)
         return SelectorDecision("jev", result.outcome, response=cached, context=context)
     except Exception:
-        if log:
-            log_decision(root, decision_entry(
-                SelectionResult(fallback_reason="exception"),
-                mode=mode, session_ref=session_ref, receipt_scope=scope,
-            ))
+        # A failure after Jev answered is still one fallback line: the turn
+        # fell back, even though the request itself succeeded.
+        record(SelectionResult(fallback_reason="exception") if result is None else replace(
+            result, picks=(), outcome="fallback", fallback_reason="exception",
+        ))
         return SelectorDecision(failed_method, "fallback", "exception", context=context)
 
 

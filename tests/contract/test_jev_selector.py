@@ -489,6 +489,27 @@ def test_decision_log_can_be_disabled(tmp_path, transport, fake_records):
     assert not (tmp_path / "logs" / "jev-selector.jsonl").exists()
 
 
+def test_a_failure_after_a_successful_call_logs_one_fallback(tmp_path, transport, fake_records, monkeypatch):
+    fake_records["records"] = [record("a", "ship safely")]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic render failure")
+
+    monkeypatch.setattr(retrieval, "_jev_response", boom)
+    decision = _select(tmp_path)
+    assert (decision.method, decision.fallback_reason) == ("deterministic_fallback", "exception")
+    lines = [json.loads(line) for line in jev.decision_log_path(tmp_path).read_text().splitlines()]
+    assert len(lines) == 1
+    assert (lines[0]["outcome"], lines[0]["fallback_reason"], lines[0]["request_sent"]) == (
+        "fallback", "exception", True,
+    )
+    assert lines[0]["picks"] == []
+    health = jev.selector_health(tmp_path, selector_config("jev"))
+    assert (health["network_state"], health["last_success_ts"], health["fallbacks_24h"]) == (
+        "transferred", "", 1,
+    )
+
+
 def test_decision_log_rotates_at_its_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(jev, "DECISION_LOG_MAX_BYTES", 400)
     entry = {"outcome": "fallback", "ts": "2026-10-29T00:00:00Z", "padding": "x" * 100}
@@ -534,6 +555,36 @@ def test_health_network_state_is_truthful(tmp_path, transport, fake_records, mon
 
     monkeypatch.setenv("IMPRINT_SELECTOR", "off")
     assert health_report(root, store, config)["metrics"]["network_state"] == "offline"
+
+
+def test_health_sees_transfers_with_the_decision_log_disabled(tmp_path, transport, fake_records):
+    root = tmp_path / "operator"
+    fake_records["records"] = [record("a", "ship safely")]
+    decision = _select(root, log_decisions=False)
+    assert decision.outcome == "picked" and len(transport.calls) == 1
+    assert not jev.decision_log_path(root).exists()
+    health = jev.selector_health(root, selector_config("jev", log_decisions=False))
+    assert health["network_state"] == "transferred"
+    assert 0 <= health["last_transfer_age_seconds"] < 120
+    assert health["last_success_ts"].endswith("Z")
+    # The marker is content-free and private.
+    marker = jev.transfer_marker_path(root)
+    assert set(json.loads(marker.read_text())) == {"last_success_ts", "last_transfer_ts"}
+    if os.name != "nt":
+        assert marker.stat().st_mode & 0o077 == 0
+
+
+def test_health_reads_across_a_log_rotation(tmp_path, monkeypatch):
+    now = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+    sent = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    monkeypatch.setattr(jev, "DECISION_LOG_MAX_BYTES", 300)
+    jev.log_decision(tmp_path, {"ts": sent, "outcome": "picked", "request_sent": True, "pad": "x" * 40})
+    for _ in range(3):
+        jev.log_decision(tmp_path, {"ts": recent, "outcome": "fallback", "request_sent": False, "pad": "x" * 40})
+    assert (tmp_path / "logs" / "jev-selector.jsonl.1").exists()
+    summary = jev.decision_log_summary(tmp_path, now=now)
+    assert summary == {"fallbacks_24h": 3, "last_success_ts": sent, "last_transfer_ts": sent}
 
 
 def test_health_counts_only_recent_fallbacks(tmp_path):
