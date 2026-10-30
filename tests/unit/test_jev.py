@@ -463,17 +463,49 @@ def test_redirects_are_refused():
         assert handlers[0].redirect_request(request, None, code, "Redirect", {}, "https://elsewhere.invalid") is None
 
 
-def test_deterministic_hooks_do_not_import_the_selector():
+def test_deterministic_hooks_do_not_import_the_selector(tmp_path):
+    """Real deterministic hooks, in a fresh interpreter, never load the
+    selector module. (The store itself may load urllib.request: Python
+    3.14's pathlib uses it for file URIs.)"""
     import subprocess
     import sys
+    import textwrap
 
-    code = (
-        "import sys, imprint.cli, imprint.config;"
-        "imprint.config.effective_selector_mode({'mode': 'deterministic'});"
-        "print(any(name in sys.modules for name in ('imprint.retrieve.jev', 'urllib.request', 'http.client')))"
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "config_version": "3.0.0", "data_root": str(tmp_path / "data"), "operator_slug": "test",
+        "node_id": "primary", "compiler": True,
+        "domains": [{
+            "domain_id": "research", "public_label": "Research",
+            "safe_paths": ["Projects/Research"], "keywords": ["sources"], "frozen": False,
+        }],
+    }), encoding="utf-8")
+    code = textwrap.dedent("""
+        import io, json, socket, sys
+
+        def blocked(*args, **kwargs):
+            raise OSError("outbound network is disabled for the test suite")
+
+        socket.create_connection = socket.getaddrinfo = socket.socket.connect = blocked
+        import imprint.cli as cli
+
+        for action, event in (
+            ("session-start", {"session_id": "s1", "source": "startup"}),
+            ("user-prompt-submit", {"session_id": "s1", "prompt": "hello"}),
+            ("user-prompt-submit", {"session_id": "s1", "cwd": "Projects/Research/Now", "prompt": "review sources"}),
+            ("session-start", {"session_id": "s1", "source": "compact"}),
+        ):
+            sys.stdin = io.StringIO(json.dumps(event))
+            assert cli.main(["--config", sys.argv[1], "hook", action]) == 0
+        print("selector-imported", "imprint.retrieve.jev" in sys.modules, file=sys.stderr)
+    """)
+    # The default (deterministic) config decides, not the suite's override.
+    env = {name: value for name, value in os.environ.items() if name != "IMPRINT_SELECTOR"}
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(config)], capture_output=True, text=True, env=env, check=True,
     )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
-    assert result.stdout.strip() == "False"
+    assert result.stdout.count('"hook_schema_version"') == 4
+    assert "selector-imported False" in result.stderr
 
 
 # -- mode resolution and config --------------------------------------------------
