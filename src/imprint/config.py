@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -44,6 +45,8 @@ DEFAULTS = {
             "node_types": ["Verdict", "Principle", "Belief", "Value", "Rule", "Pattern"],
             "exclude_domains": [],
             "short_prompt_context": {"enabled": False, "below_chars": 200, "max_chars": 1500},
+            "stale_before": None,
+            "standing_rules": {"enabled": False, "score_floor": 0.25, "rare_word_share": 0.15, "slots": 2, "keep": 30},
             "log_decisions": True,
         },
     },
@@ -63,6 +66,7 @@ SELECTOR_STATE_LIMIT = 8000
 # ingested records are not selectable, whatever the config says.
 SELECTOR_NODE_TYPES = frozenset({"Verdict", "Principle", "Belief", "Value", "Rule", "Pattern"})
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+_UTC_TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 _MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
 
 # Keys the loader recognizes. ``data_root`` and ``hooks_dir`` are written by the
@@ -186,6 +190,29 @@ def _validate_selector(data: dict[str, Any]) -> None:
         raise ValidationError("selector jev short_prompt_context below_chars must be 1..2000")
     if not _is_int(context["max_chars"]) or not 1 <= context["max_chars"] <= 4000:
         raise ValidationError("selector jev short_prompt_context max_chars must be 1..4000")
+    stale_before = jev["stale_before"]
+    if stale_before is not None and (not isinstance(stale_before, str) or _UTC_TIME.fullmatch(stale_before) is None):
+        raise ValidationError("selector jev stale_before must be null or a UTC time like 2026-01-31T12:00:00Z")
+    if stale_before is not None:
+        try:
+            datetime.fromisoformat(stale_before[:-1])
+        except ValueError as exc:
+            raise ValidationError("selector jev stale_before must be null or a UTC time like 2026-01-31T12:00:00Z") from exc
+    standing = jev["standing_rules"]
+    if not isinstance(standing, dict) or set(standing) != set(expected["standing_rules"]):
+        raise ValidationError("selector jev standing_rules must contain enabled, score_floor, rare_word_share, slots, keep")
+    if not isinstance(standing["enabled"], bool):
+        raise ValidationError("selector jev standing_rules enabled must be a boolean")
+    if not _is_number(standing["score_floor"]) or not 0 <= standing["score_floor"] <= 1:
+        raise ValidationError("selector jev standing_rules score_floor must be 0..1")
+    if not _is_number(standing["rare_word_share"]) or not 0 < standing["rare_word_share"] <= 1:
+        raise ValidationError("selector jev standing_rules rare_word_share must be above 0 and at most 1")
+    if not _is_int(standing["slots"]) or not 1 <= standing["slots"] <= 5:
+        raise ValidationError("selector jev standing_rules slots must be 1..5")
+    if not _is_int(standing["keep"]) or not 1 <= standing["keep"] <= 150:
+        raise ValidationError("selector jev standing_rules keep must be 1..150")
+    if standing["enabled"] and standing["keep"] >= jev["prefilter_keep"]:
+        raise ValidationError("selector jev standing_rules keep must be below prefilter_keep")
     if not isinstance(jev["log_decisions"], bool):
         raise ValidationError("selector jev log_decisions must be a boolean")
 

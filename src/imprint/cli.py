@@ -1124,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
                     from .retrieve import select_prompt_payload
                     decision = select_prompt_payload(
                         store, root=root, session_id=session,
-                        state=_selector_state(prompt, event, config["selector"]),
+                        state=_selector_state(prompt, event, config["selector"]), prompt=prompt,
                         explicit_domain=domain, budget=int(config["context_budget_bytes"]),
                         selector=config["selector"], mode=selector_mode,
                         deadline=started + HOOK_SELECTOR_BUDGET_SECONDS,
