@@ -170,6 +170,7 @@ class StoreRetrievalSource:
             if not isinstance(text, str) or not text.strip():
                 continue
             imported_selected = bool(payload.get("imported_selected", False))
+            provenance = node.get("provenance")
             records.append(RetrievalRecord(
                 record_id=node["node_id"],
                 text=text,
@@ -200,6 +201,6 @@ class StoreRetrievalSource:
                 confidence=_confidence(payload),
                 disclosure=_disclosure(status, authority),
                 judgment_statement=_judgment_statement(node["node_type"], payload),
-                capture_mechanism=(node.get("provenance") or {}).get("mechanism") if status == "captured" else None,
+                capture_mechanism=provenance.get("mechanism") if status == "captured" and isinstance(provenance, dict) else None,
             ))
         return records

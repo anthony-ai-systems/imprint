@@ -428,7 +428,8 @@ def select_prompt_payload(
         if jev["standing_rules"]["enabled"]:
             begun = time.monotonic()
             ends = begun + settings.timeout_seconds * SCAN_SHARE
-            standing = newest_rules(pool, jev["standing_rules"]["keep"], stale, lambda: time.monotonic() >= ends)
+            said = frozenset(egress_text(item) for item in candidates if item.record_id in delivered_ids)
+            standing = newest_rules(pool, jev["standing_rules"]["keep"], stale, lambda: time.monotonic() >= ends, said)
             settings = replace(settings, timeout_seconds=settings.timeout_seconds - (time.monotonic() - begun))
         if sendable and not pool:
             # Everything relevant is already in this session's context.

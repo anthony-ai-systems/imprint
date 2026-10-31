@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import sqlite3
 
 import pytest
 
 import imprint.retrieve as retrieval
 from imprint.config import DEFAULTS, load_config
 from imprint.errors import ValidationError
-from imprint.retrieve import select_prompt_payload
+from imprint.retrieve import StoreRetrievalSource, select_prompt_payload
 from imprint.retrieve import jev
 from imprint.retrieve.engine import render_compact
 from imprint.retrieve.jev import (
@@ -121,6 +122,9 @@ FILLER = tuple(record(f"filler{index}", f"No, that is wrong, the {index} banner 
     "Always use uv.",
     "- Always use tabs in the makefile for this project.",
     "* Never include the client name in a commit.",
+    "- Never commit generated files.",
+    "No, that is wrong, here is the list.\n- Always run the linter before you merge.",
+    "Rules:\n- Always run the linter before you merge.",
 ])
 def test_a_sentence_built_as_a_rule_is_a_standing_rule(statement):
     assert rule_sentences(record("r", statement))
@@ -135,6 +139,7 @@ def test_a_sentence_built_as_a_rule_is_a_standing_rule(statement):
     "Always been like that, use the old banner instead.",
     "Never seen this before, but the banner is wrong here, that is wrong.",
     "Always returns null when the cache is empty, that is wrong.",
+    "No, that is wrong, the page is off. Always use persimmon tabs for this?",
 ])
 def test_a_mention_of_the_word_is_not_a_standing_rule(statement):
     assert rule_sentences(record("r", statement)) == []
@@ -296,15 +301,20 @@ def test_reserved_names_only_rules_that_stayed_in_the_picks():
     assert result.reserved == {rules[1].record_id}
 
 
-def test_copies_of_a_rule_take_one_place_and_another_rule_gets_the_second():
+def test_copies_of_a_rule_are_found_once_so_another_rule_gets_the_place():
     repeated = "Always run the reconciler on each invoice batch first."
-    different = "Never send an invoice batch without the purchase order number."
-    entries = [record("r1", repeated), record("r2", repeated), record("o", different), *FILLER]
-    rules = frozenset({"urn:synthetic:r1", "urn:synthetic:r2", "urn:synthetic:o"})
-    result = JevSelector(settings(score_floor=0.55), transport=scored({repeated: 0.5, different: 0.4})).select(
-        "send the invoice batch", entries, standing=rules,
-    )
-    assert [item.record_id for item, _ in result.picks] == ["urn:synthetic:r1", "urn:synthetic:o"]
+    rules = [
+        record("new", repeated, valid_from="2026-03-01T00:00:00Z"),
+        record("copy", repeated, valid_from="2026-02-01T00:00:00Z"),
+        record("old", "Never send an invoice batch without the purchase order number."),
+    ]
+    assert newest_rules(rules, 2, None, lambda: False) == {rules[0].record_id, rules[2].record_id}
+
+
+def test_a_rule_this_session_already_has_is_not_found_again():
+    repeated = "Always run the reconciler on each invoice batch first."
+    other = record("other", "Never send an invoice batch without the purchase order number.")
+    assert newest_rules([record("copy", repeated), other], 2, None, lambda: False, frozenset({repeated})) == {other.record_id}
 
 
 def test_only_the_prompt_earns_a_reserved_place_when_the_turn_carries_more():
@@ -314,6 +324,27 @@ def test_only_the_prompt_earns_a_reserved_place_when_the_turn_carries_more():
     standing = frozenset({rule.record_id})
     assert selector.select(state, [rule, *FILLER], standing=standing).reserved == {rule.record_id}
     assert selector.select(state, [rule, *FILLER], standing=standing, prompt="deploy the staging cluster").reserved == frozenset()
+
+
+@pytest.mark.parametrize("pasted", [
+    "<system-reminder>persimmon</system-reminder>\nyes go ahead",
+    "yes go ahead\n<pasted_content>persimmon reconciler output line</pasted_content>",
+    "yes go ahead\n> persimmon reconciler output line",
+])
+def test_pasted_words_do_not_earn_a_reserved_place(pasted):
+    rule = record("rule", "Always run the persimmon reconciler before closing the month.")
+    selector = JevSelector(settings(), transport=scored({rule.judgment_statement: 0.3}))
+    result = selector.select(pasted, [rule, *FILLER], standing=frozenset({rule.record_id}), prompt=pasted)
+    assert result.reserved == frozenset()
+
+
+def test_a_word_most_records_use_is_not_rare_because_they_are_copies():
+    copies = [record(f"c{index}", "No, that is wrong, the invoice page stays as it was.") for index in range(60)]
+    others = [record(f"o{index}", f"No, the invoice {index} is wrong.") for index in range(6)]
+    filler = [record(f"f{index}", f"No, that is wrong, the {index} banner stays.") for index in range(12)]
+    rule = record("rule", "Always keep the invoice total above the fold.")
+    entries = [rule, *copies, *others, *filler]
+    assert rare_matches("fix the invoice", entries, frozenset({rule.record_id}), 0.15) == frozenset()
 
 
 def test_with_no_rules_picks_are_plain_score_order():
@@ -429,6 +460,11 @@ def test_an_expired_deadline_reads_nothing(monkeypatch):
         "invoice totals", [record("s", STALE)], stale=StaleCheck.since(RULES_CHANGED),
     )
     assert (result.fallback_reason, reading.read) == ("timeout", 0)
+
+
+def test_an_expired_deadline_with_nothing_to_send_is_still_no_candidates():
+    result = JevSelector(settings(timeout_seconds=-1.0), transport=scored({})).select("invoice totals", [])
+    assert result.fallback_reason == "no_candidates"
 
 
 def test_the_search_for_rules_stops_at_keep_and_when_told():
@@ -626,6 +662,36 @@ def test_a_fallback_after_jev_answered_reports_no_reserved_picks(tmp_path, recor
     decision = select(tmp_path, score_floor=0.4, standing_rules=ON)
     assert decision.fallback_reason == "exception"
     assert lines[-1]["picks"] == [] and "reserved_picks" not in lines[-1]
+
+
+class OneVerdict:
+    def __init__(self, provenance):
+        self.provenance = provenance
+
+    def current_nodes(self):
+        return [{
+            "node_id": "urn:synthetic:v", "node_type": "Verdict", "payload": {"raw_operator_text": CORRECTION},
+            "evidence": [], "provenance_status": "captured", "authority_tier": "captured_judgment",
+            "valid_from": "2026-01-01T00:00:00Z", "valid_to": None, "provenance": self.provenance,
+        }]
+
+    def current_edges(self):
+        return []
+
+    def connect(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE source_receipts (source_id TEXT)")
+        return connection
+
+
+@pytest.mark.parametrize(("provenance", "mechanism"), [
+    ({"mechanism": "claude_code_stop_hook"}, "claude_code_stop_hook"),
+    (["not", "an", "object"], None),
+    (None, None),
+])
+def test_the_store_source_reports_how_a_capture_arrived(provenance, mechanism):
+    found = StoreRetrievalSource(OneVerdict(provenance)).retrieval_candidates("snapshot")
+    assert [item.capture_mechanism for item in found] == [mechanism]
 
 
 def test_the_new_settings_default_off():

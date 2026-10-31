@@ -108,9 +108,9 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   are still delivered.
 - `selector.jev.standing_rules`: `{"enabled": false, "score_floor": 0.25,
   "rare_word_share": 0.15, "slots": 2, "keep": 30}`. A standing rule is a record
-  with a sentence that reads as feedback and opens, after any `-` or `*` bullet,
-  with "from now on", "going forward", "from here on", "always", "never" or
-  "whenever", or ends with one of the first three, inside the first 400
+  with a sentence that reads as feedback, is not a question, and opens, after any
+  `-` or `*` bullet, with "from now on", "going forward", "from here on", "always",
+  "never" or "whenever", or ends with one of the first three, inside the first 400
   characters. A sentence right after a removed quote or behind a context chip is
   not recognized, because the stored text no longer shows that it opens a
   sentence. When enabled, the newest `keep` (1–150, below `prefilter_keep`) rules
@@ -119,9 +119,11 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   time left when it starts. A rule then takes one of
   `slots` (1–5) reserved places ahead of the other picks, even below
   `score_floor`, if Jev scores it at or above this `score_floor` and its rule
-  sentence shares a word with the prompt, not the reply excerpt, that at most
-  `rare_word_share` of the records use, or that only the rule uses. A trailing s
-  is folded for that check only. Copies of one rule count once and take one place.
+  sentence shares a word with the operator's own words in the prompt, not pasted
+  text or the reply excerpt, that at most `rare_word_share` of the records use, or
+  that only the rule uses. A word needs three letters, and a trailing s is folded
+  for that check only. Copies of one rule count once and are sent once, and a rule
+  the session already has is not sent again.
   A rule without a reserved place is an ordinary candidate. Rules delivered this
   way carry `"reserved": true` on their line. This can reserve a rule on a prompt
   it does not apply to, because neither signal is exact.

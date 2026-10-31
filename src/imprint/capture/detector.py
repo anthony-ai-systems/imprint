@@ -209,6 +209,7 @@ _SENTENCE_BREAK = re.compile(
 )
 
 
+_BULLET = re.compile(r"^[ \t]*[-*\u2022][ \t]+", re.M)
 _MIN_SENTENCE_CHARS = 20
 
 
@@ -409,6 +410,11 @@ def feedback_sentences(text: str, *, within: int | None = None, any_length: bool
                 matched.add(span)
     sentences = [text[shift + start: shift + end].strip() for start, end in sorted(matched)]
     return sentences if any_length or any(len(sentence) >= _MIN_SENTENCE_CHARS for sentence in sentences) else []
+
+
+def bullets_as_gaps(text: str) -> str:
+    """Return ``text`` with each list bullet breaking a sentence, at its own length."""
+    return _BULLET.sub(lambda bullet: _GAP * len(bullet.group()), text)
 
 
 def closing_sentence(text: str) -> str | None:

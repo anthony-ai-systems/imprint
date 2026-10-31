@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 from imprint import __version__
 from imprint.capture.detector import (
     ALWAYS_OR_NEVER,
+    bullets_as_gaps,
     detect_explicit_feedback,
     feedback_sentences,
     operator_words,
@@ -73,7 +74,7 @@ _STANDING = re.compile(r"\b(?:from now on|going forward|from here on|always|neve
 # A rule is set by how a sentence is built, not by the word: "Always use X" sets
 # one, and "we can always change it" sets nothing.
 _RULE_SENTENCE = re.compile(
-    r"\A(?:[-*\u2022]\s+)?(?:(?:thanks|also|and|great|ok|okay|so)[,!.]?\s+)?"
+    r"\A(?:(?:thanks|also|and|great|ok|okay|so)[,!.]?\s+)?"
     r"(?:(?:from now on|going forward|from here on|whenever)\b|" + ALWAYS_OR_NEVER + r")"
     r"|\b(?:from now on|going forward|from here on)[.!]*\Z",
     re.I,
@@ -240,20 +241,27 @@ def rule_sentences(record: RetrievalRecord) -> list[str]:
     if not _STANDING.search(words, 0, STATEMENT_LIMIT):
         return []
     return [
-        sentence for sentence in feedback_sentences(words, within=_STANDING_READ_CHARS, any_length=True)
-        if _RULE_SENTENCE.search(sentence) and words.find(sentence) < STATEMENT_LIMIT
+        sentence for sentence in feedback_sentences(bullets_as_gaps(words), within=_STANDING_READ_CHARS, any_length=True)
+        if _RULE_SENTENCE.search(sentence) and not sentence.endswith("?") and words.find(sentence) < STATEMENT_LIMIT
     ]
 
 
 def newest_rules(
     entries: Sequence[RetrievalRecord], keep: int, stale: StaleCheck | None, stop: Callable[[], bool],
+    said: frozenset[str | None] = frozenset(),
 ) -> frozenset[str]:
-    """Return the newest ``keep`` records that set a rule, as far as ``stop`` allows."""
+    """Return the newest ``keep`` records that set different rules, as far as ``stop`` allows.
+
+    A rule said twice is two records, and would otherwise take a place from another
+    rule. ``said`` holds statements this session already has.
+    """
     found: list[str] = []
+    seen = set(said)
     for item in sorted(entries, key=lambda item: _parse_time(item.valid_from), reverse=True):
         if len(found) >= keep or stop():
             break
-        if rule_sentences(item) and (stale is None or stale.keeps(item)):
+        if egress_text(item) not in seen and rule_sentences(item) and (stale is None or stale.keeps(item)):
+            seen.add(egress_text(item))
             found.append(item.record_id)
     return frozenset(found)
 
@@ -273,11 +281,12 @@ def rare_matches(
     query = _folded(turn_text) - _RULE_WORDS
     counts: dict[str, int] = {}
     # Saying a rule again must not cost it its rare word.
-    for text in {egress_text(item) or "" for item in entries}:
+    texts = {egress_text(item) or "" for item in entries}
+    for text in texts:
         for word in _folded(text) & query:
             counts[word] = counts.get(word, 0) + 1
     # A word only the rule itself uses is rare in a pool of any size.
-    limit = max(1.0, share * len(entries))
+    limit = max(1.0, share * len(texts))
     return frozenset(
         item.record_id for item in entries
         if item.record_id in standing
@@ -561,7 +570,7 @@ class JevSelector:
                 key = resolve_api_key(self.settings)
             except _KeyUnavailable as exc:
                 return self._result(started, fallback_reason=exc.reason)
-            if self._clock() >= deadline:
+            if entries and self._clock() >= deadline:
                 return self._result(started, fallback_reason="timeout")
             sendable = [item for item in entries if egress_text(item)]
             candidates = prefilter(state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed)
@@ -611,16 +620,12 @@ class JevSelector:
             scored.sort(key=lambda item: (-item[1], item[0].record_id.encode("utf-8")))
             matched = frozenset()
             if standing:
-                matched = rare_matches(state if prompt is None else prompt, sendable, standing, self.settings.standing_rare_share)
-            # Copies of one rule take one place, or a repeated rule would crowd out another.
-            reserved: list[tuple[RetrievalRecord, float]] = []
-            for pick in scored:
-                if (
-                    pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
-                    and egress_text(pick[0]) not in {egress_text(item[0]) for item in reserved}
-                ):
-                    reserved.append(pick)
-            reserved = reserved[: self.settings.standing_slots]
+                said = _spoken(state if prompt is None else prompt)
+                matched = rare_matches(said, sendable, standing, self.settings.standing_rare_share)
+            reserved = [
+                pick for pick in scored
+                if pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
+            ][: self.settings.standing_slots]
             held = {pick[0].record_id for pick in reserved}
             picks = tuple((reserved + [
                 pick for pick in scored if pick[1] >= self.settings.score_floor and pick[0].record_id not in held
