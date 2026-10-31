@@ -29,12 +29,20 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from imprint import __version__
-from imprint.capture.detector import operator_words, stored_words
+from imprint.capture.detector import (
+    ALWAYS_OR_NEVER,
+    bullets_as_gaps,
+    detect_explicit_feedback,
+    feedback_sentences,
+    operator_words,
+    stored_words,
+)
 from imprint.config import SELECTOR_STATE_LIMIT, effective_selector_mode
 from imprint.permissions import secure_directory, secure_file
 
@@ -62,6 +70,24 @@ _STOP = frozenset(
     "more most".split()
 )
 _URN = re.compile(r"urn:imprint:[A-Za-z0-9:._-]+")
+_STANDING = re.compile(r"\b(?:from now on|going forward|from here on|always|never|whenever)\b", re.I)
+# A rule is set by how a sentence is built, not by the word: "Always use X" sets
+# one, and "we can always change it" sets nothing.
+_RULE_SENTENCE = re.compile(
+    r"\A(?:(?:thanks|also|and|great|ok|okay|so)[,!.]?\s+)?"
+    r"(?:(?:from now on|going forward|from here on|whenever)\b|" + ALWAYS_OR_NEVER + r")"
+    r"|\b(?:from now on|going forward|from here on)[.!]*\Z",
+    re.I,
+)
+# These say a sentence is a rule, not what the rule is about.
+_RULE_WORDS = frozenset({"always", "alway", "never", "whenever", "from", "now", "going", "forward", "here"})
+_STANDING_READ_CHARS = 1000
+_FEEDBACK_READ_CHARS = 8000
+# Reading records for rules and for staleness shares a turn's time with the request,
+# so each stops at this part of the time left when it starts.
+SCAN_SHARE = 1 / 3
+# The only route where a record had to read as feedback to get in.
+_DETECTED_MECHANISM = "claude_code_stop_hook"
 _KEY = re.compile(r"[\x21-\x7e]{1,4096}")
 _ECHOED_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
 _STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -81,6 +107,9 @@ class JevSettings:
     score_floor: float = 0.55
     timeout_seconds: float = 3.0
     prefilter_keep: int = 150
+    standing_floor: float = 0.25
+    standing_rare_share: float = 0.15
+    standing_slots: int = 2
 
     @classmethod
     def from_config(cls, jev: Mapping[str, Any]) -> "JevSettings":
@@ -93,6 +122,9 @@ class JevSettings:
             score_floor=float(jev["score_floor"]),
             timeout_seconds=float(jev["timeout_seconds"]),
             prefilter_keep=int(jev["prefilter_keep"]),
+            standing_floor=float(jev["standing_rules"]["score_floor"]),
+            standing_rare_share=float(jev["standing_rules"]["rare_word_share"]),
+            standing_slots=int(jev["standing_rules"]["slots"]),
         )
 
 
@@ -111,6 +143,12 @@ class SelectionResult:
     request_sent: bool = False
     # Size of that request. The context budget bounds delivery, not this.
     request_bytes: int = 0
+    # Standing rules among ``picks``, which lead them.
+    reserved: frozenset[str] = frozenset()
+    # Stale records passed over on the way to the request.
+    withheld: int = 0
+    # The stale check ran out of time, so the request holds fewer records.
+    scan_cut: bool = False
 
 
 class _KeyUnavailable(Exception):
@@ -127,6 +165,21 @@ class _DeadlineExceeded(Exception):
     pass
 
 
+@lru_cache(maxsize=None)
+def _spoken(statement: str) -> str:
+    return stored_words(operator_words(statement))
+
+
+def forget_statements() -> None:
+    """Start a turn's reading afresh, which bounds the cache by the pool."""
+    _spoken.cache_clear()
+
+
+def _words(record: RetrievalRecord) -> str:
+    value = record.judgment_statement
+    return _spoken(value) if isinstance(value, str) else ""
+
+
 def egress_text(record: RetrievalRecord) -> str | None:
     """The only record content a remote selector may receive.
 
@@ -135,23 +188,127 @@ def egress_text(record: RetrievalRecord) -> str | None:
     URNs replaced, and truncated. A record stored by an older build can open with
     host text, which would otherwise fill the whole statement.
     """
-    value = record.judgment_statement
-    if not isinstance(value, str):
-        return None
-    words = stored_words(operator_words(value))
+    words = _words(record)
     text = " ".join(_URN.sub("[ref]", words).split())[:STATEMENT_LIMIT]
     return text or None
+
+
+def reads_as_feedback(record: RetrievalRecord) -> bool:
+    """Whether a captured message still reads as feedback under today's rules.
+
+    Each record judged was a reply, so the rules for replies apply. A record with
+    no words has nothing to judge. A hook runs this per prompt, so it reads as far
+    as moves the answer for almost every record.
+    """
+    words = _words(record)[:_FEEDBACK_READ_CHARS]
+    if not words.strip():
+        return True
+    return detect_explicit_feedback(words, prior_assistant_output="-").is_feedback or bool(feedback_sentences(words))
+
+
+@dataclass(frozen=True)
+class StaleCheck:
+    """Which records must still read as feedback, given when the rules last changed.
+
+    Older builds kept messages the rules have since stopped matching. The record
+    stays in the store. Only stop-hook captures are judged: ratified knowledge, an
+    explicit capture and an import never met the detector. A capture since the
+    change met today's rules as it was made, and what is stored has lost the quote
+    those rules read around, so judging it again could only be wrong.
+    """
+
+    changed: datetime
+
+    @classmethod
+    def since(cls, before: str) -> "StaleCheck":
+        return cls(_parse_time(before))
+
+    def applies_to(self, record: RetrievalRecord) -> bool:
+        """Whether a record has to be read at all, which takes no reading to answer."""
+        return (
+            record.authority_tier == "captured_judgment"
+            and record.capture_mechanism == _DETECTED_MECHANISM
+            and _parse_time(record.valid_from) < self.changed
+        )
+
+    def keeps(self, record: RetrievalRecord) -> bool:
+        return not self.applies_to(record) or reads_as_feedback(record)
+
+
+def rule_sentences(record: RetrievalRecord) -> list[str]:
+    """Return the sentences that set a rule for later work, where Jev can read them."""
+    words = _words(record)
+    if not _STANDING.search(words, 0, STATEMENT_LIMIT):
+        return []
+    return [
+        sentence for sentence in feedback_sentences(bullets_as_gaps(words), within=_STANDING_READ_CHARS, any_length=True)
+        if _RULE_SENTENCE.search(sentence) and not sentence.endswith("?") and words.find(sentence) < STATEMENT_LIMIT
+    ]
+
+
+def newest_rules(
+    entries: Sequence[RetrievalRecord], keep: int, stale: StaleCheck | None, stop: Callable[[], bool],
+    said: frozenset[str | None] = frozenset(),
+) -> frozenset[str]:
+    """Return the newest ``keep`` records that set different rules, as far as ``stop`` allows.
+
+    A rule said twice is two records, and would otherwise take a place from another
+    rule. ``said`` holds statements this session already has.
+    """
+    found: list[str] = []
+    seen = set(said)
+    for item in sorted(entries, key=lambda item: _parse_time(item.valid_from), reverse=True):
+        if len(found) >= keep or stop():
+            break
+        if egress_text(item) not in seen and rule_sentences(item) and (stale is None or stale.keeps(item)):
+            seen.add(egress_text(item))
+            found.append(item.record_id)
+    return frozenset(found)
+
+
+def _folded(value: str) -> set[str]:
+    return {word[:-1] if len(word) > 3 and word.endswith("s") else word for word in _tokens(value)}
+
+
+def rare_matches(
+    turn_text: str, entries: Sequence[RetrievalRecord], standing: frozenset[str], share: float,
+) -> frozenset[str]:
+    """Return the standing rules whose own sentence shares with the turn a word few records use.
+
+    Jev's score alone does not separate a rule that applies from one that does
+    not, and a word most records use says nothing either way.
+    """
+    query = _folded(turn_text) - _RULE_WORDS
+    counts: dict[str, int] = {}
+    # Saying a rule again must not cost it its rare word.
+    texts = {egress_text(item) or "" for item in entries}
+    for text in texts:
+        for word in _folded(text) & query:
+            counts[word] = counts.get(word, 0) + 1
+    # A word only the rule itself uses is rare in a pool of any size.
+    limit = max(1.0, share * len(texts))
+    return frozenset(
+        item.record_id for item in entries
+        if item.record_id in standing
+        and any(counts.get(word, 0) <= limit for word in _folded(" ".join(rule_sentences(item))) & query)
+    )
 
 
 def _tokens(value: str) -> set[str]:
     return {word for word in re.findall(r"[a-z][a-z'\-]{2,}", value.casefold()) if word not in _STOP}
 
 
-def prefilter(turn_text: str, entries: Sequence[RetrievalRecord], keep: int = 150) -> list[RetrievalRecord]:
+def prefilter(
+    turn_text: str, entries: Sequence[RetrievalRecord], keep: int = 150,
+    *, standing: frozenset[str] = frozenset(),
+    accept: Callable[[RetrievalRecord], bool] | None = None,
+) -> list[RetrievalRecord]:
     """Keep the IDF-weighted lexical best ``keep`` candidates before egress.
 
     Ties (including turns with no lexical overlap) prefer newer records, then
-    record id bytes, so the kept set is deterministic.
+    record id bytes, so the kept set is deterministic. ``standing`` records are
+    kept whatever their overlap, in place of the weakest. ``accept`` can pass over
+    a record, and is asked only of those that would otherwise be kept.
     """
     if keep <= 0:
         return []
@@ -168,7 +325,14 @@ def prefilter(turn_text: str, entries: Sequence[RetrievalRecord], keep: int = 15
         score /= math.sqrt(len(document) + 5)
         ranked.append((-score, -_parse_time(item.valid_from).timestamp(), item.record_id.encode("utf-8"), item))
     ranked.sort(key=lambda value: value[:3])
-    return [value[3] for value in ranked[:keep]]
+    rules = [value[3] for value in ranked if value[3].record_id in standing][:keep]
+    others: list[RetrievalRecord] = []
+    for *_, item in ranked:
+        if len(others) >= keep - len(rules):
+            break
+        if item.record_id not in standing and (accept is None or accept(item)):
+            others.append(item)
+    return others + rules
 
 
 def _read_key_file(path: Path) -> str:
@@ -365,23 +529,55 @@ class JevSelector:
         elapsed = max(0, int(round((self._clock() - started) * 1000)))
         return SelectionResult(elapsed_ms=elapsed, **values)
 
-    def select(self, state: str, entries: Sequence[RetrievalRecord]) -> SelectionResult:
+    def select(
+        self, state: str, entries: Sequence[RetrievalRecord], *, standing: frozenset[str] = frozenset(),
+        stale: StaleCheck | None = None, prompt: str | None = None,
+    ) -> SelectionResult:
         """Return picks or a fallback reason. Never raises.
 
         ``timeout_seconds`` is a total wall-clock deadline for key resolution,
-        prefiltering, the request, and parsing.
+        prefiltering, the request, and parsing. The best ``standing`` records at
+        or above their own floor that share a rare word with ``prompt``, or with
+        the turn when it is only the prompt, lead the picks, so the budget reaches
+        them first. ``stale`` keeps records out of the request, and a record it has
+        not read in its share of the deadline stays out too.
         """
         started = self._clock()
         deadline = started + self.settings.timeout_seconds
+        scan_ends: float | None = None
         sent = 0
         request_bytes = 0
         request_sent = False
+        withheld = 0
+        scan_cut = False
+
+        def passed(item: RetrievalRecord) -> bool:
+            nonlocal scan_ends, scan_cut, withheld
+            if stale is None or not stale.applies_to(item):
+                return True
+            now = self._clock()
+            if scan_ends is None:
+                scan_ends = now + (deadline - now) * SCAN_SHARE
+            if now >= scan_ends:
+                scan_cut = True
+                return False
+            fresh = reads_as_feedback(item)
+            withheld += not fresh
+            return fresh
+
         try:
             try:
                 key = resolve_api_key(self.settings)
             except _KeyUnavailable as exc:
                 return self._result(started, fallback_reason=exc.reason)
-            candidates = prefilter(state, [item for item in entries if egress_text(item)], self.settings.prefilter_keep)
+            if entries and self._clock() >= deadline:
+                return self._result(started, fallback_reason="timeout")
+            sendable = [item for item in entries if egress_text(item)]
+            candidates = prefilter(state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed)
+            if not candidates and scan_cut:
+                return self._result(started, fallback_reason="timeout", withheld=withheld, scan_cut=True)
+            if not candidates and withheld:
+                return self._result(started, outcome="no_picks", withheld=withheld)
             if not candidates:
                 return self._result(started, fallback_reason="no_candidates")
             body, names = request_body(self.settings.model, state, candidates)
@@ -393,7 +589,7 @@ class JevSelector:
             }
             remaining = deadline - self._clock()
             if remaining <= 0:
-                return self._result(started, fallback_reason="timeout")
+                return self._result(started, fallback_reason="timeout", withheld=withheld, scan_cut=scan_cut)
             transport = self._transport or http_post
             sent = len(names)
             request_bytes = len(encoded)
@@ -418,15 +614,28 @@ class JevSelector:
                 if score is None:
                     continue  # unknown names and malformed answers are dropped
                 valid += 1
-                if score >= self.settings.score_floor:
-                    scored.append((record, score))
+                scored.append((record, score))
             if not valid:
                 raise _BadResponse("response carries no valid answer for a sent question")
             scored.sort(key=lambda item: (-item[1], item[0].record_id.encode("utf-8")))
-            picks = tuple(scored[: self.settings.top])
+            matched = frozenset()
+            if standing:
+                said = _spoken(state if prompt is None else prompt)
+                matched = rare_matches(said, sendable, standing, self.settings.standing_rare_share)
+            reserved = [
+                pick for pick in scored
+                if pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
+            ][: self.settings.standing_slots]
+            held = {pick[0].record_id for pick in reserved}
+            picks = tuple((reserved + [
+                pick for pick in scored if pick[1] >= self.settings.score_floor and pick[0].record_id not in held
+            ])[: self.settings.top])
             return self._result(
                 started,
                 picks=picks,
+                reserved=frozenset(pick[0].record_id for pick in picks) & held,
+                withheld=withheld,
+                scan_cut=scan_cut,
                 outcome="picked" if picks else "no_picks",
                 model_echoed=_echoed_model(value.get("model")),
                 usage=_usage(value.get("usage")),
@@ -442,7 +651,7 @@ class JevSelector:
             reason = _failure_reason(exc)
         return self._result(
             started, fallback_reason=reason, candidates_sent=sent, request_sent=request_sent,
-            request_bytes=request_bytes,
+            request_bytes=request_bytes, withheld=withheld, scan_cut=scan_cut,
         )
 
 
@@ -458,7 +667,8 @@ def decision_entry(
 
     ``outcome`` is Jev's result; ``delivery_outcome`` and ``stages`` are what became
     of it in this turn, and are null on a shadow or fallback line, which delivers
-    nothing of Jev's.
+    nothing of Jev's. The last three fields appear only when they have something
+    to say, so a line with both settings off is unchanged.
     """
     return {
         "candidates_sent": result.candidates_sent,
@@ -476,6 +686,9 @@ def decision_entry(
         "stages": dict(stages) if stages is not None else None,
         "ts": _utc_stamp(),
         "usage": result.usage,
+        **({"reserved_picks": len(result.reserved)} if result.reserved else {}),
+        **({"stale_withheld": result.withheld} if result.withheld else {}),
+        **({"stale_scan_cut": True} if result.scan_cut else {}),
     }
 
 
@@ -661,17 +874,24 @@ __all__ = [
     "JevSelector",
     "JevSettings",
     "QUESTION_PREFIX",
+    "SCAN_SHARE",
     "STATEMENT_LIMIT",
     "STATE_LIMIT",
     "SelectionResult",
+    "StaleCheck",
     "api_key_present",
     "decision_entry",
     "decision_log_summary",
     "effective_mode",
     "egress_text",
+    "forget_statements",
     "http_post",
     "log_decision",
+    "newest_rules",
     "prefilter",
+    "rare_matches",
+    "reads_as_feedback",
+    "rule_sentences",
     "record_transfer",
     "request_body",
     "resolve_api_key",
