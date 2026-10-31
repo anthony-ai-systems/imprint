@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
+from imprint.capture.detector import feedback_sentence
+
 from .models import (
     CHOSEN_FUTURE_PARTITION,
     DEFAULT_FUTURE_PARTITION,
@@ -118,6 +120,9 @@ def _rank_key(record: RetrievalRecord, query: str, selected_domain: str | None, 
     )
 
 
+COMPACT_TEXT_BYTES = 400
+
+
 def _section_limits(total: int) -> dict[str, int]:
     # Preserve the frozen 1:2:1 split for lower and explicitly higher budgets.
     unit, remainder = divmod(total, 4)
@@ -128,10 +133,20 @@ def _section_limits(total: int) -> dict[str, int]:
     return limits
 
 
+def _authority(record: RetrievalRecord) -> str:
+    return "imported_floor" if record.authority_tier == "imported_floor" else record.provenance_status
+
+
+def _line(value: dict[str, object], selector: dict[str, object] | None) -> bytes:
+    if selector is not None:
+        # Additive: deterministic output never carries this key.
+        value["selector"] = selector
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
 def _render(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
-    authority = "imported_floor" if record.authority_tier == "imported_floor" else record.provenance_status
     value: dict[str, object] = {
-        "authority": authority,
+        "authority": _authority(record),
         "case_ids": list(record.case_ids),
         "case_summaries": list(record.case_summaries),
         "evidence_ids": list(record.evidence_ids),
@@ -146,10 +161,31 @@ def _render(record: RetrievalRecord, *, selector: dict[str, object] | None = Non
         "source_receipt_ids": list(record.source_receipt_ids),
         "text": record.text,
     }
-    if selector is not None:
-        # Additive: deterministic output never carries this key.
-        value["selector"] = selector
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    return _line(value, selector)
+
+
+def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
+    """Render the point of a record with its authority and source references.
+
+    This shapes one delivery only; the canonical record is untouched. The text
+    is the record's own words, never a rewrite: the sentence that reads as
+    feedback, else the opening, cut at a byte limit. ``detail`` is how to read
+    the whole record locally.
+    """
+    sentence = feedback_sentence(record.text)
+    text = (sentence or record.text).encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
+    return _line({
+        "authority": _authority(record),
+        "case_ids": list(record.case_ids),
+        "compact": True,
+        "detail": f"imprint history {record.record_id}",
+        "evidence_ids": list(record.evidence_ids),
+        "record_id": record.record_id,
+        "source_receipt_ids": list(record.source_receipt_ids),
+        "text": text,
+        "text_basis": "feedback_sentence" if sentence else "opening",
+        "text_complete": text == record.text,
+    }, selector)
 
 
 class RetrievalEngine:

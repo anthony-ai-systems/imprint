@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Deliver a Jev pick too large to share the budget as a compact line: the
+  record's own opening words, its authority and source references, and how to
+  read the whole record locally. The canonical record is unchanged.
+- Report `oversized_picks` when Jev picked records that still cannot fit, which
+  was reported as `no_picks`, and log content-free counts per stage and the
+  request size with each selector decision.
 - Add optional verification of T3 prompts against T3's own message record
   (`t3_capture_origin`, default off). T3 submits every prompt through the SDK,
   so its prompts stayed unverified and no correction made in T3 was captured.
