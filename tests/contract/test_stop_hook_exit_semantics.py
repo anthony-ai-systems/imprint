@@ -145,3 +145,45 @@ def test_hung_child_gets_sigterm_grace_before_kill(monkeypatch, tmp_path):
     with pytest.raises(subprocess.TimeoutExpired):
         bridge._graceful_run([sys.executable, "-c", script], "")
     assert marker.exists()
+
+
+def test_timeout_leaves_a_trace_and_stays_fail_open(monkeypatch, capsys, tmp_path):
+    bridge = _bridge_module()
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"data_root": str(tmp_path / "data"), "operator_slug": "test"}), encoding="utf-8")
+    monkeypatch.setenv("IMPRINT_CONFIG", str(config))
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(json.dumps({"stop_hook_active": False})))
+
+    def hung(*args, **kwargs):
+        raise subprocess.TimeoutExpired(["imprint"], 10)
+
+    monkeypatch.setattr(bridge, "_graceful_run", hung)
+    assert bridge.run("stop-capture") == 0
+    assert json.loads(capsys.readouterr().out)["error"] == "hook_action_timeout"
+    (record,) = (tmp_path / "data" / "test" / "logs" / "hook-failures").glob("*.json")
+    body = json.loads(record.read_text(encoding="utf-8"))
+    assert (body["action"], body["exit_code"]) == ("stop-capture", None)
+    assert body["stderr"] == "hook action timed out"
+
+
+def test_a_lone_surrogate_reaches_the_child_as_ascii(monkeypatch, capsys):
+    bridge = _bridge_module()
+    sent = []
+
+    def child(argv, payload):
+        sent.append(payload.encode("utf-8"))
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO('{"last_assistant_message": "Draft \\ud83d end"}'))
+    monkeypatch.setattr(bridge, "_graceful_run", child)
+    assert bridge.run("stop-capture") == 0
+    assert sent == [b'{"last_assistant_message":"Draft \\ud83d end"}']
+
+
+@pytest.mark.parametrize("event", ["[" * 200_000 + "]" * 200_000, "1" * 5000], ids=["deep", "long integer"])
+def test_an_event_too_large_to_read_fails_open(monkeypatch, capsys, event):
+    bridge = _bridge_module()
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(event))
+    assert bridge.run("stop-capture") == 0
+    assert json.loads(capsys.readouterr().out)["error"] == "hook_input_invalid"

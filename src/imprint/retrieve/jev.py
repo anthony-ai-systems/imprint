@@ -448,11 +448,17 @@ def _utc_stamp(value: datetime | None = None) -> str:
 
 def decision_entry(
     result: SelectionResult, *, mode: str, session_ref: str, receipt_scope: str | None,
-    stages: Mapping[str, int] | None = None,
+    stages: Mapping[str, int] | None = None, delivery_outcome: str | None = None,
 ) -> dict[str, object]:
-    """A content-free decision record: no prompt, judgment text, or key."""
+    """A content-free decision record: no prompt, judgment text, or key.
+
+    ``outcome`` is Jev's result; ``delivery_outcome`` and ``stages`` are what became
+    of it in this turn, and are null on a shadow or fallback line, which delivers
+    nothing of Jev's.
+    """
     return {
         "candidates_sent": result.candidates_sent,
+        "delivery_outcome": delivery_outcome,
         "elapsed_ms": result.elapsed_ms,
         "fallback_reason": result.fallback_reason,
         "mode": mode,

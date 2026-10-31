@@ -22,6 +22,8 @@ from .provenance import (
 )
 
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
+# How much of the prior assistant message is kept as context for a capture.
+MAX_CONTEXT_BYTES = 64 * 1024
 TRANSCRIPT_UNAVAILABLE_REASON = "transcript_unavailable"
 
 
@@ -41,7 +43,7 @@ class _TranscriptChangedDuringRead(Exception):
 
 
 class TranscriptUnavailable(ValidationError):
-    """The host named a transcript that is not there; nothing was read."""
+    """The host named a transcript with nothing in it to read yet, or none at all."""
 
 
 def _read_native_transcript_snapshot_once(
@@ -69,6 +71,8 @@ def _read_native_transcript_snapshot_once(
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise TranscriptUnavailable("transcript_path does not exist") from exc
     except OSError as exc:
         raise ValidationError("transcript_path must be an absolute regular non-symlink file") from exc
     try:
@@ -77,7 +81,7 @@ def _read_native_transcript_snapshot_once(
             raise ValidationError("transcript_path changed while it was being opened")
         size = opened.st_size
         if size <= 0:
-            raise ValidationError("transcript_path size is outside the supported bound")
+            raise TranscriptUnavailable("transcript_path is empty")
         if size > MAX_TRANSCRIPT_BYTES and tail_limit is None:
             raise ValidationError("transcript_path size is outside the supported bound")
 
@@ -125,6 +129,8 @@ def _read_native_transcript_snapshot(
             )
         except _TranscriptChangedDuringRead as exc:
             changed = exc
+        except TranscriptUnavailable:
+            raise
         except ValidationError as exc:
             if changed is None:
                 raise
@@ -132,26 +138,38 @@ def _read_native_transcript_snapshot(
     raise ValidationError("transcript_path changed during the bounded read") from changed
 
 
+def _well_formed(value: str) -> str:
+    """Replace lone surrogates, which JSON can carry and nothing else can encode."""
+    return value.encode("utf-8", "replace").decode("utf-8")
+
+
+def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= byte_limit:
+        return value, False
+    return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
+
+
 def _message_text(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        return _well_formed(value)
     if isinstance(value, list):
         parts = []
         for item in value:
             if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
                 parts.append(item["text"])
-        return "\n".join(parts)
+        return _well_formed("\n".join(parts))
     return ""
 
 
 def _entry_identity(item: dict[str, Any]) -> str | None:
     value = item.get("uuid") or item.get("id")
-    return value.strip() if isinstance(value, str) and value.strip() else None
+    return _well_formed(value.strip()) if isinstance(value, str) and value.strip() else None
 
 
 def _parse_native_stop_snapshot(
     snapshot: _TranscriptSnapshot, *, host_origin: HostOrigin | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, Any]:
     messages: list[tuple[str, str, str | None, str | None]] = []
     synthetic_basis: str | None = None
     unverified_since_operator = False
@@ -164,12 +182,16 @@ def _parse_native_stop_snapshot(
     for number, raw_line in enumerate(lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
+        if not raw.strip():
+            continue
         try:
             item = json.loads(raw)
         except json.JSONDecodeError as exc:
             if not complete and number == len(lines):
                 raise ValidationError(f"incomplete transcript line {number}") from exc
             raise ValidationError(f"malformed complete transcript line {number}") from exc
+        except (ValueError, RecursionError):
+            continue  # Valid JSON too deep or too long to read says nothing about this turn.
         if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
             continue
         message = item.get("message", {})
@@ -189,7 +211,8 @@ def _parse_native_stop_snapshot(
         if item["type"] == "user":
             unverified_since_operator = False
         messages.append((item["type"], text, _entry_identity(item), basis))
-    locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
+    evidence_sha256 = hashlib.sha256(snapshot.data).hexdigest()
+    locator = f"transcript:sha256:{evidence_sha256}"
     user_indexes = [index for index, (kind, _, _, _) in enumerate(messages) if kind == "user"]
     if not user_indexes or unverified_since_operator:
         # No operator turn is a skip, never an error: raising here exits 2 and
@@ -211,7 +234,10 @@ def _parse_native_stop_snapshot(
         (messages[index][1] for index in range(user_index - 1, -1, -1) if messages[index][0] == "assistant"),
         None,
     )
-    return {
+    context_truncated = False
+    if prior_assistant is not None:
+        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, MAX_CONTEXT_BYTES)
+    parsed: dict[str, Any] = {
         "operator_text": operator_text,
         "prior_assistant_output": prior_assistant,
         "case_description": "Explicit operator feedback witnessed in the Claude Code transcript",
@@ -220,6 +246,20 @@ def _parse_native_stop_snapshot(
         "provenance_basis": messages[user_index][3],
         "source_entry_id": messages[user_index][2],
     }
+    if context_truncated:
+        parsed["degradation"] = {
+            "schema_version": "1.0.0",
+            "payload": {
+                "transcript_bytes": snapshot.size,
+                "tail_bytes_examined": snapshot.size,
+                "evidence_sha256": evidence_sha256,
+                "hash_scope": "complete_transcript",
+                "truncated": False,
+                "context_truncated": True,
+                "receipt": "long_context_truncated",
+            },
+        }
+    return parsed
 
 
 def last_assistant_text(path_value: str, *, tail_limit: int = 2 * 1024 * 1024) -> str | None:
@@ -252,7 +292,7 @@ def last_assistant_text(path_value: str, *, tail_limit: int = 2 * 1024 * 1024) -
     return None
 
 
-def parse_native_stop_transcript(path_value: str) -> dict[str, str | None]:
+def parse_native_stop_transcript(path_value: str) -> dict[str, Any]:
     return _parse_native_stop_snapshot(
         _read_native_transcript_snapshot(path_value),
     )

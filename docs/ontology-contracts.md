@@ -107,7 +107,10 @@ declared theory separate from observed operating evidence.
 
 Every rendered retrieval record carries an `ontology` object with its semantic
 `partition`, `type`, `path`, optional `confidence`, and plain-language
-`disclosure`. The stable partitions are `judgment`, `self_model`,
+`disclosure`. The one exception is a compact line from the optional selector
+(see `docs/configuration.md`), which keeps `authority`, its evidence, case, and
+receipt references, and a `detail` command for reading the record locally. The
+stable partitions are `judgment`, `self_model`,
 `chosen_future`, `default_future`, `direction_comparison`,
 `business_declared`, and `business_observed`. Declared business theory and
 observed operating evidence therefore remain distinguishable even when both

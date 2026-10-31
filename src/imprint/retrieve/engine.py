@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from imprint.capture.detector import feedback_sentence, operator_words, strip_delimited_pastes
+from imprint.capture.detector import feedback_sentences, operator_words, strip_delimited_pastes
 
 from .models import (
     CHOSEN_FUTURE_PARTITION,
@@ -164,17 +164,45 @@ def _render(record: RetrievalRecord, *, selector: dict[str, object] | None = Non
     return _line(value, selector)
 
 
+def _cut(text: str) -> str:
+    return text.encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
+
+
+def _join_sentences(sentences: Sequence[str]) -> str:
+    """Join sentences in order within the limit, reserving room for the last.
+
+    The last is where a message overrules what came before it, so earlier
+    sentences take only the room it leaves.
+    """
+    room = COMPACT_TEXT_BYTES - len(sentences[-1].encode("utf-8"))
+    kept: list[str] = []
+    for sentence in sentences[:-1]:
+        cost = len(sentence.encode("utf-8")) + 1
+        if cost <= room:
+            kept.append(sentence)
+            room -= cost
+    return _cut("\n".join((*kept, sentences[-1])))
+
+
+def _compact_text(text: str) -> tuple[str, str]:
+    """Return what a compact line says, and what that text is."""
+    if len(text.encode("utf-8")) <= COMPACT_TEXT_BYTES:
+        return text, "whole"
+    sentences = feedback_sentences(text)
+    if sentences:
+        return _join_sentences(sentences), "feedback_sentences"
+    return _cut(strip_delimited_pastes(operator_words(text))), "opening"
+
+
 def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
     """Render the point of a record with its authority and source references.
 
     This shapes one delivery only; the canonical record is untouched. The text
-    is the record's own words, never a rewrite: the sentence that reads as
-    feedback, else the opening of what the operator said, cut at a byte limit.
-    ``detail`` is how to read the whole record locally.
+    is the record's own words, never a rewrite: all of it when it fits, else
+    every sentence that reads as feedback, else the opening of what the operator
+    said, cut at a byte limit. ``detail`` is how to read the whole record locally.
     """
-    sentence = feedback_sentence(record.text)
-    words = sentence or strip_delimited_pastes(operator_words(record.text))
-    text = words.encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
+    text, basis = _compact_text(record.text)
     return _line({
         "authority": _authority(record),
         "case_ids": list(record.case_ids),
@@ -184,7 +212,7 @@ def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | Non
         "record_id": record.record_id,
         "source_receipt_ids": list(record.source_receipt_ids),
         "text": text,
-        "text_basis": "feedback_sentence" if sentence else "opening",
+        "text_basis": basis,
         "text_complete": text == record.text,
     }, selector)
 

@@ -2,12 +2,19 @@
 
 ## Unreleased
 
-- Deliver a Jev pick too large to share the budget as a compact line: the
-  record's own opening words, its authority and source references, and how to
-  read the whole record locally. The canonical record is unchanged.
-- Report `oversized_picks` when Jev picked records that still cannot fit, which
-  was reported as `no_picks`, and log content-free counts per stage and the
-  request size with each selector decision.
+- Deliver a Jev pick that cannot share the budget as a compact line: the
+  record's text when it fits 400 bytes, otherwise every sentence that reads as
+  feedback in document order, otherwise its opening, with its authority and
+  source references and how to read the whole record locally. The canonical
+  record is unchanged. Picks that all fit stay whole.
+- A pick compacted for want of room is not latched, so a later turn or the
+  deterministic fallback can deliver it whole. Only a pick that can never fit
+  whole counts as delivered from its compact line.
+- Report `oversized_picks` when Jev picked records that cannot fit, or
+  `crowded_picks` when local records took the room, instead of `no_picks`. Log
+  the delivery outcome beside Jev's own, content-free counts per stage including
+  local records and bytes, and the request size with each selector decision.
+  Both the delivery outcome and the stages are null on shadow and fallback lines.
 - Add optional verification of T3 prompts against T3's own message record
   (`t3_capture_origin`, default off). T3 submits every prompt through the SDK,
   so its prompts stayed unverified and no correction made in T3 was captured.
@@ -29,9 +36,17 @@
   instead of re-reading the older turn.
 - Stop splitting transcript lines on U+2028, U+2029 and U+0085, which are legal
   inside a JSON string and were reported as malformed complete lines.
-- Skip a transcript that does not exist at Stop instead of blocking the stop,
-  and log the skip content-free to `logs/capture-skips.jsonl`. Symlinks and
-  non-regular files are still refused.
+- Skip a transcript that does not exist, is empty, or disappears during the read
+  at Stop instead of blocking the stop, and log the skip content-free to
+  `logs/capture-skips.jsonl`. Symlinks and non-regular files are still refused.
+- Keep at most 64 KiB of the prior assistant message on both parsers and record
+  the cut, so a correction after a very long reply is captured. Skip operator
+  text over 256 KiB as `operator_text_oversized` instead of failing the Stop hook;
+  it is never cut.
+- Skip blank transcript lines in the full parser as the tail parser does, skip
+  lines of valid JSON too deep or too long to read, and replace lone surrogates,
+  so unusual input no longer crashes a hook. A malformed line is still refused.
+- Record a hook timeout in `logs/hook-failures`, so `imprint health` reports it.
 - Keep pasted text out of capture: `<pasted_content>` blocks in the form Claude
   Code writes them, `<t3_context>` blocks, lines that are one attachment bracket,
   `>` block quotes and text pasted between `====` runs are removed before
@@ -39,19 +54,22 @@
   it. The detector also ignores double, curly and single quotations, code fences
   and `---` blocks, which stay in stored text.
 - Detect a new standing rule (`From now on use ...`, `Thanks, going forward keep
-  ...`) as a standard, but not a question, a description of what will happen or a
-  line a colon introduces. Detect short replies that name a target (`It should be
+  ...`) as a standard, but not a question, with or without its question mark, a
+  description of what will happen or a line a colon introduces. Detect short replies that name a target (`It should be
   a table.`) and `Why ... should be ...` statements as corrections after an
   assistant turn, but not closing remarks (`That should be enough.`) or real
   questions. `need to` counts only with the work or the assistant as its subject,
   and not in a question or an `if` clause.
 - Detect a correction that replies to a quoted line, and one that follows T3's
   `Ultrathink:` prefix.
-- Choose a compact line's sentence by the lesson it states rather than rule order,
-  stop splitting file names and version numbers, and never show text a host
-  prepended as the operator's. The sentence is always an exact part of the record.
+- Stop splitting file names and version numbers when choosing a compact line's
+  sentences, and never show text a host prepended as the operator's. Each sentence
+  is an exact part of the record.
 - Bound the detector's patterns so long blank runs, unclosed tags and unclosed
   quotes no longer stall a hook past its time limit.
+- Rollback: `t3_capture_origin` is unknown to older builds, which refuse the config
+  and fail every hook. Set it only after this build is installed, and remove
+  `t3_capture_origin` from the config before reinstalling an older build.
 
 - Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
   prompt-time retrieval. The default `selector.mode` stays `deterministic` with

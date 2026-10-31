@@ -5,7 +5,7 @@ import pytest
 
 from imprint.capture.detector import (
     detect_explicit_feedback,
-    feedback_sentence,
+    feedback_sentences,
     operator_words,
     strip_delimited_pastes,
 )
@@ -81,7 +81,7 @@ ADVERSARIAL = {
 @pytest.mark.parametrize("name", ADVERSARIAL)
 @pytest.mark.parametrize("step", [
     lambda text: detect_explicit_feedback(text, prior_assistant_output="Draft."),
-    feedback_sentence,
+    feedback_sentences,
     lambda text: strip_delimited_pastes(operator_words(text)),
 ], ids=["detect", "sentence", "strip"])
 def test_adversarial_text_stays_far_inside_the_hook_limit(step, name):

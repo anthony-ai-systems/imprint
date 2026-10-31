@@ -28,6 +28,7 @@ _CAPTURE_MECHANISMS = {"claude_code_stop_hook", "explicit_cli", "approved_import
 _EVIDENCE_KINDS = {"operator_verbatim", "artifact", "context"}
 _DISPOSITIONS = {"chosen", "rejected"}
 _MAX_TEXT = 256 * 1024
+OPERATOR_TEXT_OVERSIZED_REASON = "operator_text_oversized"
 
 
 def new_urn(kind: str) -> str:
@@ -41,12 +42,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def text_fits(value: str) -> bool:
+    return len(value.encode("utf-8")) <= _MAX_TEXT
+
+
 def _text(value: Any, field: str, *, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{field} must be a non-empty string")
-    if len(value.encode("utf-8")) > _MAX_TEXT:
+    if not text_fits(value):
         raise ValidationError(f"{field} is oversized")
     return value
 

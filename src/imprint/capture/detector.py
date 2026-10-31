@@ -30,7 +30,7 @@ _BLANKS = " \t\r\n\f\v" + _GAP
 # which keeps a long run linear.
 _OPENS = r"(?:^|(?<=[.!?\x00])\s*|(?<![:\s])[ \t\r]*\n\s*)"
 _RULES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = (
-    ("standard", "correct", "forward", re.compile(_OPENS + r"(?:(?:thanks|also|and|great|ok|okay)[,!.]?\s+)?(?:from now on|going forward|from here on)\b(?![^.!?\n]*\?)[,:]?\s*(?:(?:always|never|only use|use|avoid|stop|don't|do not|make sure|keep|write|put|lead with|include|i want)\b|[^.!?\n]*\b(?:should|must)\b)", re.I)),
+    ("standard", "correct", "forward", re.compile(_OPENS + r"(?:(?:thanks|also|and|great|ok|okay)[,!.]?\s+)?(?:from now on|going forward|from here on)\b(?![^.!?\n]*\?)(?![,:]?\s*(?:should|must)\s+(?:i|we|you|they|it|this|that|the|our|my)\b)[,:]?\s*(?:(?:always|never|only use|use|avoid|stop|don't|do not|make sure|keep|write|put|lead with|include|i want)\b|[^.!?\n]*\b(?:should|must)\b)", re.I)),
     ("refusal", "reject", "rejection", re.compile(r"\b(?:i reject|reject (?:this|that|it))\b", re.I)),
     ("refusal", "refuse", "refusal", re.compile(r"\b(?:do not|don't|won't)\s+(?:use|include|change|send|publish|do|make)|\b(?:i refuse|no thanks|stop (?:using|doing))\b", re.I)),
     ("preference", "prefer", "preference", re.compile(r"\b(?:i prefer|i'd rather|i would rather|my preference is|favor [^\n]{1,200}? over)\b", re.I)),
@@ -49,9 +49,14 @@ _REPLY_CORRECTIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("short_should", re.compile(r"\A\s*(?:no[,.]?\s+)?(?:it|this|that|these|those|they)\s+(?:should|ought to)\s+(?:be\s+(?:a|an|the|plain|in)\b|have been|say|read|use)\b(?!\s+(?:a\s+|an\s+|the\s+)?(?:quick|easy|fine|ok|okay|good|done|ready|fast|simple|straightforward|safe|working|able|possible|there|finished|live|up|last|end|case|place|while|few|couple)\b)[^.?!\n]{0,60}[.!]?\s*\Z", re.I)),
     ("why_should", re.compile(_OPENS + r"why\b[^.?!\n]{0,120}\b(?:should (?:be|have been)|should've been)\b(?![^.!?\n]*\?)", re.I)),
 )
-# The approval rule goes last: "looks good" often opens a message whose lesson
-# comes later, so it must not outrank a sentence that states one.
-_LESSON_RULES = tuple(rule[3] for rule in sorted(_RULES, key=lambda rule: rule[0] == "approval"))
+# Too wide to capture a message, but enough to keep a sentence of one already
+# captured: a correction often opens with a contrast or an edit, or names what is
+# wrong in other words than the rules do.
+_LESSON_SIGNS = re.compile(
+    _OPENS + r"(?:(?:but|however|except|that said)\b|(?:please\s+)?(?:remove|delete|drop|replace|rename|fix|revert|restore)\b)"
+    r"|\b(?:is|are|was|were|looks?|seems?)\s+(?:wrong|incorrect|broken)\b",
+    re.I,
+)
 # The host prepends its own blocks to a genuinely submitted prompt, which pushes
 # the operator's first sentence off the start of the text and out of reach of
 # the sentence-anchored correction rule. Only *leading* blocks are removed: a
@@ -171,29 +176,32 @@ def _sentence_spans(spoken: str) -> list[tuple[int, int]]:
     return spans
 
 
-def feedback_sentence(text: str) -> str | None:
-    """Return the sentence of the operator's that reads as feedback, unchanged.
+def feedback_sentences(text: str) -> list[str]:
+    """Return every sentence of the operator's that reads as feedback, in order.
 
-    Stored judgments are whole messages, so the lesson can sit anywhere in them.
-    Rules read a masked copy of the same length and the result is sliced from
-    ``text``, so it is always an exact part of it. A sentence too short to stand
-    alone is passed over, as is a match that runs past its sentence.
+    Stored judgments are whole messages, and a later sentence can overrule an
+    earlier one, so no rule outranks another here. Rules read a masked copy of
+    the same length and each result is sliced from ``text``, so it is always an
+    exact part of it. A match that runs past its sentence is passed over. Short
+    sentences count only beside one that can stand alone: "That is wrong." says
+    a lot after what it rejects and nothing as the whole of a summary.
+
+    This chooses from a record already captured, so it is wider than detection.
     """
     masked = _masked(text).replace(_INLINE, " ")
     spoken = masked.lstrip(_BLANKS)
     shift = len(masked) - len(spoken)
     spans = _sentence_spans(spoken)
     starts = [start for start, _ in spans]
-    for pattern in _LESSON_RULES:
+    matched = set()
+    for pattern in (*(rule[3] for rule in _RULES), _LESSON_SIGNS):
         for match in pattern.finditer(spoken):
             first_word = match.end() - len(match.group().lstrip())
-            start, end = spans[bisect_right(starts, first_word) - 1]
-            if match.end() > end:
-                continue
-            sentence = text[shift + start: shift + end].strip()
-            if len(sentence) >= _MIN_SENTENCE_CHARS:
-                return sentence
-    return None
+            span = spans[bisect_right(starts, first_word) - 1]
+            if match.end() <= span[1]:
+                matched.add(span)
+    sentences = [text[shift + start: shift + end].strip() for start, end in sorted(matched)]
+    return sentences if any(len(sentence) >= _MIN_SENTENCE_CHARS for sentence in sentences) else []
 
 
 def _normalize(text: str) -> str:

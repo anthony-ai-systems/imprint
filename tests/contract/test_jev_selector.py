@@ -285,6 +285,163 @@ def test_a_lone_oversized_pick_still_reaches_the_turn(tmp_path, transport, fake_
     assert decision.response["selector_stages"]["delivered_compact"] == 1
 
 
+def _whole_ids(decision):
+    return [
+        line["record_id"] for line in map(json.loads, decision.response["payload"].splitlines())
+        if not line.get("compact")
+    ]
+
+
+def _compact_ids(decision):
+    return [
+        line["record_id"] for line in map(json.loads, decision.response["payload"].splitlines())
+        if line.get("compact")
+    ]
+
+
+def _decisions(root):
+    return [json.loads(line) for line in (root / "logs" / "jev-selector.jsonl").read_text().splitlines()]
+
+
+def test_a_pick_compacted_for_room_reaches_a_later_turn_whole(tmp_path, transport, fake_records):
+    fake_records["records"] = [record(f"r{index}", f"rule {index} " + "x" * 7000) for index in range(6)]
+    first = _select(tmp_path, state="first turn")
+    assert _whole_ids(first) == ["r0", "r1", "r2", "r3"]
+    assert _compact_ids(first) == ["r4", "r5"]
+    assert first.response["retry_ids"] == ["r4", "r5"]
+    _commit(tmp_path, first)
+    second = _select(tmp_path, state="second turn")
+    assert len(transport.calls) == 2
+    assert len(transport.sent_statements()) == 2
+    assert _whole_ids(second) == ["r4", "r5"]
+    assert _compact_ids(second) == []
+    _commit(tmp_path, second)
+    third = _select(tmp_path, state="third turn")
+    assert third.outcome == "no_picks"
+    assert len(transport.calls) == 2
+
+
+def test_a_compact_pick_is_not_kept_from_the_deterministic_fallback(tmp_path, transport, fake_records):
+    fake_records["records"] = [
+        record(f"r{index}", f"rule {index} " + "x" * 7000, section="domain", domain_id="research")
+        for index in range(6)
+    ]
+    first = _select(tmp_path, state="first turn", domain="research")
+    assert _compact_ids(first) == ["r4", "r5"]
+    _commit(tmp_path, first)
+    fake_records["records"].append(record("new", "new rule", section="domain", domain_id="research"))
+    store = FakeStore()
+    store.generation = 2
+    transport.error = TimeoutError("synthetic timeout")
+    fallback = _select(tmp_path, state="second turn", domain="research", store=store)
+    assert fallback.fallback_reason == "timeout"
+    assert fallback.exclude_ids == frozenset({"r0", "r1", "r2", "r3"})
+    delivered = retrieve_payload(
+        store, root=tmp_path, session_id="synthetic-session", explicit_domain="research", refresh=True,
+        context=fallback.context, exclude_ids=fallback.exclude_ids,
+    )
+    assert set(delivered["selected_ids"]) == {"new", "r4", "r5"}
+    assert '"compact"' not in str(delivered["payload"])
+
+
+def test_large_picks_jev_keeps_choosing_all_arrive_whole(tmp_path, transport, fake_records):
+    fake_records["records"] = [record(f"r{index}", f"rule {index} " + "x" * 9000) for index in range(5)]
+    whole = []
+    for turn in range(4):
+        decision = _select(tmp_path, state=f"turn {turn}")
+        whole.extend(_whole_ids(decision))
+        if decision.outcome != "picked":
+            break
+        _commit(tmp_path, decision)
+    assert sorted(whole) == ["r0", "r1", "r2", "r3", "r4"]
+    assert decision.outcome == "no_picks"
+
+
+def test_two_picks_near_the_whole_budget_still_arrive_whole(tmp_path, transport, fake_records):
+    fake_records["records"] = [record(name, f"rule {name} " + "x" * 31000) for name in ("a", "b")]
+    whole = []
+    for turn in range(4):
+        decision = _select(tmp_path, state=f"turn {turn}")
+        whole.extend(_whole_ids(decision))
+        if decision.outcome != "picked":
+            break
+        _commit(tmp_path, decision)
+    assert sorted(whole) == ["a", "b"]
+    assert decision.outcome == "no_picks"
+
+
+def test_a_pick_that_can_never_fit_whole_is_delivered_once(tmp_path, transport, fake_records):
+    fake_records["records"] = [record("huge", "huge " + "y" * 6000)]
+    first = _select(tmp_path, state="first turn", budget=4096)
+    assert _compact_ids(first) == ["huge"]
+    assert first.response["retry_ids"] == []
+    _commit(tmp_path, first)
+    second = _select(tmp_path, state="second turn", budget=4096)
+    assert second.outcome == "no_picks"
+    assert len(transport.calls) == 1
+
+
+def test_a_whole_delivery_settles_a_record_an_older_receipt_retried(tmp_path, transport, fake_records):
+    fake_records["records"] = [record(f"r{index}", f"rule {index} " + "x" * 7000) for index in range(6)]
+    first = _select(tmp_path, state="first turn")
+    _commit(tmp_path, first)
+    _commit(tmp_path, _select(tmp_path, state="second turn"))
+    receipts = retrieval.DeliveryReceipts(tmp_path / "receipts")
+    session = retrieval._session_ref("synthetic-session")
+    assert receipts.delivered_ids(session) == {f"r{index}" for index in range(6)}
+
+
+def test_a_receipt_written_before_retry_ids_still_latches(tmp_path, transport, fake_records):
+    fake_records["records"] = [record("a", "alpha rule")]
+    decision = _select(tmp_path)
+    decision.response.pop("retry_ids", None)
+    receipts = retrieval.DeliveryReceipts(tmp_path / "receipts")
+    session = retrieval._session_ref("synthetic-session")
+    scope = str(decision.response["receipt_scope"])
+    for path in (tmp_path / "receipts" / session).glob("*.pending.json"):
+        path.unlink()
+    receipts.prepare_delivery(session, str(decision.response["snapshot_id"]), scope, decision.response)
+    _commit(tmp_path, decision)
+    assert receipts.delivery_state(session) == ({"a"}, set())
+
+
+def test_the_log_records_the_delivery_outcome_beside_jevs(tmp_path, transport, fake_records):
+    evidence = tuple(f"urn:imprint:evidence:synthetic-{index}" for index in range(200))
+    fake_records["records"] = [record("wide", "wide rule", evidence_ids=evidence)]
+    decision = _select(tmp_path, budget=4096)
+    assert decision.outcome == "oversized_picks"
+    (line,) = _decisions(tmp_path)
+    assert (line["outcome"], line["delivery_outcome"]) == ("picked", "oversized_picks")
+    assert line["stages"]["unfit"] == 1
+    summary = jev.decision_log_summary(tmp_path)
+    assert summary["last_success_ts"] == line["ts"]
+
+
+def test_the_log_shows_local_records_crowding_out_a_pick(tmp_path, transport, fake_records):
+    fake_records["records"] = [
+        record(f"local{index:02d}", "local rule " + "x" * 900, section="domain", domain_id="private")
+        for index in range(20)
+    ] + [record("pick", "small rule")]
+    decision = _select(tmp_path, domain="private", exclude_domains=["private"], budget=4096)
+    assert decision.outcome == "crowded_picks"
+    (line,) = _decisions(tmp_path)
+    assert line["delivery_outcome"] == "crowded_picks"
+    assert line["stages"]["local_records"] == len(decision.response["selected_ids"]) > 0
+    assert line["stages"]["local_bytes"] == decision.response["selected_bytes"]
+    assert decision.response["selected_ids"] == [
+        record_id for record_id in decision.response["selected_ids"] if record_id.startswith("local")
+    ]
+
+
+def test_shadow_and_fallback_lines_have_no_delivery_to_report(tmp_path, transport, fake_records, monkeypatch):
+    fake_records["records"] = [record("a", "ship safely")]
+    _select(tmp_path, mode="shadow")
+    monkeypatch.delenv(KEY_ENV)
+    _select(tmp_path, state="other turn")
+    for line in _decisions(tmp_path):
+        assert (line["stages"], line["delivery_outcome"]) == (None, None)
+
+
 def test_never_sent_domain_records_are_delivered_locally_ahead_of_picks(tmp_path, transport, fake_records):
     """exclude_domains and node_types bound egress, not local delivery."""
     fake_records["records"] = [
@@ -466,7 +623,7 @@ def test_exception_reading_receipts_falls_back(tmp_path, transport, fake_records
     def boom(self, *args, **kwargs):
         raise OSError("synthetic receipt failure")
 
-    monkeypatch.setattr(DeliveryReceipts, "delivered_ids", boom)
+    monkeypatch.setattr(DeliveryReceipts, "delivery_state", boom)
     decision = _select(tmp_path)
     assert decision.fallback_reason == "exception"
 
@@ -511,7 +668,7 @@ def test_decision_log_is_content_free_and_private(tmp_path, transport, fake_reco
         assert forbidden not in content
     first, second = (json.loads(line) for line in content.splitlines())
     assert set(first) == {
-        "candidates_sent", "elapsed_ms", "fallback_reason", "mode", "model_echoed", "outcome",
+        "candidates_sent", "delivery_outcome", "elapsed_ms", "fallback_reason", "mode", "model_echoed", "outcome",
         "picks", "receipt_scope", "request_bytes", "request_sent", "session", "stages", "ts", "usage",
     }
     assert first["session"] == retrieval._session_ref("synthetic-session")

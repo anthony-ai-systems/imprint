@@ -207,25 +207,6 @@ def _opaque_session_urn(root: Path, native_session_id: str) -> str:
     return f"urn:imprint:session:{mapped}"
 
 
-def _message_text(value) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(
-            item["text"] for item in value
-            if isinstance(item, dict) and item.get("type") == "text"
-            and isinstance(item.get("text"), str)
-        )
-    return ""
-
-
-def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= byte_limit:
-        return value, False
-    return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
-
-
 def _record_capture_skip(root: Path, reason: str) -> None:
     """Leave a content-free trace of a skip that would otherwise vanish. Never raises."""
     line = json.dumps({
@@ -251,7 +232,13 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
         classify_with_host,
         skip_reason,
     )
-    from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
+    from .capture.transcript import (
+        MAX_CONTEXT_BYTES,
+        _entry_identity,
+        _message_text,
+        _read_native_transcript_snapshot,
+        _truncate_utf8,
+    )
     from .errors import ValidationError
 
     tail_limit = 2 * 1024 * 1024
@@ -281,6 +268,8 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
             if not complete and number == len(decoded_lines):
                 raise ValidationError(f"incomplete transcript line {number}") from exc
             raise ValidationError(f"malformed complete transcript line {number}") from exc
+        except (ValueError, RecursionError):
+            continue  # Valid JSON too deep or too long to read says nothing about this turn.
         if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
             continue
         message = item.get("message")
@@ -325,7 +314,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
     )
     context_truncated = False
     if prior_assistant is not None:
-        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, 64 * 1024)
+        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, MAX_CONTEXT_BYTES)
     evidence_sha256 = hashlib.sha256(tail).hexdigest()
     return {
         "operator_text": operator_text,
@@ -1046,6 +1035,8 @@ def main(argv: list[str] | None = None) -> int:
             event = json.load(sys.stdin)
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")
+            # JSON can carry a lone surrogate that nothing downstream can encode.
+            event = json.loads(json.dumps(event, ensure_ascii=False).encode("utf-8", "replace"))
             native_value = event.get("session_id") or event.get("sessionId")
             native_session = (
                 str(native_value) if native_value
@@ -1183,6 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "stop-capture":
                 _validate_hook_event(event, "Stop")
                 from .capture import build_capture_envelope
+                from .capture.schema import OPERATOR_TEXT_OVERSIZED_REASON, text_fits
                 from .capture.transcript import (
                     MAX_TRANSCRIPT_BYTES,
                     TRANSCRIPT_UNAVAILABLE_REASON,
@@ -1215,8 +1207,8 @@ def main(argv: list[str] | None = None) -> int:
                 source_entry_id = None
                 host_origin = t3_host_origin(config, native_value)
                 if not operator_text and isinstance(event.get("transcript_path"), str):
-                    # A missing file is not a capture failure: blocking the stop
-                    # cannot make the host write it, and the retry fails the same way.
+                    # A missing or empty file is not a capture failure: blocking the
+                    # stop cannot make the host write it, and the retry fails the same way.
                     try:
                         snapshot = _read_native_transcript_snapshot(
                             event["transcript_path"], tail_limit=2 * 1024 * 1024,
@@ -1232,8 +1224,6 @@ def main(argv: list[str] | None = None) -> int:
                         native = _parse_large_native_transcript(
                             event["transcript_path"], snapshot=snapshot, host_origin=host_origin,
                         )
-                        if not native["skip_reason"]:
-                            extensions["org.imprint.transcript"] = native["degradation"]
                     else:
                         native = _parse_native_stop_snapshot(snapshot, host_origin=host_origin)
                     if native["skip_reason"]:
@@ -1254,6 +1244,8 @@ def main(argv: list[str] | None = None) -> int:
                             skipped["provenance_basis"] = native["provenance_basis"]
                         _write_json(skipped)
                         return 0
+                    if native.get("degradation"):
+                        extensions["org.imprint.transcript"] = native["degradation"]
                     operator_text = native["operator_text"]
                     if native["provenance_basis"] == HOST_RECORD_BASIS and host_origin is not None:
                         attested = host_origin.evidence(operator_text)
@@ -1285,6 +1277,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not detection.is_feedback:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                    return 0
+                # A verbatim record is never cut to fit, and blocking the stop cannot
+                # make the text any shorter, so this turn is skipped and says so.
+                if not text_fits(operator_text):
+                    _record_capture_skip(root, OPERATOR_TEXT_OVERSIZED_REASON)
+                    _write_json({
+                        "hook_schema_version": "1.0.0", "status": "skipped",
+                        "reason": OPERATOR_TEXT_OVERSIZED_REASON,
+                    })
                     return 0
                 # Stop fires on every assistant turn, so the same trailing
                 # operator utterance is re-read until the operator speaks again.

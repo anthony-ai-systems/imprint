@@ -23,7 +23,8 @@ UserPromptSubmit hook, and `imprint retrieve --prompt ...` run by hand or by a
 script. Exactly this leaves the machine:
 
 - the request body keys `model`, `state`, and `questions`, nothing else;
-- `state`: the prompt text, at most 8,000 characters. If
+- `state`: the prompt text, at most 8,000 characters, as written: unlike
+  capture, it keeps pasted text and host context blocks. If
   `short_prompt_context` is enabled and the prompt is short, `state` also
   contains up to `max_chars` of the previous assistant reply, which can quote
   anything the assistant wrote (code, file names, people, figures);
@@ -53,9 +54,10 @@ matches. Both settings limit only judgment statements: the prompt is sent even
 when it matches an excluded domain, so use `IMPRINT_SELECTOR=off` for work
 whose prompts must stay local. `IMPRINT_SELECTOR=off` (or any non-empty value
 other than `jev` or `shadow`) disables it immediately. The local decision log
-(`logs/jev-selector.jsonl`) records only ids, scores, timings, and outcomes,
-never prompt or judgment text; `logs/jev-selector-transfer.json` holds only
-the last transfer and success timestamps.
+(`logs/jev-selector.jsonl`) records only ids, scores, timings, outcomes, and
+content-free counts (request size, records and bytes per delivery stage), never
+prompt or judgment text; `logs/jev-selector-transfer.json` holds only the last
+transfer and success timestamps.
 
 On POSIX the optional `api_key_file` must be a private regular file owned by
 the current user. On Windows, Imprint checks only that it is a regular file,
@@ -107,6 +109,12 @@ backup is the recovery boundary for hardware loss or operator error.
 3. Restore the entire last known-good operator directory to a local path.
 4. Point `data_root` at its parent and run `imprint health`.
 5. Compare expected counts and hashes before resuming capture.
+
+To roll back to an older build, remove `t3_capture_origin` from the config
+before reinstalling it. An older build refuses a config with that key: its
+installer stops and leaves the newer build in place, and on the older code every
+hook and `imprint version` fail. Set the key again only after a build that knows
+it is installed.
 
 Never merge two SQLite files. Reconcile immutable spool inputs through one
 compiler instead. Quarantined or corrupt inputs should remain preserved for
