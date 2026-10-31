@@ -7,10 +7,10 @@
   place ahead of other picks when Jev scores it at 0.25 or more and it shares a
   rare word with the prompt. Without this, a correction reached a later session
   only while it was the newest record.
-- Add `selector.jev.drop_stale_records`, off by default, which keeps captured
-  records that no longer read as feedback out of the request and local delivery.
-  No record is changed.
-- Read each statement once per turn, which more than pays for the checks above.
+- Add `selector.jev.stale_before`, off by default, which keeps stop-hook captures
+  from before that time out of the request and local delivery if they no longer
+  read as feedback. Later captures are not judged. No record is changed.
+- Read each statement once per turn, whatever the size of the pool.
 - Deliver a Jev pick that cannot share the budget as a compact line: the
   record's text when it fits 400 bytes, otherwise every sentence that reads as
   feedback in document order, otherwise its opening, with its authority and

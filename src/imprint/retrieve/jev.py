@@ -80,6 +80,11 @@ _RULE_SENTENCE = re.compile(
 _RULE_WORDS = frozenset({"always", "alway", "never", "whenever", "from", "now", "going", "forward", "here"})
 _STANDING_READ_CHARS = 1000
 _FEEDBACK_READ_CHARS = 8000
+# The stale check shares a turn's time with the request, so it stops at this part
+# of the timeout and the request carries what was judged by then.
+_STALE_SCAN_SHARE = 1 / 3
+# The only route where a record had to read as feedback to get in.
+_DETECTED_MECHANISM = "claude_code_stop_hook"
 _KEY = re.compile(r"[\x21-\x7e]{1,4096}")
 _ECHOED_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
 _STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -139,6 +144,8 @@ class SelectionResult:
     reserved: frozenset[str] = frozenset()
     # Stale records passed over on the way to the request.
     withheld: int = 0
+    # The stale check ran out of time, so the request holds fewer records.
+    scan_cut: bool = False
 
 
 class _KeyUnavailable(Exception):
@@ -155,9 +162,14 @@ class _DeadlineExceeded(Exception):
     pass
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=None)
 def _spoken(statement: str) -> str:
     return stored_words(operator_words(statement))
+
+
+def forget_statements() -> None:
+    """Start a turn's reading afresh, which bounds the cache by the pool."""
+    _spoken.cache_clear()
 
 
 def _words(record: RetrievalRecord) -> str:
@@ -179,20 +191,35 @@ def egress_text(record: RetrievalRecord) -> str | None:
 
 
 def reads_as_feedback(record: RetrievalRecord) -> bool:
-    """Whether a captured record still reads as feedback under today's rules.
+    """Whether a record the detector let in still reads as feedback under today's rules.
 
     Older builds kept messages the rules have since stopped matching. The record
-    stays in the store. Only captured records are judged: ratified knowledge was
-    never detected, and a record with no words has nothing to judge. Every record
-    reached the store as a reply, so the rules for replies apply. A hook runs this
-    per prompt, so it reads as far as moves the answer for almost every record.
+    stays in the store. Only stop-hook captures are judged: ratified knowledge, an
+    explicit capture and an import never met the detector, and a record with no
+    words has nothing to judge. Each judged record was a reply, so the rules for
+    replies apply. A hook runs this per prompt, so it reads as far as moves the
+    answer for almost every record.
     """
-    if record.authority_tier != "captured_judgment":
+    if record.authority_tier != "captured_judgment" or record.capture_mechanism != _DETECTED_MECHANISM:
         return True
     words = _words(record)[:_FEEDBACK_READ_CHARS]
     if not words.strip():
         return True
     return detect_explicit_feedback(words, prior_assistant_output="-").is_feedback or bool(feedback_sentences(words))
+
+
+def stale_filter(before: str) -> Callable[[RetrievalRecord], bool]:
+    """Return the check that keeps a record unless it is stale, given when the rules last changed.
+
+    A capture since then met today's rules as it was made. What is stored has lost
+    the quote those rules read around, so judging it again can only be wrong.
+    """
+    changed = _parse_time(before)
+
+    def fresh(record: RetrievalRecord) -> bool:
+        return _parse_time(record.valid_from) >= changed or reads_as_feedback(record)
+
+    return fresh
 
 
 def rule_sentences(record: RetrievalRecord) -> list[str]:
@@ -224,7 +251,8 @@ def rare_matches(
     for item in entries:
         for word in _folded(egress_text(item) or "") & query:
             counts[word] = counts.get(word, 0) + 1
-    limit = share * max(1, len(entries))
+    # A word only the rule itself uses is rare in a pool of any size.
+    limit = max(1.0, share * len(entries))
     return frozenset(
         item.record_id for item in entries
         if item.record_id in standing
@@ -240,13 +268,15 @@ def prefilter(
     turn_text: str, entries: Sequence[RetrievalRecord], keep: int = 150,
     *, standing: frozenset[str] = frozenset(),
     accept: Callable[[RetrievalRecord], bool] | None = None,
+    stop: Callable[[], bool] | None = None,
 ) -> list[RetrievalRecord]:
     """Keep the IDF-weighted lexical best ``keep`` candidates before egress.
 
     Ties (including turns with no lexical overlap) prefer newer records, then
     record id bytes, so the kept set is deterministic. ``standing`` records are
     kept whatever their overlap, in place of the weakest. ``accept`` can pass over
-    a record, and is asked only of those that would otherwise be kept.
+    a record, and is asked only of those that would otherwise be kept. ``stop``
+    ends that asking early, and the records not reached are not kept.
     """
     if keep <= 0:
         return []
@@ -268,7 +298,11 @@ def prefilter(
     for *_, item in ranked:
         if len(others) >= keep - len(rules):
             break
-        if item.record_id not in standing and (accept is None or accept(item)):
+        if item.record_id in standing:
+            continue
+        if stop is not None and stop():
+            break
+        if accept is None or accept(item):
             others.append(item)
     return others + rules
 
@@ -477,14 +511,17 @@ class JevSelector:
         prefiltering, the request, and parsing. The best ``standing`` records at
         or above their own floor that share a rare word with the turn lead the
         picks, so the budget reaches them first. ``accept`` keeps a record out of
-        the request.
+        the request, and a record it has not reached in its share of the deadline
+        stays out too.
         """
         started = self._clock()
         deadline = started + self.settings.timeout_seconds
+        scan_ends = started + self.settings.timeout_seconds * _STALE_SCAN_SHARE
         sent = 0
         request_bytes = 0
         request_sent = False
         withheld = 0
+        scan_cut = False
 
         def passed(item: RetrievalRecord) -> bool:
             nonlocal withheld
@@ -492,13 +529,23 @@ class JevSelector:
             withheld += not keep
             return keep
 
+        def out_of_time() -> bool:
+            nonlocal scan_cut
+            scan_cut = self._clock() >= scan_ends
+            return scan_cut
+
         try:
             try:
                 key = resolve_api_key(self.settings)
             except _KeyUnavailable as exc:
                 return self._result(started, fallback_reason=exc.reason)
             sendable = [item for item in entries if egress_text(item)]
-            candidates = prefilter(state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed)
+            candidates = prefilter(
+                state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed,
+                stop=None if accept is None else out_of_time,
+            )
+            if not candidates and scan_cut:
+                return self._result(started, fallback_reason="timeout", withheld=withheld, scan_cut=True)
             if not candidates and withheld:
                 return self._result(started, outcome="no_picks", withheld=withheld)
             if not candidates:
@@ -512,7 +559,7 @@ class JevSelector:
             }
             remaining = deadline - self._clock()
             if remaining <= 0:
-                return self._result(started, fallback_reason="timeout")
+                return self._result(started, fallback_reason="timeout", withheld=withheld, scan_cut=scan_cut)
             transport = self._transport or http_post
             sent = len(names)
             request_bytes = len(encoded)
@@ -541,7 +588,7 @@ class JevSelector:
             if not valid:
                 raise _BadResponse("response carries no valid answer for a sent question")
             scored.sort(key=lambda item: (-item[1], item[0].record_id.encode("utf-8")))
-            matched = rare_matches(state, sendable, standing, self.settings.standing_rare_share)
+            matched = rare_matches(state, sendable, standing, self.settings.standing_rare_share) if standing else frozenset()
             reserved = [
                 pick for pick in scored
                 if pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
@@ -553,8 +600,9 @@ class JevSelector:
             return self._result(
                 started,
                 picks=picks,
-                reserved=frozenset(held),
+                reserved=frozenset(pick[0].record_id for pick in picks) & held,
                 withheld=withheld,
+                scan_cut=scan_cut,
                 outcome="picked" if picks else "no_picks",
                 model_echoed=_echoed_model(value.get("model")),
                 usage=_usage(value.get("usage")),
@@ -570,7 +618,7 @@ class JevSelector:
             reason = _failure_reason(exc)
         return self._result(
             started, fallback_reason=reason, candidates_sent=sent, request_sent=request_sent,
-            request_bytes=request_bytes,
+            request_bytes=request_bytes, withheld=withheld, scan_cut=scan_cut,
         )
 
 
@@ -586,7 +634,8 @@ def decision_entry(
 
     ``outcome`` is Jev's result; ``delivery_outcome`` and ``stages`` are what became
     of it in this turn, and are null on a shadow or fallback line, which delivers
-    nothing of Jev's.
+    nothing of Jev's. The last three fields appear only when they have something
+    to say, so a line with both settings off is unchanged.
     """
     return {
         "candidates_sent": result.candidates_sent,
@@ -604,6 +653,9 @@ def decision_entry(
         "stages": dict(stages) if stages is not None else None,
         "ts": _utc_stamp(),
         "usage": result.usage,
+        **({"reserved_picks": len(result.reserved)} if result.reserved else {}),
+        **({"stale_withheld": result.withheld} if result.withheld else {}),
+        **({"stale_scan_cut": True} if result.scan_cut else {}),
     }
 
 
@@ -797,6 +849,7 @@ __all__ = [
     "decision_log_summary",
     "effective_mode",
     "egress_text",
+    "forget_statements",
     "http_post",
     "log_decision",
     "prefilter",
@@ -807,5 +860,6 @@ __all__ = [
     "request_body",
     "resolve_api_key",
     "selector_health",
+    "stale_filter",
     "transfer_marker_path",
 ]

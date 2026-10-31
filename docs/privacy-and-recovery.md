@@ -36,9 +36,9 @@ script. Exactly this leaves the machine:
   stored by an older build does not send host blocks, pasted text, attachment
   lines, chip payloads or quoted assistant text. Everything else in it is sent
   as written, so it can contain whatever the operator wrote. With
-  `drop_stale_records` on, records that no longer read as feedback are not sent.
-  With `standing_rules` on, up to `keep` rules are sent on every turn, whatever
-  the prompt says;
+  `stale_before` set, stop-hook captures from before that time that no longer
+  read as feedback are not sent. With `standing_rules` on, up to `keep` rules are
+  sent on every turn, whatever the prompt says;
 - the key in the `Authorization: Bearer` header, plus `Content-Type` and an
   `imprint-local/<version>` `User-Agent`.
 

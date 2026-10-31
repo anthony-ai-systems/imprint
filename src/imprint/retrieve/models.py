@@ -66,6 +66,8 @@ class RetrievalRecord:
     # metrics, or other descriptive fields, so it is the sole record content an
     # optional remote selector may receive. None means "never send".
     judgment_statement: str | None = None
+    # How a captured record arrived. None for anything else.
+    capture_mechanism: str | None = None
 
 
 class RetrievalSource(Protocol):

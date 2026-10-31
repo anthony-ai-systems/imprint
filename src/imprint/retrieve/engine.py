@@ -204,10 +204,12 @@ def _opening_with_close(text: str) -> str:
     return f"{_cut(opening, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
 
 
-def _compact_text(text: str) -> tuple[str, str]:
+def _compact_text(text: str, rules: Sequence[str] = ()) -> tuple[str, str]:
     """Return what a compact line says, and what that text is."""
     if _size(text) <= COMPACT_TEXT_BYTES:
         return text, "whole"
+    if rules:
+        return _cut("\n".join(rules)), "rule_sentences"
     sentences = feedback_sentences(text)
     if sentences:
         closing = closing_sentence(text)
@@ -217,16 +219,19 @@ def _compact_text(text: str) -> tuple[str, str]:
     return _opening_with_close(text), "opening"
 
 
-def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
+def render_compact(
+    record: RetrievalRecord, *, selector: dict[str, object] | None = None, rules: Sequence[str] = (),
+) -> bytes:
     """Render the point of a record with its authority and source references.
 
     This shapes one delivery only; the canonical record is untouched. The text
     is the record's own words, never a rewrite: all of it when it fits, else every
     sentence that reads as feedback and the last sentence, else the opening of what
     the operator said and how it ended, cut at a byte limit. ``detail`` is how to
-    read the whole record locally.
+    read the whole record locally. ``rules`` are the sentences a standing rule was
+    delivered for, which come first because they are why it was delivered.
     """
-    text, basis = _compact_text(record.text)
+    text, basis = _compact_text(record.text, rules)
     return _line({
         "authority": _authority(record),
         "case_ids": list(record.case_ids),

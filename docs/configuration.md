@@ -91,23 +91,30 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   characters of the newest assistant reply, labeled `Previous assistant
   reply:`, read from the hook's `transcript_path` with the bounded transcript
   reader. The excerpt is part of the turn's receipt scope.
-- `selector.jev.drop_stale_records`: default `false`. When on, a captured record
-  that no longer reads as feedback under today's detector is left out of the
-  request and of local delivery. The record stays in the store, and session
-  start can still deliver it. Reading stops at 8,000 characters.
+- `selector.jev.stale_before`: default `null`, which is off. A UTC time like
+  `2026-01-31T12:00:00Z`, which should be when this installation last took
+  detector changes. A stop-hook capture from before it that no longer reads as
+  feedback is left out of the request and of local delivery. Later captures met
+  today's rules as they were made, and explicit captures, imports and ratified
+  records never met the detector, so none of those are judged. The record stays
+  in the store, and session start and a deterministic fallback can still deliver
+  it. Reading stops at 8,000 characters. The check gets a third of
+  `timeout_seconds`: records it has not reached by then are not sent that turn,
+  and if none were reached the turn falls back with reason `timeout`.
 - `selector.jev.standing_rules`: `{"enabled": false, "score_floor": 0.25,
   "rare_word_share": 0.15, "slots": 2, "keep": 30}`. A standing rule is a record
   with a sentence that opens with "from now on", "going forward", "from here on",
   "always", "never" or "whenever", or ends with one of the first three, inside
-  the first 400 characters. When enabled, the newest `keep` (1–150) rules are
-  always sent, in place of the weakest other candidates. A rule then takes one of
+  the first 400 characters. When enabled, the newest `keep` (1–150, below
+  `prefilter_keep`) rules are always sent, in place of the weakest other
+  candidates, unless `stale_before` leaves them out. A rule then takes one of
   `slots` (1–5) reserved places ahead of the other picks, even below
   `score_floor`, if Jev scores it at or above this `score_floor` and its rule
   sentence shares a word with the prompt that at most `rare_word_share` of the
-  records use. Plural endings are folded for that check only. A rule without a
-  reserved place is an ordinary candidate. Rules delivered this way carry
-  `"reserved": true` on their line. This can reserve a rule on a prompt it does
-  not apply to, because neither signal is exact.
+  records use, or that only the rule uses. Plural endings are folded for that
+  check only. A rule without a reserved place is an ordinary candidate. Rules
+  delivered this way carry `"reserved": true` on their line. This can reserve a
+  rule on a prompt it does not apply to, because neither signal is exact.
 - `selector.jev.log_decisions`: default `true`; see the decision log below.
 
 To use OpenRouter's route instead, change only configuration:
@@ -145,7 +152,8 @@ Selection semantics:
   survives an earlier approval; `opening` is the start of the operator's words,
   without host text or pastes. Both of the shorter forms also keep the
   message's last sentence where it fits, feedback or not, and `feedback_sentences`
-  cuts one over half the limit. Only `whole` has `text_complete: true`.
+  cuts one over half the limit. A reserved rule says `rule_sentences` instead: its
+  rule, and nothing else. Only `whole` has `text_complete: true`.
 - A compact pick that could fit the budget on its own is listed in the receipt's
   `retry_ids` and does not count as delivered, so a later turn or the
   deterministic fallback can deliver it whole. Once cut this way it is no longer
@@ -184,7 +192,10 @@ such as `oversized_picks`, `crowded_picks`, or `already_delivered`. `stages`
 counts records `eligible`, `picked`, `delivered`, `delivered_compact`, and
 `unfit`, plus `local_records` and `local_bytes` delivered ahead of the picks.
 `delivery_outcome` and `stages` are null on `shadow` and `fallback` lines, which
-deliver nothing of Jev's. The log never contains prompt text, judgment text, or
+deliver nothing of Jev's. When there is something to report, `stages` also has
+`reserved`, the reserved rules delivered, and `stale_withheld`, and every line can
+carry `reserved_picks`, the rules in Jev's picks, `stale_withheld`, and
+`stale_scan_cut`. The log never contains prompt text, judgment text, or
 the key. The line is written once the turn's delivery is settled, so a failure
 after Jev answered is one `fallback` line. At 5 MiB the file rotates once to
 `jev-selector.jsonl.1`.

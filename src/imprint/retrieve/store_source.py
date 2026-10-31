@@ -200,5 +200,6 @@ class StoreRetrievalSource:
                 confidence=_confidence(payload),
                 disclosure=_disclosure(status, authority),
                 judgment_statement=_judgment_statement(node["node_type"], payload),
+                capture_mechanism=(node.get("provenance") or {}).get("mechanism") if status == "captured" else None,
             ))
         return records

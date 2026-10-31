@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .engine import RetrievalEngine, _render, render_compact
+from .engine import RetrievalEngine, _parse_time, _render, render_compact
 from .models import (
     BUSINESS_DECLARED_PARTITION,
     BUSINESS_OBSERVED_PARTITION,
@@ -206,7 +206,7 @@ _FULL_RENDER_SHARE = 4
 def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
     eligible_count: int, budget: int, local: RetrievalResult | None = None,
-    retried: frozenset[str] = frozenset(), reserved: frozenset[str] = frozenset(),
+    retried: frozenset[str] = frozenset(), reserved: Mapping[str, Sequence[str]] | None = None,
     withheld: int = 0,
 ) -> dict[str, object]:
     """Render ``local`` (the matched domain's never-sent records, ranked
@@ -219,13 +219,15 @@ def _jev_response(
     latched against its whole form. ``retried`` holds picks already cut that way:
     they are no longer held back for size, or two large picks Jev keeps choosing
     would be cut on every turn. Only a pick that can never fit is latched compact.
-    ``reserved`` picks are standing rules, which are marked on their lines, and
-    ``withheld`` counts stale records kept from this turn's request.
+    ``reserved`` maps picks that are standing rules to their rule sentences. They
+    are marked on their lines, and a compact one says its rule. ``withheld`` counts
+    stale records kept from this turn.
 
     Picks that cannot be delivered at all report ``oversized_picks``, or
     ``crowded_picks`` when one would have fit without the local records, because
     neither is the same as nothing being relevant.
     """
+    reserved = reserved or {}
     rendered: list[bytes] = []
     selected_ids: list[str] = []
     retry_ids: list[str] = []
@@ -247,18 +249,19 @@ def _jev_response(
     ]
     whole_lines = [_render(record, selector=selection) for (record, _), selection in zip(picks, selections)]
     all_fit = total + sum(len(line) for line in whole_lines) <= budget
-    delivered_picks = compact_picks = 0
+    delivered_picks = compact_picks = delivered_rules = 0
     crowded = False
     for (record, _), selection, whole in zip(picks, selections, whole_lines):
         too_large = len(whole) > budget // _FULL_RENDER_SHARE and record.record_id not in retried
         compact = (not all_fit and too_large) or total + len(whole) > budget
-        line = render_compact(record, selector=selection) if compact else whole
+        line = render_compact(record, selector=selection, rules=reserved.get(record.record_id, ())) if compact else whole
         if total + len(line) > budget:
             crowded |= len(line) <= budget
             continue
         compact_picks += compact
         total += len(line)
         delivered_picks += 1
+        delivered_rules += record.record_id in reserved
         rendered.append(line)
         selected_ids.append(record.record_id)
         if compact and len(whole) <= budget:
@@ -296,7 +299,7 @@ def _jev_response(
             "unfit": len(picks) - delivered_picks,
             "local_records": len(local.selected_ids) if local is not None else 0,
             "local_bytes": local_bytes,
-            **({"reserved": len(reserved)} if reserved else {}),
+            **({"reserved": delivered_rules} if delivered_rules else {}),
             **({"stale_withheld": withheld} if withheld else {}),
         },
     }
@@ -318,7 +321,8 @@ def select_prompt_payload(
     matched domain; every section for ``imprint retrieve``) are delivered
     locally ahead of the picks, as deterministic retrieval would deliver them.
     When every sendable record was already delivered, the turn is ``no_picks``
-    without a request. Records configured out as stale are delivered in neither way.
+    without a request. Stale records are delivered in neither way, though a
+    fallback is the deterministic behavior, which does not apply that setting.
 
     ``deadline`` (a ``time.monotonic()`` value) caps the configured
     ``timeout_seconds`` for callers with a hard wall-clock limit of their own.
@@ -328,7 +332,8 @@ def select_prompt_payload(
     try:
         from .jev import (
             STATE_LIMIT, JevSelector, JevSettings, SelectionResult, decision_entry,
-            egress_text, log_decision, reads_as_feedback, record_transfer, rule_sentences,
+            egress_text, forget_statements, log_decision, record_transfer, rule_sentences,
+            stale_filter,
         )
     except Exception:
         return SelectorDecision(failed_method, "fallback", "exception")
@@ -372,6 +377,7 @@ def select_prompt_payload(
         if mode not in {"jev", "shadow"} or not isinstance(jev, Mapping):
             raise ValueError("selector is not enabled")
         settings = JevSettings.from_config(jev)
+        forget_statements()
         state = state[:STATE_LIMIT]
         selector_budget = int(jev["budget_bytes"] or budget)
         context = RetrievalContext.read(store)
@@ -405,7 +411,7 @@ def select_prompt_payload(
         candidates = engine.eligible_candidates(
             snapshot_id=context.snapshot_id, selected_domain=explicit_domain,
         )
-        accept = reads_as_feedback if jev["drop_stale_records"] else None
+        accept = stale_filter(jev["stale_before"]) if jev["stale_before"] else None
         sendable = {
             item.record_id for item in candidates
             if item.ontology_partition == JUDGMENT_PARTITION
@@ -416,7 +422,10 @@ def select_prompt_payload(
         pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
         standing: frozenset[str] = frozenset()
         if jev["standing_rules"]["enabled"]:
-            rules = sorted((item for item in pool if rule_sentences(item)), key=lambda item: item.valid_from, reverse=True)
+            rules = sorted(
+                (item for item in pool if rule_sentences(item) and (accept is None or accept(item))),
+                key=lambda item: _parse_time(item.valid_from), reverse=True,
+            )
             standing = frozenset(item.record_id for item in rules[: jev["standing_rules"]["keep"]])
         if deadline is not None:
             settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
@@ -436,18 +445,21 @@ def select_prompt_payload(
         assert scope is not None
         # Records Imprint never sends (an excluded domain, an unselected type,
         # no statement) keep their deterministic delivery.
-        local_records = [
+        never_sent = [
             item for item in candidates
             if item.section in local_sections and item.record_id not in sendable
-            and item.record_id not in delivered_ids and (accept is None or accept(item))
+            and item.record_id not in delivered_ids
         ]
+        local_records = [item for item in never_sent if accept is None or accept(item)]
+        result = replace(result, withheld=result.withheld + len(never_sent) - len(local_records))
         local = RetrievalEngine(_FixedSource(local_records), engine.config).retrieve(
             snapshot_id=context.snapshot_id, query=state, selected_domain=explicit_domain,
         ) if local_records else None
         response = _jev_response(
             context.snapshot_id, scope, result.picks, result.outcome,
             len(pool) + len(local_records), selector_budget, local, frozenset(retried_ids),
-            result.reserved, result.withheld,
+            {item.record_id: rule_sentences(item) for item, _ in result.picks if item.record_id in result.reserved},
+            result.withheld,
         )
         outcome = str(response["selector_outcome"])
         stages = response["selector_stages"]
