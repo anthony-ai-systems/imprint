@@ -187,3 +187,17 @@ def test_an_event_too_large_to_read_fails_open(monkeypatch, capsys, event):
     monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(event))
     assert bridge.run("stop-capture") == 0
     assert json.loads(capsys.readouterr().out)["error"] == "hook_input_invalid"
+
+
+@pytest.mark.parametrize("action", ["stop-capture", "session-start", "user-prompt-submit", "health-check"])
+@pytest.mark.parametrize("event", ["[]", "null", "5", '"text"'])
+def test_an_event_that_is_not_an_object_fails_open(monkeypatch, capsys, event, action):
+    bridge = _bridge_module()
+    monkeypatch.setattr(bridge.sys, "stdin", io.StringIO(event))
+    monkeypatch.setattr(
+        bridge, "_graceful_run",
+        lambda *a, **k: pytest.fail("invalid input must not spawn the capture subprocess"),
+    )
+    assert bridge.run(action) == 0
+    body = json.loads(capsys.readouterr().out)
+    assert (body["error"], body["failure_policy"]) == ("hook_input_invalid", "fail_open")

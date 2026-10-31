@@ -119,7 +119,9 @@ def run(action: str) -> int:
         payload = json.dumps(event, separators=(",", ":"))
     except (ValueError, RecursionError):
         return _failure(action, "hook_input_invalid")
-    stop_hook_active = isinstance(event, dict) and bool(event.get("stop_hook_active"))
+    if not isinstance(event, dict):
+        return _failure(action, "hook_input_invalid")
+    stop_hook_active = bool(event.get("stop_hook_active"))
     try:
         process = _graceful_run(
             [sys.executable, "-m", "imprint.cli", "hook", action],

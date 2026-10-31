@@ -13,8 +13,7 @@ from typing import Any
 from imprint.errors import ValidationError
 
 from .provenance import (
-    NO_OPERATOR_MESSAGE_REASON,
-    SYNTHETIC_ENTRY_REASON,
+    MID_TURN_SOURCE,
     UNVERIFIED_BASIS,
     HostOrigin,
     classify_with_host,
@@ -24,7 +23,12 @@ from .provenance import (
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
 # How much of the prior assistant message is kept as context for a capture.
 MAX_CONTEXT_BYTES = 64 * 1024
+# How far back a huge transcript is read at first, and at most. A long turn can
+# push the prompt it answers out of the first read.
+TAIL_READ_BYTES = 2 * 1024 * 1024
 TRANSCRIPT_UNAVAILABLE_REASON = "transcript_unavailable"
+TRANSCRIPT_REFUSED_REASON = "transcript_refused"
+TRANSCRIPT_TAIL_EXHAUSTED_REASON = "transcript_tail_exhausted"
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,10 @@ class TranscriptUnavailable(ValidationError):
     """The host named a transcript with nothing in it to read yet, or none at all."""
 
 
+class TranscriptInFlux(ValidationError):
+    """The host is still writing or replacing the transcript, so a retry can heal this."""
+
+
 def _read_native_transcript_snapshot_once(
     path_value: str, *, tail_limit: int | None = None,
 ) -> _TranscriptSnapshot:
@@ -55,14 +63,14 @@ def _read_native_transcript_snapshot_once(
     Append-only growth is accepted because reads stop at the snapshot size;
     rotation or truncation is reported to the bounded retry wrapper.
     """
-    path = Path(path_value).expanduser()
-    if not path.is_absolute():
-        raise ValidationError("transcript_path must be an absolute regular non-symlink file")
     try:
+        path = Path(path_value).expanduser()
+        if not path.is_absolute():
+            raise ValidationError("transcript_path must be an absolute regular non-symlink file")
         path_before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError as exc:
         raise TranscriptUnavailable("transcript_path does not exist") from exc
-    except OSError as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         raise ValidationError("transcript_path must be an absolute regular non-symlink file") from exc
     if not stat.S_ISREG(path_before.st_mode):
         raise ValidationError("transcript_path must be an absolute regular non-symlink file")
@@ -78,7 +86,7 @@ def _read_native_transcript_snapshot_once(
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _identity(opened) != _identity(path_before):
-            raise ValidationError("transcript_path changed while it was being opened")
+            raise TranscriptInFlux("transcript_path changed while it was being opened")
         size = opened.st_size
         if size <= 0:
             raise TranscriptUnavailable("transcript_path is empty")
@@ -135,7 +143,7 @@ def _read_native_transcript_snapshot(
             if changed is None:
                 raise
             changed = exc
-    raise ValidationError("transcript_path changed during the bounded read") from changed
+    raise TranscriptInFlux("transcript_path changed during the bounded read") from changed
 
 
 def _well_formed(value: str) -> str:
@@ -167,18 +175,58 @@ def _entry_identity(item: dict[str, Any]) -> str | None:
     return _well_formed(value.strip()) if isinstance(value, str) and value.strip() else None
 
 
-def _parse_native_stop_snapshot(
-    snapshot: _TranscriptSnapshot, *, host_origin: HostOrigin | None = None,
-) -> dict[str, Any]:
-    messages: list[tuple[str, str, str | None, str | None]] = []
+def _queued_prompt(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a prompt queued into a running turn as the user entry it stands for.
+
+    Claude records a mid-turn prompt as an attachment, not a user entry, and with
+    no transport of its own. What it declares about itself still counts: a machine
+    origin, a meta flag or a forwarded intent is not a person steering the turn.
+    """
+    attachment = item.get("attachment")
+    if (
+        item.get("type") != "attachment"
+        or not isinstance(attachment, dict)
+        or attachment.get("type") != "queued_command"
+        or attachment.get("commandMode") != "prompt"
+        or attachment.get("forwardedIntent") is not None
+    ):
+        return None
+    return {
+        **item,
+        "type": "user",
+        "uuid": attachment.get("source_uuid") or item.get("uuid"),
+        "origin": attachment.get("origin") or item.get("origin"),
+        "isMeta": bool(attachment.get("isMeta") or item.get("isMeta")),
+        "promptSource": MID_TURN_SOURCE,
+        "message": {"content": attachment.get("prompt")},
+    }
+
+
+def _transcript_entry(item: Any, host_origin: HostOrigin | None) -> dict[str, Any] | None:
+    """Return a parsed line as an entry both parsers read, or None to pass it over.
+
+    A mid-turn prompt counts only where a host record can judge it. Without one it
+    could only ever be unverified, and that would hide the turn it interrupted.
+    """
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("type")
+    if isinstance(kind, str) and kind in {"user", "assistant"}:
+        return item
+    return _queued_prompt(item) if host_origin is not None else None
+
+
+def collect_turns(
+    lines: list[str], host_origin: HostOrigin | None,
+) -> tuple[list[tuple[str, str, str | None, str | None, Any]], str | None, bool]:
+    """Read decoded transcript lines into turns, the same way for both parsers.
+
+    Returns the turns, the basis of the last dropped entry, and whether a prompt
+    nobody can vouch for is newer than the last operator entry.
+    """
+    messages: list[tuple[str, str, str | None, str | None, Any]] = []
     synthetic_basis: str | None = None
     unverified_since_operator = False
-    try:
-        # Split before decoding: str.splitlines also breaks on U+2028, U+2029
-        # and U+0085, which are legal raw inside a JSON string.
-        lines = [line.decode("utf-8") for line in snapshot.data.splitlines(keepends=True)]
-    except UnicodeDecodeError as exc:
-        raise ValidationError("transcript is not valid UTF-8") from exc
     for number, raw_line in enumerate(lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
@@ -188,19 +236,20 @@ def _parse_native_stop_snapshot(
             item = json.loads(raw)
         except json.JSONDecodeError as exc:
             if not complete and number == len(lines):
-                raise ValidationError(f"incomplete transcript line {number}") from exc
+                raise TranscriptInFlux(f"incomplete transcript line {number}") from exc
             raise ValidationError(f"malformed complete transcript line {number}") from exc
         except (ValueError, RecursionError):
             continue  # Valid JSON too deep or too long to read says nothing about this turn.
-        if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
+        entry = _transcript_entry(item, host_origin)
+        if entry is None:
             continue
-        message = item.get("message", {})
+        message = entry.get("message")
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
         basis = None
-        if item["type"] == "user":
-            verdict = classify_with_host(item, text, host_origin)
+        if entry["type"] == "user":
+            verdict = classify_with_host(entry, text, host_origin)
             if not verdict.is_operator:
                 synthetic_basis = verdict.basis
                 unverified_since_operator |= verdict.basis == UNVERIFIED_BASIS
@@ -208,12 +257,25 @@ def _parse_native_stop_snapshot(
             basis = verdict.basis
         if not text.strip():
             continue
-        if item["type"] == "user":
+        if entry["type"] == "user":
             unverified_since_operator = False
-        messages.append((item["type"], text, _entry_identity(item), basis))
+        messages.append((entry["type"], text, _entry_identity(entry), basis, entry.get("timestamp")))
+    return messages, synthetic_basis, unverified_since_operator
+
+
+def _parse_native_stop_snapshot(
+    snapshot: _TranscriptSnapshot, *, host_origin: HostOrigin | None = None,
+) -> dict[str, Any]:
+    try:
+        # Split before decoding: str.splitlines also breaks on U+2028, U+2029
+        # and U+0085, which are legal raw inside a JSON string.
+        lines = [line.decode("utf-8") for line in snapshot.data.splitlines(keepends=True)]
+    except UnicodeDecodeError as exc:
+        raise ValidationError("transcript is not valid UTF-8") from exc
+    messages, synthetic_basis, unverified_since_operator = collect_turns(lines, host_origin)
     evidence_sha256 = hashlib.sha256(snapshot.data).hexdigest()
     locator = f"transcript:sha256:{evidence_sha256}"
-    user_indexes = [index for index, (kind, _, _, _) in enumerate(messages) if kind == "user"]
+    user_indexes = [index for index, message in enumerate(messages) if message[0] == "user"]
     if not user_indexes or unverified_since_operator:
         # No operator turn is a skip, never an error: raising here exits 2 and
         # blocks the host session's stop. A newer prompt nobody can vouch for
@@ -245,6 +307,7 @@ def _parse_native_stop_snapshot(
         "skip_reason": None,
         "provenance_basis": messages[user_index][3],
         "source_entry_id": messages[user_index][2],
+        "source_timestamp": messages[user_index][4],
     }
     if context_truncated:
         parsed["degradation"] = {

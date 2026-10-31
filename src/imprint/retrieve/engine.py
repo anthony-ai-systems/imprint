@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from imprint.capture.detector import feedback_sentences, operator_words, strip_delimited_pastes
+from imprint.capture.detector import closing_sentence, feedback_sentences, operator_words, stored_words
 
 from .models import (
     CHOSEN_FUTURE_PARTITION,
@@ -164,43 +164,67 @@ def _render(record: RetrievalRecord, *, selector: dict[str, object] | None = Non
     return _line(value, selector)
 
 
-def _cut(text: str) -> str:
-    return text.encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
+def _size(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _cut(text: str, limit: int = COMPACT_TEXT_BYTES) -> str:
+    return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
 def _join_sentences(sentences: Sequence[str]) -> str:
-    """Join sentences in order within the limit, reserving room for the last.
+    """Join sentences in order within the limit, nearest the end first.
 
-    The last is where a message overrules what came before it, so earlier
-    sentences take only the room it leaves.
+    The end is where a message overrules what came before it, so the last sentence
+    is always there and earlier ones fill backward from it. A last sentence too
+    long for half the limit leaves that half to the others and is cut to fit.
     """
-    room = COMPACT_TEXT_BYTES - len(sentences[-1].encode("utf-8"))
+    room = COMPACT_TEXT_BYTES - min(_size(sentences[-1]), COMPACT_TEXT_BYTES // 2)
     kept: list[str] = []
-    for sentence in sentences[:-1]:
-        cost = len(sentence.encode("utf-8")) + 1
+    for sentence in reversed(sentences[:-1]):
+        cost = _size(sentence) + 1
         if cost <= room:
             kept.append(sentence)
             room -= cost
-    return _cut("\n".join((*kept, sentences[-1])))
+    used = sum(_size(sentence) + 1 for sentence in kept)
+    return "\n".join((*reversed(kept), _cut(sentences[-1], COMPACT_TEXT_BYTES - used)))
+
+
+def _opening_with_close(text: str) -> str:
+    """Return the opening of the operator's words, and how they ended if it stops short.
+
+    A record that is nothing but quoted text keeps its own text, so a line is
+    never empty: an empty line would count as delivered and say nothing.
+    """
+    opening = stored_words(operator_words(text))
+    head = _cut(opening or text)
+    closing = closing_sentence(text)
+    if closing is None or closing in head or closing == opening or _size(closing) > COMPACT_TEXT_BYTES // 2:
+        return head
+    return f"{_cut(opening, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
 
 
 def _compact_text(text: str) -> tuple[str, str]:
     """Return what a compact line says, and what that text is."""
-    if len(text.encode("utf-8")) <= COMPACT_TEXT_BYTES:
+    if _size(text) <= COMPACT_TEXT_BYTES:
         return text, "whole"
     sentences = feedback_sentences(text)
     if sentences:
+        closing = closing_sentence(text)
+        if closing is not None and closing != sentences[-1]:
+            sentences.append(closing)
         return _join_sentences(sentences), "feedback_sentences"
-    return _cut(strip_delimited_pastes(operator_words(text))), "opening"
+    return _opening_with_close(text), "opening"
 
 
 def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | None = None) -> bytes:
     """Render the point of a record with its authority and source references.
 
     This shapes one delivery only; the canonical record is untouched. The text
-    is the record's own words, never a rewrite: all of it when it fits, else
-    every sentence that reads as feedback, else the opening of what the operator
-    said, cut at a byte limit. ``detail`` is how to read the whole record locally.
+    is the record's own words, never a rewrite: all of it when it fits, else every
+    sentence that reads as feedback and the last sentence, else the opening of what
+    the operator said and how it ended, cut at a byte limit. ``detail`` is how to
+    read the whole record locally.
     """
     text, basis = _compact_text(record.text)
     return _line({

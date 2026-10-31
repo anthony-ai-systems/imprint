@@ -25,6 +25,17 @@ _SIDECAR_PREFLIGHT_ERROR = (
 _DATABASE_RETRY_DELAYS = (0.25, 0.5)
 _CAPTURE_SKIP_TAIL_BYTES = 64 * 1024
 _CAPTURE_SKIP_WINDOW_SECONDS = 24 * 60 * 60
+# Turns lost for a reason a receipt alone would not show. Nested T3 runs and long
+# turns reach these in normal use, so counting them is not a fault by itself.
+_COUNTED_CAPTURE_SKIPS = (
+    "operator_text_oversized",
+    "t3_prompt_unmatched",
+    "t3_session_ref_unreadable",
+    "t3_session_unmatched",
+    "transcript_refused",
+    "transcript_tail_exhausted",
+    "transcript_unavailable",
+)
 
 
 def _age_seconds(path: Path, now: float) -> int:
@@ -253,6 +264,9 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     t3_unavailable_count, t3_unavailable_age = _recent_capture_skips(
         root, T3_RECORD_UNAVAILABLE_REASON, now,
     )
+    capture_skips = {
+        reason: _recent_capture_skips(root, reason, now)[0] for reason in _COUNTED_CAPTURE_SKIPS
+    }
     from imprint.config import effective_selector_mode
     selector_mode = effective_selector_mode(config.get("selector"))
     selector: dict[str, object] = {
@@ -282,6 +296,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         hook_failure_count=len(hook_failure_files),
         hook_failure_newest_age_seconds=_latest_age(hook_failure_files, now),
         t3_record_unavailable_24h=t3_unavailable_count,
+        capture_skips_24h=capture_skips,
         t3_record_unavailable_newest_age_seconds=t3_unavailable_age,
         permissions_ok=not unsafe_permissions,
         unsafe_permission_count=len(unsafe_permissions),

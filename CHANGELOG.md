@@ -67,6 +67,41 @@
   is an exact part of the record.
 - Bound the detector's patterns so long blank runs, unclosed tags and unclosed
   quotes no longer stall a hook past its time limit.
+- Keep the assistant's words out of a correction that replies to a T3 quote: an
+  `[Assistant quote]` link is removed, its comment is kept and read as the
+  operator's, and an all-quote message stores nothing.
+- Read a prompt sent while a turn runs, which Claude records as a `queued_command`
+  attachment, where a host record can judge it.
+- Match T3 prompts sent after a handoff, or with captured-window data, a truncation
+  note, or a `]` in an attachment name. Store a context chip as its label and stop
+  a chip's label firing the detector.
+- Report T3 join failures by name: `t3_session_ref_unreadable`, which degrades
+  health, and `t3_session_unmatched` and `t3_prompt_unmatched`, which are counted.
+  Add `capture_skips_24h` to `imprint health`, covering those, oversized text and
+  the transcript skips.
+- Stop blocking a Stop on what cannot heal: a refused transcript now returns
+  `transcript_refused`, exit 0, is logged and degrades health. Nothing more is read
+  from a refused file. A bad config, a non-object event and a too-deep event no
+  longer fail the hook. A final line still being written and a file replaced during
+  the read still block once.
+- Over 16 MiB, look back the whole 16 MiB for a prompt before giving up, and report
+  `transcript_tail_exhausted` rather than a missing prompt.
+- Skip an operator turn older than the capture marks as `operator_turn_expired`,
+  and key marks on the transcript when the event has no session id, so a turn is
+  not captured twice.
+- Read paste blocks by their `id`, nested tags, attributes of any length and an
+  unclosed opener. Keep leading host blocks out of stored text on every host.
+- Detect a mid-message reversal, a plain `Always ...` or `Never ...` rule, a
+  standing rule after a clause, and short rejections, and stop reading an ordinary
+  question as a verdict.
+- Show a compact line's closing sentence, fill its sentences backward from the
+  last, cut an oversized last sentence rather than lose it, keep abbreviations
+  whole, and never produce an empty line.
+- Send a remote selector only the operator's words from a statement, including one
+  stored by an older build.
+- Tolerate a T3 home that cannot be resolved, a newer T3 row with no string text,
+  and a FIFO at the skip log, and replace a lone surrogate on both sides of the T3
+  comparison.
 - Rollback: `t3_capture_origin` is unknown to older builds, which refuse the config
   and fail every hook. Set it only after this build is installed, and remove
   `t3_capture_origin` from the config before reinstalling an older build.

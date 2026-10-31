@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 
+import pytest
+
 import imprint.health as health_module
 from imprint.constants import STORE_SCHEMA_VERSION
 from imprint.errors import ValidationError
@@ -260,3 +262,26 @@ def test_definite_integrity_failure_after_connection_still_degrades(tmp_path):
     assert report["metrics"]["database_state"] == "failed"
     assert "database_integrity_failed" in report["degraded_reasons"]
     assert "migration_invalid" not in report["degraded_reasons"]
+
+
+@pytest.mark.parametrize("reason", ["t3_session_ref_unreadable", "transcript_refused"])
+def test_a_skip_that_means_capture_has_stopped_degrades_health(tmp_path, reason):
+    report = _health_with_skip_log(tmp_path, _skip_line(reason, 60))
+    assert reason in report["degraded_reasons"]
+    assert report["metrics"]["capture_skips_24h"][reason] == 1
+
+
+@pytest.mark.parametrize("reason", [
+    "operator_text_oversized", "t3_prompt_unmatched", "t3_session_unmatched",
+    "transcript_tail_exhausted", "transcript_unavailable",
+])
+def test_a_skip_normal_use_reaches_is_counted_without_degrading_health(tmp_path, reason):
+    report = _health_with_skip_log(tmp_path, _skip_line(reason, 60) * 3)
+    assert reason not in report["degraded_reasons"]
+    assert report["metrics"]["capture_skips_24h"][reason] == 3
+
+
+def test_an_old_skip_is_not_counted(tmp_path):
+    report = _health_with_skip_log(tmp_path, _skip_line("transcript_refused", 2 * 86400))
+    assert report["metrics"]["capture_skips_24h"]["transcript_refused"] == 0
+    assert "transcript_refused" not in report["degraded_reasons"]

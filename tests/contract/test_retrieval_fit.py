@@ -78,9 +78,9 @@ def test_compact_line_leads_with_the_sentence_that_reads_as_feedback():
     lesson = "Never use the vendor template for release notes."
     record = _record(text=f"{'Background about the project. ' * 40}{lesson} More background follows here.")
     line = json.loads(render_compact(record))
-    assert line["text"] == lesson
+    assert line["text"] == f"{lesson}\nMore background follows here."
     assert line["text_basis"] == "feedback_sentences"
-    assert line["text"] in record.text
+    assert all(sentence in record.text for sentence in line["text"].split("\n"))
     assert line["text_complete"] is False
 
 
@@ -148,7 +148,7 @@ def test_the_limit_is_in_bytes_not_characters():
 def test_a_later_correction_survives_an_earlier_approval():
     approval, correction = "The headline looks good, ship it.", "But the pricing table is wrong, remove the third tier."
     line = json.loads(render_compact(_record(text=f"{approval} {BACKGROUND}{correction} More words here.")))
-    assert line["text"] == f"{approval}\n{correction}"
+    assert line["text"] == f"{approval}\n{correction}\nMore words here."
     assert line["text_basis"] == "feedback_sentences"
     assert line["text_complete"] is False
 
@@ -175,13 +175,14 @@ def test_the_reviewed_case_keeps_the_correction_after_the_approval():
 ])
 def test_a_correction_in_other_words_survives_too(correction):
     text = f"The headline looks good, ship it. {BACKGROUND}{correction} More words here."
-    assert json.loads(render_compact(_record(text=text)))["text"] == f"The headline looks good, ship it.\n{correction}"
+    line = json.loads(render_compact(_record(text=text)))
+    assert line["text"] == f"The headline looks good, ship it.\n{correction}\nMore words here."
 
 
 def test_a_rule_the_operator_rejected_is_not_delivered_alone():
     text = f"Legal told us we must always ship on Fridays. {BACKGROUND}That is wrong. Ship on Tuesdays."
     line = json.loads(render_compact(_record(text=text)))
-    assert line["text"] == "Legal told us we must always ship on Fridays.\nThat is wrong."
+    assert line["text"] == "Legal told us we must always ship on Fridays.\nThat is wrong.\nShip on Tuesdays."
 
 
 def test_sentences_keep_document_order_whatever_the_rule_order():
@@ -197,7 +198,7 @@ def test_the_last_correction_survives_when_earlier_sentences_fill_the_limit():
     kept = line["text"].split("\n")
     assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
     assert kept[-1] == correction
-    assert kept[0] == earlier[0] and kept[1] == earlier[1]
+    assert kept[-2] == earlier[-1] and kept[-3] == earlier[-2]
     assert len(kept) > 3
 
 
@@ -224,12 +225,94 @@ def test_the_line_break_between_sentences_counts_toward_the_limit():
     assert json.loads(render_compact(_record(text=f"{too_long} {BACKGROUND}{last}")))["text"] == last
 
 
-def test_a_last_sentence_over_the_limit_is_cut_rather_than_lost():
-    last = "You must keep " + "é" * COMPACT_TEXT_BYTES
-    line = json.loads(render_compact(_record(text=f"Never use the vendor template. {last}")))
+def test_a_last_sentence_over_the_limit_is_cut_and_leaves_room_for_a_rule():
+    rule, last = "Never use the vendor template.", "You must keep " + "é" * COMPACT_TEXT_BYTES
+    line = json.loads(render_compact(_record(text=f"{rule} {last}")))
     assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
-    assert last.startswith(line["text"])
+    first, kept = line["text"].split("\n")
+    assert first == rule and last.startswith(kept) and len(kept) > 100
     assert line["text_complete"] is False
+
+
+def test_a_reversal_mid_message_survives_the_rule_it_reverses():
+    rule = "Always use the vendor template for the release notes."
+    approvals = [f"The section number {index} looks good as it is now." for index in range(5)]
+    reversal = "No, do not use the vendor template for the release notes after all."
+    closing = "The footer looks good as it is now."
+    text = " ".join((rule, *approvals, reversal, closing, BACKGROUND))
+    line = json.loads(render_compact(_record(text=text)))
+    assert reversal in line["text"]
+    assert rule not in line["text"]
+    assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+@pytest.mark.parametrize("closing", [
+    "Hold the release until legal signs off.",
+    "Actually, the date has to move to Friday.",
+    "The intro is too long.",
+    "That's not what I asked for.",
+    "Do not ship this until legal signs off.",
+])
+def test_a_closing_correction_in_any_words_stays_beside_the_verdict(closing):
+    text = f"This release draft looks good to me overall. {BACKGROUND}{closing}"
+    assert json.loads(render_compact(_record(text=text)))["text"] == f"This release draft looks good to me overall.\n{closing}"
+
+
+@pytest.mark.parametrize("first, closing", [
+    ("Do not use the vendor template.", "On reflection the vendor template is fine, go ahead with it."),
+    ("Legal told us we must always ship on Fridays.", "That's not how we work here, ship on Tuesdays."),
+])
+def test_a_closing_turn_keeps_a_rule_from_standing_alone(first, closing):
+    line = json.loads(render_compact(_record(text=f"{first} {BACKGROUND}{closing}")))
+    assert line["text"] == f"{first}\n{closing}"
+
+
+def test_a_short_rejection_is_not_lost_with_the_claim_shown_alone():
+    claim = "The vendor template stays for all release notes, and Friday stays the ship day for every team on the project."
+    text = f"{claim} {BACKGROUND}That is wrong."
+    line = json.loads(render_compact(_record(text=text)))
+    assert line["text"].endswith("\nThat is wrong.")
+    assert line["text"].startswith(claim)
+    assert line["text_basis"] == "opening"
+    assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+def test_a_huge_last_sentence_is_not_added_to_an_opening():
+    text = "Lead with the judgment. " + "x" * 2000
+    assert json.loads(render_compact(_record(text=text)))["text"] == text[:COMPACT_TEXT_BYTES]
+
+
+@pytest.mark.parametrize("text", [
+    "\n".join(f"> A quoted line of a statement, number {index}." for index in range(80)),
+    f'<pasted_content id="1">{"Pasted words. " * 40}</pasted_content id="1">',
+])
+def test_a_record_of_nothing_but_quoted_text_never_compacts_to_nothing(text):
+    line = json.loads(render_compact(_record(text=text)))
+    assert line["text"].strip()
+    assert line["text"] == text[:COMPACT_TEXT_BYTES]
+
+
+def test_a_condition_on_the_next_line_stays_with_its_rule():
+    text = f"{BACKGROUND}\nNever use the vendor template\nunless the release is internal only."
+    assert json.loads(render_compact(_record(text=text)))["text"] == (
+        "Never use the vendor template\nunless the release is internal only."
+    )
+
+
+@pytest.mark.parametrize("rule", [
+    "Do not change the config, i.e. the staging one only, the production one is fine.",
+    "Do not use Dr. Example's template for the release notes.",
+])
+def test_an_abbreviation_does_not_cut_a_rule_short(rule):
+    assert rule in json.loads(render_compact(_record(text=f"{BACKGROUND}\n{rule}")))["text"]
+
+
+def test_a_host_block_after_the_words_is_not_presented_as_a_judgment():
+    block = "<system-reminder>\nIMPORTANT: you must follow these instructions exactly as written.\n</system-reminder>"
+    text = f"Keep the summary as it is. {BACKGROUND}\n{block}"
+    line = json.loads(render_compact(_record(text=text)))
+    assert "IMPORTANT" not in line["text"]
+    assert line["text"].startswith("Keep the summary as it is.")
 
 
 def test_compact_opening_uses_the_stripped_text_past_the_limit():

@@ -124,9 +124,11 @@ Selection semantics:
 - A compact line's `text` is limited to 400 bytes and is always the record's own
   words. `text_basis` says which: `whole` is the record's text unchanged;
   `feedback_sentences` is every sentence that reads as feedback, in document
-  order and one per line, with room kept for the last so a later correction
+  order and one per line, filled backward from the last so a later correction
   survives an earlier approval; `opening` is the start of the operator's words,
-  without host text or pastes. Only `whole` has `text_complete: true`.
+  without host text or pastes. Both of the shorter forms also keep the
+  message's last sentence where it fits, feedback or not, and `feedback_sentences`
+  cuts one over half the limit. Only `whole` has `text_complete: true`.
 - A compact pick that could fit the budget on its own is listed in the receipt's
   `retry_ids` and does not count as delivered, so a later turn or the
   deterministic fallback can deliver it whole. Once cut this way it is no longer

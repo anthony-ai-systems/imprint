@@ -11,6 +11,10 @@ UNVERIFIED_ENTRY_REASON = "unverified_provenance"
 MACHINE_ORIGIN_REASON = "machine_origin"
 UNVERIFIED_BASIS = "unverified"
 HOST_RECORD_BASIS = "host_record"
+# Marks a prompt queued into a running turn, which records no transport of its
+# own. No interactive source has this name, so it is unverified until a host
+# record says otherwise.
+MID_TURN_SOURCE = "mid_turn_queue"
 
 _HUMAN_ORIGIN_KIND = "human"
 # Only measured interactive provenance is positive evidence of human input.

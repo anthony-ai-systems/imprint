@@ -7,11 +7,14 @@ import json
 import os
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from imprint.permissions import secure_directory, secure_file
 
 ALREADY_CAPTURED_REASON = "operator_turn_already_captured"
+OPERATOR_TURN_EXPIRED_REASON = "operator_turn_expired"
 MARK_SCHEMA_VERSION = "1.0.0"
 # A session's marks stop earning their keep once the transcript that produced
 # them is long gone. Sweeping them keeps the runtime directory bounded.
@@ -29,6 +32,21 @@ def turn_identity(source_entry_id: str | None, operator_text: str) -> str:
         return f"entry:{source_entry_id.strip()}"
     digest = hashlib.sha256(operator_text.encode("utf-8")).hexdigest()
     return f"text:sha256:{digest}"
+
+
+def outlived_its_mark(timestamp: Any, *, now: float | None = None) -> bool:
+    """Whether a turn is older than any mark that could say it was captured.
+
+    Stop reads back past trailing machine entries to the operator turn before
+    them, so it can reach a turn long since captured. Once the mark has been
+    swept nothing tells that turn from a new one. A turn with no readable time is
+    not refused: only the mark can answer for it.
+    """
+    try:
+        written = datetime.fromisoformat(timestamp.strip().replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError, OverflowError, OSError):
+        return False
+    return (time.time() if now is None else now) - written > MARK_RETENTION_DAYS * 86400
 
 
 class CapturedTurns:

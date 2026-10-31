@@ -32,13 +32,16 @@ script. Exactly this leaves the machine:
   `c1`, ... Each asks "Does this judgment apply to the current turn?" and
   quotes one judgment statement, at most 400 characters: the operator's own
   Verdict words, or the statement of a Principle, Belief, Value, Rule, or
-  Pattern. Statements are sent as written, so they can contain whatever the
-  operator wrote in them;
+  Pattern. A statement is reduced to the operator's words first, so a record
+  stored by an older build does not send host blocks, pasted text, attachment
+  lines, chip payloads or quoted assistant text. Everything else in it is sent
+  as written, so it can contain whatever the operator wrote;
 - the key in the `Authorization: Bearer` header, plus `Content-Type` and an
   `imprint-local/<version>` `User-Agent`.
 
-Never sent by Imprint itself (the prompt, the optional reply excerpt, and each
-statement are sent as written, with whatever they contain): record, case,
+Never sent by Imprint itself (the prompt and the optional reply excerpt are
+sent as written, and each statement as described above, with whatever they
+contain): record, case,
 evidence, source-receipt, or session ids (Imprint URNs inside statements are
 replaced with `[ref]`); case summaries; ontology paths; domain ids; the hook's
 working directory and transcript path; referred parties, names, amounts,
