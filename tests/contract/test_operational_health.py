@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 import json
 import os
 
@@ -105,6 +106,90 @@ def test_hook_failure_scan_ignores_symlinks_and_non_json_entries(tmp_path):
 
     assert report["metrics"]["hook_failure_count"] == 1
     assert "hook_failures_present" in report["degraded_reasons"]
+
+
+def _skip_line(reason, age_seconds):
+    stamp = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    return json.dumps({"reason": reason, "timestamp": stamp.isoformat().replace("+00:00", "Z")}) + "\n"
+
+
+def _health_with_skip_log(tmp_path, content):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    (root / "logs").mkdir()
+    (root / "logs" / "capture-skips.jsonl").write_text(content, encoding="utf-8")
+    return health_report(root, store, _config(root))
+
+
+def test_recent_t3_record_failure_degrades_health_as_counts_and_ages_only(tmp_path):
+    report = _health_with_skip_log(
+        tmp_path, _skip_line("t3_record_unavailable", 120) + _skip_line("t3_record_unavailable", 600),
+    )
+    assert report["status"] == "degraded"
+    assert "t3_record_unavailable" in report["degraded_reasons"]
+    assert report["metrics"]["t3_record_unavailable_24h"] == 2
+    assert 120 <= report["metrics"]["t3_record_unavailable_newest_age_seconds"] < 600
+    assert report["metrics"]["t3_record_evidence"] == "operator_logs_capture_skips_tail"
+
+
+def test_old_t3_record_failure_stops_degrading_but_keeps_its_age(tmp_path):
+    report = _health_with_skip_log(tmp_path, _skip_line("t3_record_unavailable", 2 * 86400))
+    assert "t3_record_unavailable" not in report["degraded_reasons"]
+    assert report["metrics"]["t3_record_unavailable_24h"] == 0
+    assert report["metrics"]["t3_record_unavailable_newest_age_seconds"] >= 2 * 86400
+
+
+def test_other_skips_and_damaged_lines_are_not_t3_record_failures(tmp_path):
+    content = (
+        _skip_line("transcript_unavailable", 60) + "{not json\n[]\n"
+        + '{"reason": "t3_record_unavailable"}\n{"reason": "t3_record_unavailable", "timestamp": 7}\n'
+        + '{"reason": "t3_record_unavailable", "timestamp": "not-a-time"}\n'
+    )
+    report = _health_with_skip_log(tmp_path, content)
+    assert "t3_record_unavailable" not in report["degraded_reasons"]
+    assert report["metrics"]["t3_record_unavailable_24h"] == 0
+    assert report["metrics"]["t3_record_unavailable_newest_age_seconds"] == -1
+
+
+def test_absent_skip_log_reports_zero_and_unknown_age(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    report = health_report(root, store, _config(root))
+    assert report["metrics"]["t3_record_unavailable_24h"] == 0
+    assert report["metrics"]["t3_record_unavailable_newest_age_seconds"] == -1
+
+
+def test_skip_log_read_is_bounded_to_its_tail(tmp_path):
+    report = _health_with_skip_log(tmp_path, _skip_line("t3_record_unavailable", 60) * 4000)
+    assert 0 < report["metrics"]["t3_record_unavailable_24h"] < 4000
+
+
+def test_symlinked_skip_log_is_not_followed(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(_skip_line("t3_record_unavailable", 60), encoding="utf-8")
+    (root / "logs").mkdir()
+    (root / "logs" / "capture-skips.jsonl").symlink_to(outside)
+    report = health_report(root, store, _config(root))
+    assert report["metrics"]["t3_record_unavailable_24h"] == 0
+
+
+def test_skip_log_that_is_not_a_regular_file_is_not_read(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    (root / "logs").mkdir()
+    os.mkfifo(root / "logs" / "capture-skips.jsonl")
+    report = health_report(root, store, _config(root))
+    assert report["metrics"]["t3_record_unavailable_24h"] == 0
 
 
 def test_sidecar_contention_is_busy_and_does_not_degrade_database_or_migrations(

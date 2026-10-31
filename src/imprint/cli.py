@@ -247,6 +247,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
     from .capture.provenance import (
         NO_OPERATOR_MESSAGE_REASON,
         SYNTHETIC_ENTRY_REASON,
+        UNVERIFIED_BASIS,
         classify_with_host,
         skip_reason,
     )
@@ -266,8 +267,9 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
         decoded_lines = [line.decode("utf-8") for line in tail.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
-    messages: list[tuple[str, str, str | None]] = []
+    messages: list[tuple[str, str, str | None, str | None]] = []
     synthetic_basis: str | None = None
+    unverified_since_operator = False
     for number, raw_line in enumerate(decoded_lines, start=1):
         complete = raw_line.endswith(("\n", "\r"))
         raw = raw_line.rstrip("\r\n")
@@ -285,25 +287,33 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
+        basis = None
         if item["type"] == "user":
             verdict = classify_with_host(item, text, host_origin)
             if not verdict.is_operator:
                 synthetic_basis = verdict.basis
+                unverified_since_operator |= verdict.basis == UNVERIFIED_BASIS
                 continue
+            basis = verdict.basis
         if not text.strip():
             continue
-        messages.append((item["type"], text, _entry_identity(item)))
-    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
-    if not user_indexes:
+        if item["type"] == "user":
+            unverified_since_operator = False
+        messages.append((item["type"], text, _entry_identity(item), basis))
+    user_indexes = [index for index, (kind, _, _, _) in enumerate(messages) if kind == "user"]
+    if not user_indexes or unverified_since_operator:
         # A tail with no operator turn is skipped, not raised: a raised Stop
-        # hook exits 2 and blocks the host session.
+        # hook exits 2 and blocks the host session. A newer prompt nobody can
+        # vouch for ends the search too: an older turn is not what this Stop
+        # answered.
+        basis = UNVERIFIED_BASIS if unverified_since_operator else synthetic_basis
         return {
             "operator_text": None,
             "prior_assistant_output": None,
             "case_description": None,
             "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
-            "skip_reason": skip_reason(synthetic_basis),
-            "provenance_basis": synthetic_basis,
+            "skip_reason": skip_reason(basis),
+            "provenance_basis": basis,
             "source_entry_id": None,
         }
     user_index = user_indexes[-1]
@@ -323,7 +333,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
         "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
         "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
         "skip_reason": None,
-        "provenance_basis": None,
+        "provenance_basis": messages[user_index][3],
         "source_entry_id": messages[user_index][2],
         "degradation": {
             "schema_version": "1.0.0",
@@ -1180,8 +1190,17 @@ def main(argv: list[str] | None = None) -> int:
                     _parse_native_stop_snapshot,
                     _read_native_transcript_snapshot,
                 )
-                from .capture.detector import detect_explicit_feedback, strip_embedded_host_content
-                from .capture.t3_origin import t3_host_origin
+                from .capture.detector import (
+                    detect_explicit_feedback,
+                    strip_delimited_pastes,
+                    strip_embedded_host_content,
+                )
+                from .capture.provenance import HOST_RECORD_BASIS
+                from .capture.t3_origin import (
+                    T3_RECORD_UNAVAILABLE_REASON,
+                    operator_words,
+                    t3_host_origin,
+                )
                 from .capture.marks import (
                     ALREADY_CAPTURED_REASON,
                     CapturedTurns,
@@ -1193,7 +1212,7 @@ def main(argv: list[str] | None = None) -> int:
                 contextual_evidence = []
                 extensions = {}
                 source_entry_id = None
-                host_origin = t3_host_origin(config)
+                host_origin = t3_host_origin(config, native_value)
                 if not operator_text and isinstance(event.get("transcript_path"), str):
                     # A missing file is not a capture failure: blocking the stop
                     # cannot make the host write it, and the retry fails the same way.
@@ -1217,9 +1236,16 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         native = _parse_native_stop_snapshot(snapshot, host_origin=host_origin)
                     if native["skip_reason"]:
+                        reason = native["skip_reason"]
+                        # An unreadable store says nothing about who wrote the
+                        # prompt, and nothing else would show that T3 capture
+                        # has stopped working.
+                        if host_origin is not None and host_origin.read_failed:
+                            reason = T3_RECORD_UNAVAILABLE_REASON
+                            _record_capture_skip(root, reason)
                         skipped = {
                             "hook_schema_version": "1.0.0", "status": "skipped",
-                            "reason": native["skip_reason"],
+                            "reason": reason,
                         }
                         # Which tell dropped the entry, so marker-basis drops
                         # stay distinguishable from declared-provenance ones.
@@ -1227,10 +1253,13 @@ def main(argv: list[str] | None = None) -> int:
                             skipped["provenance_basis"] = native["provenance_basis"]
                         _write_json(skipped)
                         return 0
-                    attested = host_origin.evidence(native["operator_text"]) if host_origin else None
-                    if attested:
-                        extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
-                    operator_text = strip_embedded_host_content(native["operator_text"])
+                    operator_text = native["operator_text"]
+                    if native["provenance_basis"] == HOST_RECORD_BASIS and host_origin is not None:
+                        attested = host_origin.evidence(operator_text)
+                        if attested:
+                            extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
+                        operator_text = operator_words(operator_text)
+                    operator_text = strip_delimited_pastes(strip_embedded_host_content(operator_text))
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
                     source_entry_id = native.get("source_entry_id")

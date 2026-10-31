@@ -13,14 +13,29 @@
   so its prompts stayed unverified and no correction made in T3 was captured.
   Only a prompt T3 records as written by a person at a client counts; anything
   else stays unverified, and declared origins and machine markers still win.
+- Tie T3 verification to the Claude session: T3's provider-thread record must
+  name the Stop event's session, so a nested run that inherits the thread cannot
+  match a person's words. Refuse scheduled and webhook prompts, messages sent for
+  a guest, and plans sent by T3's Implement button, all of which T3 records as
+  `user` and `web`.
+- Report an unreadable T3 record as `t3_record_unavailable` in the Stop receipt,
+  in `logs/capture-skips.jsonl` and in `imprint health`, instead of an ordinary
+  unverified skip.
+- Match T3 prompts that carry context chips, images or a leading host block, and
+  keep T3's `Ultrathink:` prefix out of detection and stored text.
+- Stamp `org.imprint.host_origin` only on captures decided by the T3 record, and
+  name the T3 message in it.
+- End the search at an unverified prompt newer than the last operator turn,
+  instead of re-reading the older turn.
 - Stop splitting transcript lines on U+2028, U+2029 and U+0085, which are legal
   inside a JSON string and were reported as malformed complete lines.
 - Skip a transcript that does not exist at Stop instead of blocking the stop,
   and log the skip content-free to `logs/capture-skips.jsonl`. Symlinks and
   non-regular files are still refused.
-- Keep pasted text out of capture: `<pasted_content>` and `<t3_context>` blocks
-  and attachment lines are removed before detection and storage, and the
-  detector ignores quoted spans and text pasted between `====` runs.
+- Keep pasted text out of capture: `<pasted_content>` blocks in the form Claude
+  Code writes them, `<t3_context>` blocks, attachment lines, `>` block quotes and
+  text pasted between `====` runs are removed before detection and storage, and
+  the detector ignores quotations inside a sentence.
 - Detect `From now on ...` as a standard, and short `It should be ...` and
   `Why ... should be ...` replies as corrections after an assistant turn. A bare
   `need to` no longer counts as a standard; its subject must be the work itself.

@@ -15,6 +15,7 @@ from imprint.errors import ValidationError
 from .provenance import (
     NO_OPERATOR_MESSAGE_REASON,
     SYNTHETIC_ENTRY_REASON,
+    UNVERIFIED_BASIS,
     HostOrigin,
     classify_with_host,
     skip_reason,
@@ -151,8 +152,9 @@ def _entry_identity(item: dict[str, Any]) -> str | None:
 def _parse_native_stop_snapshot(
     snapshot: _TranscriptSnapshot, *, host_origin: HostOrigin | None = None,
 ) -> dict[str, str | None]:
-    messages: list[tuple[str, str, str | None]] = []
+    messages: list[tuple[str, str, str | None, str | None]] = []
     synthetic_basis: str | None = None
+    unverified_since_operator = False
     try:
         # Split before decoding: str.splitlines also breaks on U+2028, U+2029
         # and U+0085, which are legal raw inside a JSON string.
@@ -174,26 +176,33 @@ def _parse_native_stop_snapshot(
         if not isinstance(message, dict):
             continue
         text = _message_text(message.get("content"))
+        basis = None
         if item["type"] == "user":
             verdict = classify_with_host(item, text, host_origin)
             if not verdict.is_operator:
                 synthetic_basis = verdict.basis
+                unverified_since_operator |= verdict.basis == UNVERIFIED_BASIS
                 continue
+            basis = verdict.basis
         if not text.strip():
             continue
-        messages.append((item["type"], text, _entry_identity(item)))
+        if item["type"] == "user":
+            unverified_since_operator = False
+        messages.append((item["type"], text, _entry_identity(item), basis))
     locator = "transcript:sha256:" + hashlib.sha256(snapshot.data).hexdigest()
-    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
-    if not user_indexes:
+    user_indexes = [index for index, (kind, _, _, _) in enumerate(messages) if kind == "user"]
+    if not user_indexes or unverified_since_operator:
         # No operator turn is a skip, never an error: raising here exits 2 and
-        # blocks the host session's stop.
+        # blocks the host session's stop. A newer prompt nobody can vouch for
+        # ends the search too: an older turn is not what this Stop answered.
+        basis = UNVERIFIED_BASIS if unverified_since_operator else synthetic_basis
         return {
             "operator_text": None,
             "prior_assistant_output": None,
             "case_description": None,
             "source_locator": locator,
-            "skip_reason": skip_reason(synthetic_basis),
-            "provenance_basis": synthetic_basis,
+            "skip_reason": skip_reason(basis),
+            "provenance_basis": basis,
             "source_entry_id": None,
         }
     user_index = user_indexes[-1]
@@ -208,7 +217,7 @@ def _parse_native_stop_snapshot(
         "case_description": "Explicit operator feedback witnessed in the Claude Code transcript",
         "source_locator": locator,
         "skip_reason": None,
-        "provenance_basis": None,
+        "provenance_basis": messages[user_index][3],
         "source_entry_id": messages[user_index][2],
     }
 

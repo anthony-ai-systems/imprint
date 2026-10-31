@@ -13,7 +13,8 @@ object and preserves unknown namespaced extensions.
 - `node_id`: this machine's spool identity; default `primary`.
 - `compiler`: only one node may be `true` for a shared logical Imprint.
 - `t3_capture_origin`: `false` (default) or `true`. When `true`, Stop capture
-  reads T3's local message record to verify who wrote a T3 prompt. See
+  reads T3's local message and provider-thread records to verify who wrote a T3
+  prompt. A record it cannot read is reported as `t3_record_unavailable`. See
   `docs/contracts/capture-origin.md`.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
   Values above 32,768 require `allow_higher_budget: true`.

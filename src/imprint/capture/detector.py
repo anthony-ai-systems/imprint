@@ -44,15 +44,17 @@ _LEADING_HOST_BLOCK = re.compile(
     re.I | re.S,
 )
 # T3 carries pasted text and attachment details inside the operator's message.
-# None of it is the operator speaking, wherever it sits.
-_EMBEDDED_HOST_BLOCK = re.compile(r"<(t3_context|pasted_content)\b[^>]*>.*?</\1>", re.I | re.S)
-_ATTACHMENT_LINE = re.compile(r"^[ \t]*\[(?:File|Image|Attached file)\b[^\n]*\][ \t]*$", re.M)
+# None of it is the operator speaking, wherever it sits. Claude Code closes a
+# paste with its id, as in </pasted_content id="ab12">.
+_EMBEDDED_HOST_BLOCK = re.compile(r"<(t3_context|pasted_content)\b[^>]*>.*?</\1(?:\s[^>]*)?>", re.I | re.S)
+_ATTACHMENT_LINE = re.compile(r"^[ \t]*\[(?:File|Image|Attached (?:file|image))\b[^\n]*\][ \t]*$", re.M)
 # Quoted spans are someone else's words, even inside the operator's message.
 # So is text pasted after a run of equals signs, up to the next run or the end.
-_QUOTED_SPAN = re.compile(
-    r'"[^"\n]{3,}"|\u201c[^\u201d\n]{3,}\u201d|^[ \t]*>[^\n]*$|={4,}.*?(?:={4,}|\Z)',
-    re.M | re.S,
-)
+# Delimited spans stand apart from the operator's sentences, so they also leave
+# the stored text; an inline quotation stays because it is part of its sentence.
+_DELIMITED_PASTE = r"^[ \t]*>[^\n]*$|={4,}.*?(?:={4,}|\Z)"
+_DELIMITED_SPAN = re.compile(_DELIMITED_PASTE, re.M | re.S)
+_QUOTED_SPAN = re.compile(rf'"[^"\n]{{3,}}"|\u201c[^\u201d\n]{{3,}}\u201d|{_DELIMITED_PASTE}', re.M | re.S)
 
 
 _MIN_SENTENCE_CHARS = 20
@@ -66,6 +68,11 @@ def strip_leading_host_blocks(text: str) -> str:
 def strip_embedded_host_content(text: str) -> str:
     """Return the message without T3's pasted blocks and attachment lines."""
     return _ATTACHMENT_LINE.sub("", _EMBEDDED_HOST_BLOCK.sub("", text)).strip()
+
+
+def strip_delimited_pastes(text: str) -> str:
+    """Return the message without block quotes and spans between runs of equals signs."""
+    return _DELIMITED_SPAN.sub("", text).strip()
 
 
 def feedback_sentence(text: str) -> str | None:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import time
+from datetime import datetime
 from pathlib import Path
 
 from imprint.constants import STORE_SCHEMA_VERSION
@@ -20,6 +23,8 @@ _SIDECAR_PREFLIGHT_ERROR = (
     "store has WAL/SHM sidecars; close the active writer or recover the store before use"
 )
 _DATABASE_RETRY_DELAYS = (0.25, 0.5)
+_CAPTURE_SKIP_TAIL_BYTES = 64 * 1024
+_CAPTURE_SKIP_WINDOW_SECONDS = 24 * 60 * 60
 
 
 def _age_seconds(path: Path, now: float) -> int:
@@ -44,6 +49,34 @@ def _hook_failure_files(root: Path) -> list[Path]:
         path for path in directory.glob("*.json")
         if path.is_file() and not path.is_symlink()
     ]
+
+
+def _recent_capture_skips(root: Path, reason: str, now: float) -> tuple[int, int]:
+    """Count one skip reason over the last day and age the newest, content-free."""
+    path = root / "logs" / "capture-skips.jsonl"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        with os.fdopen(os.open(path, flags | getattr(os, "O_NONBLOCK", 0)), "rb") as handle:
+            status = os.fstat(handle.fileno())
+            if not stat.S_ISREG(status.st_mode):
+                return 0, -1
+            offset = max(0, status.st_size - _CAPTURE_SKIP_TAIL_BYTES)
+            handle.seek(offset)
+            lines = handle.read(_CAPTURE_SKIP_TAIL_BYTES).split(b"\n")
+    except OSError:
+        return 0, -1
+    ages: list[int] = []
+    for raw in lines[1:] if offset else lines:  # a tail read may start mid-line
+        try:
+            entry = json.loads(raw)
+            if not isinstance(entry, dict) or entry.get("reason") != reason:
+                continue
+            stamp = datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00"))
+            ages.append(max(0, int(now - stamp.timestamp())))
+        except (KeyError, AttributeError, ValueError, OverflowError, OSError, RecursionError):
+            continue
+    recent = [age for age in ages if age <= _CAPTURE_SKIP_WINDOW_SECONDS]
+    return len(recent), min(ages, default=-1)
 
 
 def _temporary_residue(root: Path) -> list[Path]:
@@ -216,6 +249,10 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     unsafe_permissions = unsafe_private_permissions(root)
     temporary_residue = _temporary_residue(root)
     hook_failure_files = _hook_failure_files(root)
+    from imprint.capture.t3_origin import T3_RECORD_UNAVAILABLE_REASON
+    t3_unavailable_count, t3_unavailable_age = _recent_capture_skips(
+        root, T3_RECORD_UNAVAILABLE_REASON, now,
+    )
     from imprint.config import effective_selector_mode
     selector_mode = effective_selector_mode(config.get("selector"))
     selector: dict[str, object] = {
@@ -244,6 +281,8 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         quarantine_count=len(list((root / "quarantine").glob("*.json"))) if (root / "quarantine").exists() else 0,
         hook_failure_count=len(hook_failure_files),
         hook_failure_newest_age_seconds=_latest_age(hook_failure_files, now),
+        t3_record_unavailable_24h=t3_unavailable_count,
+        t3_record_unavailable_newest_age_seconds=t3_unavailable_age,
         permissions_ok=not unsafe_permissions,
         unsafe_permission_count=len(unsafe_permissions),
         selected_bytes=selected_bytes,

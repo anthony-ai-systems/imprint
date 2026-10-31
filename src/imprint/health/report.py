@@ -25,6 +25,8 @@ class HealthInputs:
     quarantine_count: int = 0
     hook_failure_count: int = 0
     hook_failure_newest_age_seconds: int = -1
+    t3_record_unavailable_24h: int = 0
+    t3_record_unavailable_newest_age_seconds: int = -1
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
     selected_bytes: int = 0
@@ -114,6 +116,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("quarantine_present")
     if values.hook_failure_count > 0:
         reasons.append("hook_failures_present")
+    if values.t3_record_unavailable_24h > 0:
+        reasons.append("t3_record_unavailable")
     if not values.permissions_ok or values.unsafe_permission_count > 0:
         reasons.append("unsafe_permissions")
     if values.selected_bytes > values.retrieval_budget_bytes:
@@ -173,6 +177,9 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_count": max(0, values.hook_failure_count),
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
+        "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
+        "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
+        "t3_record_evidence": "operator_logs_capture_skips_tail",
         "permissions_ok": values.permissions_ok,
         "unsafe_permission_count": max(0, values.unsafe_permission_count),
         "permissions_evidence": "posix_mode_scan_or_platform_acl_contract",
