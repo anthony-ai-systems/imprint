@@ -268,18 +268,21 @@ def test_picks_never_exceed_the_budget(tmp_path, transport, fake_records):
     assert len(decision.response["payload"].encode("utf-8")) <= 8192
 
 
-def test_an_oversized_single_pick_is_omitted_not_truncated(tmp_path, transport, fake_records):
+def test_an_oversized_pick_is_marked_compact_never_silently_cut(tmp_path, transport, fake_records):
     fake_records["records"] = [record("huge", "huge " + "y" * 6000), record("small", "small judgment")]
     decision = _select(tmp_path, budget=4096)
-    assert decision.response["selected_ids"] == ["small"]
+    assert len(decision.response["selected_ids"]) == 2
+    lines = [json.loads(line) for line in decision.response["payload"].splitlines()]
+    (cut,) = [line for line in lines if line.get("compact")]
+    assert cut["text_complete"] is False
+    assert cut["detail"] == f"imprint history {cut['record_id']}"
 
 
-def test_picks_that_do_not_fit_the_budget_report_no_picks(tmp_path, transport, fake_records):
+def test_a_lone_oversized_pick_still_reaches_the_turn(tmp_path, transport, fake_records):
     fake_records["records"] = [record("huge", "huge " + "y" * 6000)]
     decision = _select(tmp_path, budget=4096)
-    assert (decision.method, decision.outcome) == ("jev", "no_picks")
-    assert decision.response["selector_outcome"] == "no_picks"
-    assert (decision.response["payload"], decision.response["selected_ids"]) == ("", [])
+    assert (decision.method, decision.outcome) == ("jev", "picked")
+    assert decision.response["selector_stages"]["delivered_compact"] == 1
 
 
 def test_never_sent_domain_records_are_delivered_locally_ahead_of_picks(tmp_path, transport, fake_records):
@@ -509,7 +512,7 @@ def test_decision_log_is_content_free_and_private(tmp_path, transport, fake_reco
     first, second = (json.loads(line) for line in content.splitlines())
     assert set(first) == {
         "candidates_sent", "elapsed_ms", "fallback_reason", "mode", "model_echoed", "outcome",
-        "picks", "receipt_scope", "request_sent", "session", "ts", "usage",
+        "picks", "receipt_scope", "request_bytes", "request_sent", "session", "stages", "ts", "usage",
     }
     assert first["session"] == retrieval._session_ref("synthetic-session")
     assert first["receipt_scope"].startswith("jev-")

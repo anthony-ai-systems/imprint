@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .engine import RetrievalEngine, _render
+from .engine import RetrievalEngine, _render, render_compact
 from .models import (
     BUSINESS_DECLARED_PARTITION,
     BUSINESS_OBSERVED_PARTITION,
@@ -198,13 +198,20 @@ class _FixedSource:
         return self._records
 
 
+# One pick may take this fraction of the budget in full. Past it, a single large
+# record would crowd out the others Jev ranked just below it.
+_FULL_RENDER_SHARE = 4
+
+
 def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
     eligible_count: int, budget: int, local: RetrievalResult | None = None,
 ) -> dict[str, object]:
     """Render ``local`` (the matched domain's never-sent records, ranked
     deterministically) and then picks in score order, never exceeding the
-    selector budget. Picks that cannot fit report ``no_picks``."""
+    selector budget. A pick too large to share the budget is delivered compact.
+    Picks that cannot fit even then report ``oversized_picks``, because that is
+    not the same as nothing being relevant."""
     rendered: list[bytes] = []
     selected_ids: list[str] = []
     section_bytes = {"core": 0, "general": 0, "domain": 0}
@@ -218,11 +225,16 @@ def _jev_response(
             section_bytes[section] += size
         for partition, ids in local.selected_by_partition.items():
             selected_by_partition.setdefault(partition, []).extend(ids)
-    delivered_picks = 0
+    delivered_picks = compact_picks = 0
     for rank, (record, score) in enumerate(picks, 1):
-        line = _render(record, selector={"mode": "jev", "rank": rank, "score": round(score, 4)})
+        selection = {"mode": "jev", "rank": rank, "score": round(score, 4)}
+        line = _render(record, selector=selection)
+        compact = len(line) > budget // _FULL_RENDER_SHARE or total + len(line) > budget
+        if compact:
+            line = render_compact(record, selector=selection)
         if total + len(line) > budget:
             continue
+        compact_picks += compact
         total += len(line)
         delivered_picks += 1
         rendered.append(line)
@@ -230,7 +242,7 @@ def _jev_response(
         section_bytes[record.section] += len(line)
         selected_by_partition.setdefault(record.ontology_partition, []).append(record.record_id)
     if outcome == "picked" and not delivered_picks:
-        outcome = "no_picks"  # Jev picked only records larger than the budget left
+        outcome = "oversized_picks"
     payload = b"".join(rendered)
     if len(payload) > budget:  # defensive invariant
         raise RuntimeError("selector budget invariant violated")
@@ -251,6 +263,13 @@ def _jev_response(
         "receipt_scope": scope,
         "selector_method": "jev",
         "selector_outcome": outcome,
+        "selector_stages": {
+            "eligible": eligible_count,
+            "picked": len(picks),
+            "delivered": delivered_picks,
+            "delivered_compact": compact_picks,
+            "unfit": len(picks) - delivered_picks,
+        },
     }
 
 
@@ -299,13 +318,13 @@ def select_prompt_payload(
     except Exception:
         jev, log = None, False
 
-    def record(value: SelectionResult) -> None:
+    def record(value: SelectionResult, stages: Mapping[str, int] | None = None) -> None:
         """Exactly one content-free decision line per call, written once its
         delivery is settled, plus the transfer marker whenever bytes left."""
         try:
             if log:
                 log_decision(root, decision_entry(
-                    value, mode=mode, session_ref=session_ref, receipt_scope=scope,
+                    value, mode=mode, session_ref=session_ref, receipt_scope=scope, stages=stages,
                 ))
             if value.request_sent:
                 record_transfer(root, success=value.outcome in {"picked", "no_picks"})
@@ -387,18 +406,19 @@ def select_prompt_payload(
             len(pool) + len(local_records), selector_budget, local,
         )
         outcome = str(response["selector_outcome"])
+        stages = response["selector_stages"]
         if refresh:
-            record(result)
+            record(result, stages)
             return SelectorDecision("jev", outcome, response=response, context=context)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
-            record(result)
+            record(result, stages)
             return SelectorDecision(
                 "jev", "already_delivered",
                 response=_already_delivered(context.snapshot_id), context=context,
             )
         assert cached is not None
-        record(result)
+        record(result, stages)
         return SelectorDecision("jev", outcome, response=cached, context=context)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn

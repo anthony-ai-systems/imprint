@@ -108,6 +108,8 @@ class SelectionResult:
     candidates_sent: int = 0
     # True once request bytes were handed to the transport, whatever followed.
     request_sent: bool = False
+    # Size of that request. The context budget bounds delivery, not this.
+    request_bytes: int = 0
 
 
 class _KeyUnavailable(Exception):
@@ -368,6 +370,7 @@ class JevSelector:
         started = self._clock()
         deadline = started + self.settings.timeout_seconds
         sent = 0
+        request_bytes = 0
         request_sent = False
         try:
             try:
@@ -389,6 +392,7 @@ class JevSelector:
                 return self._result(started, fallback_reason="timeout")
             transport = self._transport or http_post
             sent = len(names)
+            request_bytes = len(encoded)
             request_sent = True
             raw = _run_with_deadline(
                 lambda: transport(self.settings.endpoint, encoded, headers, remaining), remaining,
@@ -424,6 +428,7 @@ class JevSelector:
                 usage=_usage(value.get("usage")),
                 candidates_sent=sent,
                 request_sent=True,
+                request_bytes=request_bytes,
             )
         except _DeadlineExceeded:
             reason = "timeout"
@@ -433,6 +438,7 @@ class JevSelector:
             reason = _failure_reason(exc)
         return self._result(
             started, fallback_reason=reason, candidates_sent=sent, request_sent=request_sent,
+            request_bytes=request_bytes,
         )
 
 
@@ -442,6 +448,7 @@ def _utc_stamp(value: datetime | None = None) -> str:
 
 def decision_entry(
     result: SelectionResult, *, mode: str, session_ref: str, receipt_scope: str | None,
+    stages: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """A content-free decision record: no prompt, judgment text, or key."""
     return {
@@ -453,8 +460,10 @@ def decision_entry(
         "outcome": result.outcome,
         "picks": [{"record_id": record.record_id, "score": round(score, 4)} for record, score in result.picks],
         "receipt_scope": receipt_scope,
+        "request_bytes": result.request_bytes,
         "request_sent": result.request_sent,
         "session": session_ref,
+        "stages": dict(stages) if stages is not None else None,
         "ts": _utc_stamp(),
         "usage": result.usage,
     }

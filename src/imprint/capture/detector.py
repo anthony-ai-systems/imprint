@@ -55,6 +55,9 @@ _QUOTED_SPAN = re.compile(
 )
 
 
+_MIN_SENTENCE_CHARS = 20
+
+
 def strip_leading_host_blocks(text: str) -> str:
     """Return the operator's own words with prepended host blocks removed."""
     return _LEADING_HOST_BLOCK.sub("", text)
@@ -63,6 +66,27 @@ def strip_leading_host_blocks(text: str) -> str:
 def strip_embedded_host_content(text: str) -> str:
     """Return the message without T3's pasted blocks and attachment lines."""
     return _ATTACHMENT_LINE.sub("", _EMBEDDED_HOST_BLOCK.sub("", text)).strip()
+
+
+def feedback_sentence(text: str) -> str | None:
+    """Return the sentence of the operator's that reads as feedback, unchanged.
+
+    Stored judgments are whole messages, so the lesson can sit anywhere in them.
+    Sentences too short to stand alone are not returned. Quoted and pasted spans
+    become line breaks, which keeps the result an exact part of ``text``.
+    """
+    spoken = _QUOTED_SPAN.sub("\n", text)
+    for _, _, _, pattern in _RULES:
+        match = pattern.search(spoken)
+        if match is None:
+            continue
+        anchor = max(match.end() - 1, match.start())
+        start = max(spoken.rfind(mark, 0, match.start() + 1) for mark in ".!?\n") + 1
+        ends = [index for index in (spoken.find(mark, anchor) for mark in ".!?\n") if index >= 0]
+        sentence = spoken[start: min(ends) + 1 if ends else len(spoken)].strip()
+        if len(sentence) >= _MIN_SENTENCE_CHARS:
+            return sentence
+    return None
 
 
 def _normalize(text: str) -> str:
