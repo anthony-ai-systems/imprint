@@ -91,6 +91,23 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   characters of the newest assistant reply, labeled `Previous assistant
   reply:`, read from the hook's `transcript_path` with the bounded transcript
   reader. The excerpt is part of the turn's receipt scope.
+- `selector.jev.drop_stale_records`: default `false`. When on, a captured record
+  that no longer reads as feedback under today's detector is left out of the
+  request and of local delivery. The record stays in the store, and session
+  start can still deliver it. Reading stops at 8,000 characters.
+- `selector.jev.standing_rules`: `{"enabled": false, "score_floor": 0.25,
+  "rare_word_share": 0.15, "slots": 2, "keep": 30}`. A standing rule is a record
+  with a sentence that opens with "from now on", "going forward", "from here on",
+  "always", "never" or "whenever", or ends with one of the first three, inside
+  the first 400 characters. When enabled, the newest `keep` (1–150) rules are
+  always sent, in place of the weakest other candidates. A rule then takes one of
+  `slots` (1–5) reserved places ahead of the other picks, even below
+  `score_floor`, if Jev scores it at or above this `score_floor` and its rule
+  sentence shares a word with the prompt that at most `rare_word_share` of the
+  records use. Plural endings are folded for that check only. A rule without a
+  reserved place is an ordinary candidate. Rules delivered this way carry
+  `"reserved": true` on their line. This can reserve a rule on a prompt it does
+  not apply to, because neither signal is exact.
 - `selector.jev.log_decisions`: default `true`; see the decision log below.
 
 To use OpenRouter's route instead, change only configuration:

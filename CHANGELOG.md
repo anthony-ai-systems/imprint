@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add `selector.jev.standing_rules`, off by default. A rule set with "from now
+  on", "always", "never" or similar is always sent to Jev, and takes a reserved
+  place ahead of other picks when Jev scores it at 0.25 or more and it shares a
+  rare word with the prompt. Without this, a correction reached a later session
+  only while it was the newest record.
+- Add `selector.jev.drop_stale_records`, off by default, which keeps captured
+  records that no longer read as feedback out of the request and local delivery.
+  No record is changed.
+- Read each statement once per turn, which more than pays for the checks above.
 - Deliver a Jev pick that cannot share the budget as a compact line: the
   record's text when it fits 400 bytes, otherwise every sentence that reads as
   feedback in document order, otherwise its opening, with its authority and
