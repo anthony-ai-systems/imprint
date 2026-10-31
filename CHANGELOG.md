@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Add optional verification of T3 prompts against T3's own message record
+  (`t3_capture_origin`, default off). T3 submits every prompt through the SDK,
+  so its prompts stayed unverified and no correction made in T3 was captured.
+  Only a prompt T3 records as written by a person at a client counts; anything
+  else stays unverified, and declared origins and machine markers still win.
+- Stop splitting transcript lines on U+2028, U+2029 and U+0085, which are legal
+  inside a JSON string and were reported as malformed complete lines.
+- Skip a transcript that does not exist at Stop instead of blocking the stop,
+  and log the skip content-free to `logs/capture-skips.jsonl`. Symlinks and
+  non-regular files are still refused.
+- Keep pasted text out of capture: `<pasted_content>` and `<t3_context>` blocks
+  and attachment lines are removed before detection and storage, and the
+  detector ignores quoted spans and text pasted between `====` runs.
+- Detect `From now on ...` as a standard, and short `It should be ...` and
+  `Why ... should be ...` replies as corrections after an assistant turn. A bare
+  `need to` no longer counts as a standard; its subject must be the work itself.
+
 - Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
   prompt-time retrieval. The default `selector.mode` stays `deterministic` with
   no network request; `jev` and `shadow` are opt-in, `IMPRINT_SELECTOR=off`

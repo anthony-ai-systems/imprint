@@ -18,6 +18,9 @@ DEFAULTS = {
     "operator_slug": "default",
     "node_id": "primary",
     "compiler": True,
+    # Reads T3's own message records to verify who wrote a prompt. Off by
+    # default: an installation opts in to trusting that local record.
+    "t3_capture_origin": False,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -194,7 +197,7 @@ def _validate_config(data: dict[str, Any]) -> None:
         value = data.get(field)
         if not isinstance(value, str) or SAFE_LOCAL_ID.fullmatch(value) is None:
             raise ValidationError(f"{field} must be a safe lowercase identifier")
-    for field in ("compiler", "allow_higher_budget"):
+    for field in ("compiler", "allow_higher_budget", "t3_capture_origin"):
         if not isinstance(data.get(field), bool):
             raise ValidationError(f"{field} must be a boolean")
     if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:
