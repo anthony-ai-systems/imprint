@@ -590,15 +590,7 @@ def main(argv: list[str] | None = None) -> int:
                          "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
                          else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"})
             return 0
-        try:
-            config = load_config(args.config)
-        except (ImprintError, OSError, ValueError):
-            # Blocking a stop cannot repair a config file, and the host would pay
-            # for a forced continuation on every turn until someone does.
-            if args.command == "hook" and args.action == "stop-capture":
-                _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "config_invalid"})
-                return 0
-            raise
+        config = load_config(args.config)
         root = resolved_operator_root(config)
         store = _store(root)
         if args.command == "version":

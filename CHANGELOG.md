@@ -81,8 +81,8 @@
   the transcript skips.
 - Stop blocking a Stop on what cannot heal: a refused transcript now returns
   `transcript_refused`, exit 0, is logged and degrades health. Nothing more is read
-  from a refused file. A bad config, a non-object event and a too-deep event no
-  longer fail the hook. A final line still being written and a file replaced during
+  from a refused file. A non-object event and a too-deep event no longer fail the
+  hook. A bad config, a final line still being written and a file replaced during
   the read still block once.
 - Over 16 MiB, look back the whole 16 MiB for a prompt before giving up, and report
   `transcript_tail_exhausted` rather than a missing prompt.

@@ -400,11 +400,13 @@ def test_an_incomplete_final_line_can_heal_so_it_still_blocks(tmp_path):
     assert len(_spooled(root)) == 1
 
 
-def test_an_invalid_config_does_not_block_the_stop(tmp_path):
+def test_an_invalid_config_blocks_the_stop_once_so_it_is_seen(tmp_path):
     (tmp_path / "config.json").write_text("{not json", encoding="utf-8")
-    run, _ = _bridge(tmp_path, _write(tmp_path, _user()))
-    assert run.returncode == 0, run.stdout + run.stderr
-    assert json.loads(run.stdout)["reason"] == "config_invalid"
+    path = _write(tmp_path, _user())
+    run, _ = _bridge(tmp_path, path)
+    assert run.returncode == 2, run.stdout + run.stderr
+    assert json.loads(run.stdout)["failure_policy"] == "fail_closed"
+    assert "blocking this stop once" in run.stderr
 
 
 @pytest.mark.parametrize("line", ['{"type": ["user"]}', '{"type": {"a": 1}}', '{"type": null}', "[]", "7"])
