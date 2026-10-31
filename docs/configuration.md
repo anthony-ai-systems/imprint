@@ -78,7 +78,8 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   anything is sent; it bounds the request size.
 - `selector.jev.budget_bytes`: `null` (use `context_budget_bytes`) or a value
   with the same bounds; above 32,768 requires `allow_higher_budget: true`.
-  Picks are added in score order only while the payload stays within it.
+  Picks are added in score order, after any reserved rules, only while the payload
+  stays within it.
 - `selector.jev.node_types`: the selectable judgment types; default and
   maximum `Verdict`, `Principle`, `Belief`, `Value`, `Rule`, `Pattern`.
   Business, observation, outcome, consent, self-model, chosen/default future,
@@ -96,25 +97,34 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
   detector changes. A stop-hook capture from before it that no longer reads as
   feedback is left out of the request and of local delivery. Later captures met
   today's rules as they were made, and explicit captures, imports and ratified
-  records never met the detector, so none of those are judged. The record stays
-  in the store, and session start and a deterministic fallback can still deliver
-  it. Reading stops at 8,000 characters. The check gets a third of
-  `timeout_seconds`: records it has not reached by then are not sent that turn,
-  and if none were reached the turn falls back with reason `timeout`.
+  records never met the detector, so none of those are judged. Neither is a
+  capture you have since added a reason to or reinforced, which counts as explicit.
+  The record stays in the store, and session start and a deterministic fallback
+  can still deliver it. Reading stops at 8,000 characters. The check gets a third
+  of the time left when it starts: records it has not read by then are not sent
+  that turn, and records it does not apply to still are. If that leaves nothing to
+  send, the turn falls back with reason `timeout`. If everything was read and is
+  stale, the turn is `no_picks` with no request and no fallback, and local records
+  are still delivered.
 - `selector.jev.standing_rules`: `{"enabled": false, "score_floor": 0.25,
   "rare_word_share": 0.15, "slots": 2, "keep": 30}`. A standing rule is a record
-  with a sentence that opens with "from now on", "going forward", "from here on",
-  "always", "never" or "whenever", or ends with one of the first three, inside
-  the first 400 characters. When enabled, the newest `keep` (1–150, below
-  `prefilter_keep`) rules are always sent, in place of the weakest other
-  candidates, unless `stale_before` leaves them out. A rule then takes one of
+  with a sentence that reads as feedback and opens, after any `-` or `*` bullet,
+  with "from now on", "going forward", "from here on", "always", "never" or
+  "whenever", or ends with one of the first three, inside the first 400
+  characters. A sentence right after a removed quote or behind a context chip is
+  not recognized, because the stored text no longer shows that it opens a
+  sentence. When enabled, the newest `keep` (1–150, below `prefilter_keep`) rules
+  are always sent, in place of the weakest other candidates, unless `stale_before`
+  leaves them out or the search for them runs out of time, which is a third of the
+  time left when it starts. A rule then takes one of
   `slots` (1–5) reserved places ahead of the other picks, even below
   `score_floor`, if Jev scores it at or above this `score_floor` and its rule
-  sentence shares a word with the prompt that at most `rare_word_share` of the
-  records use, or that only the rule uses. Plural endings are folded for that
-  check only. A rule without a reserved place is an ordinary candidate. Rules
-  delivered this way carry `"reserved": true` on their line. This can reserve a
-  rule on a prompt it does not apply to, because neither signal is exact.
+  sentence shares a word with the prompt, not the reply excerpt, that at most
+  `rare_word_share` of the records use, or that only the rule uses. A trailing s
+  is folded for that check only. Copies of one rule count once and take one place.
+  A rule without a reserved place is an ordinary candidate. Rules delivered this
+  way carry `"reserved": true` on their line. This can reserve a rule on a prompt
+  it does not apply to, because neither signal is exact.
 - `selector.jev.log_decisions`: default `true`; see the decision log below.
 
 To use OpenRouter's route instead, change only configuration:
@@ -160,8 +170,8 @@ Selection semantics:
   compacted for its size, only when the budget has no room for it. A pick larger
   than the whole budget counts as delivered from its compact line and is not
   repeated.
-- If Jev answers but nothing clears `score_floor`, no pick is injected and
-  `selector_outcome` is `no_picks`. If Jev picked records and none could be
+- If Jev answers but nothing clears `score_floor` or earns a reserved place, no
+  pick is injected and `selector_outcome` is `no_picks`. If Jev picked records and none could be
   delivered even compact, `selector_outcome` is `oversized_picks`, or
   `crowded_picks` when a pick would have fit without the local records. Those
   picks stay undelivered and can be chosen again on a later turn.

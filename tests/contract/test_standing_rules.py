@@ -14,8 +14,8 @@ from imprint.retrieve import select_prompt_payload
 from imprint.retrieve import jev
 from imprint.retrieve.engine import render_compact
 from imprint.retrieve.jev import (
-    QUESTION_PREFIX, JevSelector, JevSettings, SelectionResult, decision_entry, prefilter, rare_matches,
-    reads_as_feedback, rule_sentences, stale_filter,
+    QUESTION_PREFIX, JevSelector, JevSettings, SelectionResult, StaleCheck, decision_entry, newest_rules,
+    prefilter, rare_matches, reads_as_feedback, rule_sentences,
 )
 from imprint.retrieve.models import RetrievalRecord
 
@@ -117,6 +117,10 @@ FILLER = tuple(record(f"filler{index}", f"No, that is wrong, the {index} banner 
     "Thanks, from now on keep the changelog short.",
     "Keep the changelog short from now on.",
     "Use plain text going forward.",
+    "Never use tabs.",
+    "Always use uv.",
+    "- Always use tabs in the makefile for this project.",
+    "* Never include the client name in a commit.",
 ])
 def test_a_sentence_built_as_a_rule_is_a_standing_rule(statement):
     assert rule_sentences(record("r", statement))
@@ -127,6 +131,10 @@ def test_a_sentence_built_as_a_rule_is_a_standing_rule(statement):
     "No, that is never going to work on this page.",
     CORRECTION,
     "",
+    "Never mind, use the old banner instead.",
+    "Always been like that, use the old banner instead.",
+    "Never seen this before, but the banner is wrong here, that is wrong.",
+    "Always returns null when the cache is empty, that is wrong.",
 ])
 def test_a_mention_of_the_word_is_not_a_standing_rule(statement):
     assert rule_sentences(record("r", statement)) == []
@@ -135,6 +143,15 @@ def test_a_mention_of_the_word_is_not_a_standing_rule(statement):
 def test_a_rule_past_what_jev_can_read_is_not_a_standing_rule():
     words = "This opens with a long account of the release and nothing else. " * 8
     assert rule_sentences(record("r", words + RULE)) == []
+
+
+@pytest.mark.parametrize("opening", [
+    "Here is the spec\n---\nIntro line here.\nAlways use tabs in generated files.\n",
+    'He wrote "first line here.\nNever use the billing service on a Friday.\n',
+])
+def test_a_sentence_in_a_block_that_ends_past_the_read_is_not_a_rule(opening):
+    close = "---\nthanks for reading" if "---" in opening else 'end of the quote". That is wrong, use the blue one.'
+    assert rule_sentences(record("r", opening + "plain text\n" * 300 + close)) == []
 
 
 def test_a_statement_that_is_not_a_string_is_not_a_rule():
@@ -152,25 +169,26 @@ def test_a_reply_correction_is_not_stale():
 
 
 def test_only_captured_records_can_be_stale():
-    assert reads_as_feedback(record("r", STALE, authority_tier="ratified_knowledge")) is True
-    assert reads_as_feedback(record("r", "   ")) is True
+    check = StaleCheck.since(RULES_CHANGED)
+    assert check.keeps(record("r", STALE, authority_tier="ratified_knowledge")) is True
+    assert check.keeps(record("r", "   ")) is True
 
 
 @pytest.mark.parametrize("mechanism", ["explicit_cli", "approved_import", None])
 def test_a_record_the_detector_never_saw_is_not_stale(mechanism):
-    assert reads_as_feedback(record("r", STALE, capture_mechanism=mechanism)) is True
+    assert StaleCheck.since(RULES_CHANGED).keeps(record("r", STALE, capture_mechanism=mechanism)) is True
 
 
 def test_only_a_capture_from_before_the_rules_changed_can_be_stale():
-    fresh = stale_filter(RULES_CHANGED)
-    assert fresh(record("old", STALE)) is False
-    assert fresh(record("new", STALE, valid_from="2026-06-01T00:00:00Z")) is True
-    assert fresh(record("offset", STALE, valid_from="2026-06-01T02:00:00+09:00")) is False
+    check = StaleCheck.since(RULES_CHANGED)
+    assert check.keeps(record("old", STALE)) is False
+    assert check.keeps(record("new", STALE, valid_from="2026-06-01T00:00:00Z")) is True
+    assert check.keeps(record("offset", STALE, valid_from="2026-06-01T02:00:00+09:00")) is False
 
 
 def test_a_correction_after_a_removed_quote_survives_the_check():
     stored = "Here is what you wrote:\n\nNo, keep the old one."
-    assert stale_filter(RULES_CHANGED)(record("r", stored, valid_from="2026-07-01T00:00:00Z")) is True
+    assert StaleCheck.since(RULES_CHANGED).keeps(record("r", stored, valid_from="2026-07-01T00:00:00Z")) is True
 
 
 def test_rare_matches_folds_plurals_and_reads_only_the_rule_sentence():
@@ -199,6 +217,12 @@ def test_a_word_only_the_rule_uses_is_rare_in_a_small_pool(size):
     assert rare_matches("kumquat please", [rule, *others], frozenset({rule.record_id}), 0.15) == {rule.record_id}
 
 
+def test_saying_a_rule_again_does_not_cost_it_its_rare_word():
+    copies = [record(f"c{index}", "Always run the invoice reconciler before closing the month.") for index in range(3)]
+    other = [record(f"o{index}", f"No, that is wrong, the {index} banner stays.") for index in range(3)]
+    assert rare_matches("run the reconciler now", [*copies, *other], frozenset({copies[0].record_id}), 0.15) == {copies[0].record_id}
+
+
 def test_prefilter_keeps_a_rule_that_shares_no_word_with_the_turn():
     rule = record("rule", OFF_TOPIC_RULE)
     matches = [record(f"m{index}", f"release note {index}") for index in range(5)]
@@ -218,16 +242,6 @@ def test_prefilter_asks_only_about_records_it_would_keep():
     kept = prefilter("release note", entries, keep=3, accept=lambda item: asked.append(item.record_id) or True)
     assert len(kept) == 3
     assert len(asked) == 3
-
-
-def test_prefilter_stops_asking_when_told_and_drops_what_it_did_not_reach():
-    entries = [record(f"m{index}", f"release note {index}") for index in range(5)]
-    asked: list[str] = []
-    kept = prefilter(
-        "release note", entries, keep=5, accept=lambda item: asked.append(item.record_id) or True,
-        stop=lambda: len(asked) >= 2,
-    )
-    assert len(kept) == 2
 
 
 def test_a_full_prefilter_cannot_be_overrun_by_rules():
@@ -282,6 +296,26 @@ def test_reserved_names_only_rules_that_stayed_in_the_picks():
     assert result.reserved == {rules[1].record_id}
 
 
+def test_copies_of_a_rule_take_one_place_and_another_rule_gets_the_second():
+    repeated = "Always run the reconciler on each invoice batch first."
+    different = "Never send an invoice batch without the purchase order number."
+    entries = [record("r1", repeated), record("r2", repeated), record("o", different), *FILLER]
+    rules = frozenset({"urn:synthetic:r1", "urn:synthetic:r2", "urn:synthetic:o"})
+    result = JevSelector(settings(score_floor=0.55), transport=scored({repeated: 0.5, different: 0.4})).select(
+        "send the invoice batch", entries, standing=rules,
+    )
+    assert [item.record_id for item, _ in result.picks] == ["urn:synthetic:r1", "urn:synthetic:o"]
+
+
+def test_only_the_prompt_earns_a_reserved_place_when_the_turn_carries_more():
+    rule = record("rule", "Always reply in plain text.")
+    state = "deploy the staging cluster\n\nPrevious assistant reply:\nThe migration finished."
+    selector = JevSelector(settings(), transport=scored({rule.judgment_statement: 0.3}))
+    standing = frozenset({rule.record_id})
+    assert selector.select(state, [rule, *FILLER], standing=standing).reserved == {rule.record_id}
+    assert selector.select(state, [rule, *FILLER], standing=standing, prompt="deploy the staging cluster").reserved == frozenset()
+
+
 def test_with_no_rules_picks_are_plain_score_order():
     first, second = record("a", RULE), record("b", CORRECTION)
     result = JevSelector(settings(), transport=scored({RULE: 0.5, CORRECTION: 0.9})).select("x y", [first, second])
@@ -297,7 +331,7 @@ def test_all_stale_is_no_picks_without_a_request():
         raise AssertionError("no request expected")
 
     result = JevSelector(settings(), transport=transport).select(
-        "invoice totals", [record("stale", STALE)], accept=reads_as_feedback,
+        "invoice totals", [record("stale", STALE)], stale=StaleCheck.since(RULES_CHANGED),
     )
     assert (result.outcome, result.withheld, calls) == ("no_picks", 1, [])
 
@@ -317,46 +351,90 @@ class Ticks:
         return self.now
 
 
-def test_the_stale_check_stops_at_its_share_and_the_request_carries_what_it_judged():
-    entries = [record(f"m{index}", f"release note {index}") for index in range(9)]
-    clock = Ticks()
-    sent = []
+class Reading:
+    """A stale check that takes a set time per record, on a clock that moves only then."""
 
-    def accept(item):
-        clock.now += 0.5
-        return True
+    def __init__(self, clock, each, monkeypatch, fresh=True):
+        self.clock, self.each, self.fresh = clock, each, fresh
+        self.read = 0
+        monkeypatch.setattr(jev, "reads_as_feedback", self)
 
+    def __call__(self, item):
+        self.read += 1
+        self.clock.now += self.each
+        return self.fresh
+
+
+def sent_counts(calls):
     def transport(endpoint, body, headers, timeout):
-        sent.append(len(json.loads(body)["questions"]))
+        calls.append(len(json.loads(body)["questions"]))
         return scored({})(endpoint, body, headers, timeout)
-
-    result = JevSelector(settings(timeout_seconds=3.0), transport=transport, clock=clock).select(
-        "release note", entries, accept=accept,
-    )
-    assert sent == [2]
-    assert result.outcome == "no_picks"
-    assert result.scan_cut is True
+    return transport
 
 
-def test_a_stale_check_that_reaches_nothing_in_time_is_a_timeout():
+def test_the_stale_check_stops_at_its_share_and_the_request_carries_what_it_read(monkeypatch):
     clock = Ticks()
+    reading = Reading(clock, 0.5, monkeypatch)
+    calls: list[int] = []
+    result = JevSelector(settings(timeout_seconds=3.0), transport=sent_counts(calls), clock=clock).select(
+        "release note", [record(f"m{index}", f"release note {index}") for index in range(9)],
+        stale=StaleCheck.since(RULES_CHANGED),
+    )
+    assert (reading.read, calls, result.outcome, result.scan_cut) == (2, [2], "no_picks", True)
 
-    def accept(item):
-        clock.now += 2.0
-        return False
 
+def test_records_the_check_does_not_apply_to_are_sent_after_it_runs_out(monkeypatch):
+    clock = Ticks()
+    Reading(clock, 2.0, monkeypatch, fresh=False)
+    old = [record(f"s{index}", f"release note {index} {STALE}") for index in range(5)]
+    new = [record(f"n{index}", f"zzz {index}", valid_from="2026-07-01T00:00:00Z") for index in range(3)]
+    calls: list[int] = []
+    result = JevSelector(settings(timeout_seconds=3.0), transport=sent_counts(calls), clock=clock).select(
+        "release note", [*old, *new], stale=StaleCheck.since(RULES_CHANGED),
+    )
+    assert calls == [3]
+    assert (result.withheld, result.scan_cut) == (1, True)
+
+
+def test_a_stale_check_that_leaves_nothing_to_send_is_a_timeout(monkeypatch):
+    clock = Ticks()
+    Reading(clock, 2.0, monkeypatch, fresh=False)
     result = JevSelector(settings(timeout_seconds=3.0), transport=scored({}), clock=clock).select(
-        "invoice totals", [record(f"s{index}", STALE) for index in range(3)], accept=accept,
+        "invoice totals", [record(f"s{index}", STALE) for index in range(3)], stale=StaleCheck.since(RULES_CHANGED),
     )
     assert (result.outcome, result.fallback_reason, result.withheld, result.scan_cut) == ("fallback", "timeout", 1, True)
 
 
-def test_an_expired_deadline_never_starts_the_stale_check():
-    asked = []
-    result = JevSelector(settings(timeout_seconds=-1.0), transport=scored({})).select(
-        "invoice totals", [record("s", STALE)], accept=lambda item: asked.append(item) or False,
+def test_the_stale_check_gets_its_share_of_the_time_left_when_it_starts(monkeypatch):
+    clock = Ticks()
+    reading = Reading(clock, 0.1, monkeypatch)
+    entries = [record(f"m{index}", f"release note {index}") for index in range(40)]
+    real_prefilter = jev.prefilter
+
+    def slow_ranking(*args, **kwargs):
+        clock.now += 1.5
+        return real_prefilter(*args, **kwargs)
+
+    monkeypatch.setattr(jev, "prefilter", slow_ranking)
+    JevSelector(settings(timeout_seconds=3.0), transport=scored({}), clock=clock).select(
+        "release note", entries, stale=StaleCheck.since(RULES_CHANGED),
     )
-    assert (result.fallback_reason, asked) == ("timeout", [])
+    assert reading.read == 5
+
+
+def test_an_expired_deadline_reads_nothing(monkeypatch):
+    clock = Ticks()
+    reading = Reading(clock, 0.1, monkeypatch)
+    result = JevSelector(settings(timeout_seconds=-1.0), transport=scored({}), clock=clock).select(
+        "invoice totals", [record("s", STALE)], stale=StaleCheck.since(RULES_CHANGED),
+    )
+    assert (result.fallback_reason, reading.read) == ("timeout", 0)
+
+
+def test_the_search_for_rules_stops_at_keep_and_when_told():
+    rules = [record(f"r{index}", f"Never rename folder {index}.", valid_from=f"2026-01-{index + 1:02d}T00:00:00Z") for index in range(4)]
+    assert newest_rules(rules, 2, None, lambda: False) == {rules[3].record_id, rules[2].record_id}
+    assert newest_rules(rules, 2, None, lambda: True) == frozenset()
 
 
 def test_with_no_stale_check_the_clock_is_not_read_per_record():
@@ -431,10 +509,8 @@ def test_a_stale_record_is_not_delivered_locally_either(tmp_path, records, monke
 
 
 def test_a_rule_that_reads_as_stale_is_not_sent_or_reserved(tmp_path, records, monkeypatch):
-    block = "Here is the spec\n---\nIntro line here.\nAlways use tabs in generated files.\n" + "plain text\n" * 90
-    statement = block + "---\nthanks for reading"
-    records.append(record("rule", statement))
-    assert rule_sentences(records[0]) and not reads_as_feedback(records[0])
+    records.append(record("rule", RULE))
+    monkeypatch.setattr(jev, "reads_as_feedback", lambda item: False)
     asked = []
 
     def transport(endpoint, body, headers, timeout):
@@ -442,7 +518,7 @@ def test_a_rule_that_reads_as_stale_is_not_sent_or_reserved(tmp_path, records, m
         return scored({})(endpoint, body, headers, timeout)
 
     monkeypatch.setattr(jev, "http_post", transport)
-    decision = select(tmp_path, state="tabs in generated files", stale_before=RULES_CHANGED, standing_rules=ON)
+    decision = select(tmp_path, stale_before=RULES_CHANGED, standing_rules=ON)
     assert asked == []
     assert decision.response["selector_stages"]["stale_withheld"] == 1
     assert decision.response["selected_ids"] == []
@@ -535,6 +611,21 @@ def test_a_keep_at_or_above_prefilter_keep_is_fine_while_rules_are_off(tmp_path)
         "node_id": "primary", "selector": selector_config(prefilter_keep=5),
     }))
     assert load_config(path)["selector"]["jev"]["prefilter_keep"] == 5
+
+
+def test_a_fallback_after_jev_answered_reports_no_reserved_picks(tmp_path, records, monkeypatch):
+    records.append(record("rule", RULE))
+    monkeypatch.setattr(jev, "http_post", scored({RULE: 0.3}))
+    lines = []
+    monkeypatch.setattr(jev, "log_decision", lambda root, entry: lines.append(entry))
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(retrieval.DeliveryReceipts, "prepare_delivery", broken)
+    decision = select(tmp_path, score_floor=0.4, standing_rules=ON)
+    assert decision.fallback_reason == "exception"
+    assert lines[-1]["picks"] == [] and "reserved_picks" not in lines[-1]
 
 
 def test_the_new_settings_default_off():

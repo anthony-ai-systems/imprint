@@ -43,6 +43,11 @@ _NOT_AN_INSTRUCTION = (
     r"|may|might|could|all|some|most|many|each|every|both|people|everyone|everybody|nobody"
     r"|nothing|everything|something|anything|someone|anyone)\b)" + _NOT_PLAIN_VERB
 )
+# "Always" or "never" that sets a rule. The words ruled out here remark on something.
+ALWAYS_OR_NEVER = (
+    r"(?:always|never)\s+(?!(?:mind|seen|heard|been|had|have|did|was|were|happened|thought|knew|got"
+    r"|worked|the|a|an|in|on|at|before|again|ever|really|happy|sure)\b)" + _NOT_PLAIN_VERB + r"[a-z]+"
+)
 _KEEP = r"keep(?!\s+(?:an eye|going|track|working|at it|up)\b)"
 _RULES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = (
     ("standard", "correct", "forward", re.compile(
@@ -64,9 +69,8 @@ _RULES: tuple[tuple[str, str, str, re.Pattern[str]], ...] = (
         re.I,
     )),
     ("standard", "correct", "standard", re.compile(
-        _SENTENCE_OPENS + r"(?:always|never)\s+(?!(?:mind|seen|heard|been|had|have|did|was|were|happened|thought|knew|got"
-        r"|worked|the|a|an|in|on|at|before|again|ever|really|happy|sure)\b)" + _NOT_PLAIN_VERB + r"[a-z]+"
-        r"|\b(?:(?:always|never)\s+(?:use|include|remove|change|keep|do|say|write)"
+        _SENTENCE_OPENS + ALWAYS_OR_NEVER
+        + r"|\b(?:(?:always|never)\s+(?:use|include|remove|change|keep|do|say|write)"
         r"|(?:we|you)\s+must(?!\s+(?:be|have)\b)"
         r"|(?:it|this)\s+must(?!\s+have\b)(?!\s+be\s+(?:(?:a|an|the|some)\s+)?(?:bug|issue|problem|typo|glitch|fluke|race|mistake|something|because|that|why|related|caused)\b)"
         r"|(?<!\bif )(?<!\bwhether )(?<!\bwhen )(?:(?:it|this|that) needs to|(?:these|those|they|you) need to|(?:the|your|each|every) [\w-]+ needs? to)\b(?![^.!?\n]{0,200}\?)"
@@ -375,7 +379,7 @@ def _summary_view(text: str) -> tuple[str, int]:
     return spoken, len(masked) - len(spoken)
 
 
-def feedback_sentences(text: str) -> list[str]:
+def feedback_sentences(text: str, *, within: int | None = None, any_length: bool = False) -> list[str]:
     """Return every sentence of the operator's that reads as feedback, in order.
 
     Stored judgments are whole messages, and a later sentence can overrule an
@@ -383,11 +387,17 @@ def feedback_sentences(text: str) -> list[str]:
     the same length and each result is sliced from ``text``, so it is always an
     exact part of it. A match that runs past its sentence is passed over. Short
     sentences count only beside one that can stand alone: "That is wrong." says
-    a lot after what it rejects and nothing as the whole of a summary.
+    a lot after what it rejects and nothing as the whole of a summary. A caller
+    that reads sentences alone can lift that with ``any_length``.
+
+    ``within`` reads only that many characters of them, masked as they are in the
+    whole text, so a quotation that runs past the limit is still a quotation.
 
     This chooses from a record already captured, so it is wider than detection.
     """
     spoken, shift = _summary_view(text)
+    if within is not None:
+        spoken = spoken[:within]
     spans = _sentence_spans(spoken)
     starts = [start for start, _ in spans]
     matched = set()
@@ -398,7 +408,7 @@ def feedback_sentences(text: str) -> list[str]:
             if match.end() <= span[1]:
                 matched.add(span)
     sentences = [text[shift + start: shift + end].strip() for start, end in sorted(matched)]
-    return sentences if any(len(sentence) >= _MIN_SENTENCE_CHARS for sentence in sentences) else []
+    return sentences if any_length or any(len(sentence) >= _MIN_SENTENCE_CHARS for sentence in sentences) else []
 
 
 def closing_sentence(text: str) -> str | None:

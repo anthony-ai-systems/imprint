@@ -2,14 +2,17 @@
 
 ## Unreleased
 
-- Add `selector.jev.standing_rules`, off by default. A rule set with "from now
-  on", "always", "never" or similar is always sent to Jev, and takes a reserved
-  place ahead of other picks when Jev scores it at 0.25 or more and it shares a
-  rare word with the prompt. Without this, a correction reached a later session
-  only while it was the newest record.
+- Add `selector.jev.standing_rules`, off by default. The newest rules set with
+  "from now on", "always", "never" or similar are sent to Jev on every turn, and
+  one takes a reserved place ahead of other picks when Jev scores it at 0.25 or
+  more and it shares a rare word with the prompt. Without this, a correction
+  reached a later session only while it was the newest record.
 - Add `selector.jev.stale_before`, off by default, which keeps stop-hook captures
   from before that time out of the request and local delivery if they no longer
-  read as feedback. Later captures are not judged. No record is changed.
+  read as feedback. Later captures are not judged. No record is changed. Both
+  settings add the `rule_sentences` value of `text_basis`, `selector.reserved`,
+  the `reserved` and `stale_withheld` stages, and the decision log's
+  `reserved_picks`, `stale_withheld` and `stale_scan_cut`.
 - Read each statement once per turn, whatever the size of the pool.
 - Deliver a Jev pick that cannot share the budget as a compact line: the
   record's text when it fits 400 bytes, otherwise every sentence that reads as

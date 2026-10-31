@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .engine import RetrievalEngine, _parse_time, _render, render_compact
+from .engine import RetrievalEngine, _render, render_compact
 from .models import (
     BUSINESS_DECLARED_PARTITION,
     BUSINESS_OBSERVED_PARTITION,
@@ -309,6 +309,7 @@ def select_prompt_payload(
     store, *, root: Path, session_id: str, state: str, explicit_domain: str | None,
     budget: int, selector: Mapping[str, Any], mode: str, refresh: bool = False,
     deadline: float | None = None, local_sections: frozenset[str] = frozenset({"domain"}),
+    prompt: str | None = None,
 ) -> SelectorDecision:
     """Run the optional relevance selector for one turn. Never raises.
 
@@ -326,14 +327,15 @@ def select_prompt_payload(
 
     ``deadline`` (a ``time.monotonic()`` value) caps the configured
     ``timeout_seconds`` for callers with a hard wall-clock limit of their own.
+    ``prompt`` is the operator's words when ``state`` carries more than that, as
+    only they can earn a standing rule its reserved place.
     """
     shadow = mode == "shadow"
     failed_method = "shadow" if shadow else "deterministic_fallback"
     try:
         from .jev import (
-            STATE_LIMIT, JevSelector, JevSettings, SelectionResult, decision_entry,
-            egress_text, forget_statements, log_decision, record_transfer, rule_sentences,
-            stale_filter,
+            SCAN_SHARE, STATE_LIMIT, JevSelector, JevSettings, SelectionResult, StaleCheck, decision_entry,
+            egress_text, forget_statements, log_decision, newest_rules, record_transfer, rule_sentences,
         )
     except Exception:
         return SelectorDecision(failed_method, "fallback", "exception")
@@ -411,7 +413,7 @@ def select_prompt_payload(
         candidates = engine.eligible_candidates(
             snapshot_id=context.snapshot_id, selected_domain=explicit_domain,
         )
-        accept = stale_filter(jev["stale_before"]) if jev["stale_before"] else None
+        stale = StaleCheck.since(jev["stale_before"]) if jev["stale_before"] else None
         sendable = {
             item.record_id for item in candidates
             if item.ontology_partition == JUDGMENT_PARTITION
@@ -420,20 +422,21 @@ def select_prompt_payload(
             and egress_text(item) is not None
         }
         pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
-        standing: frozenset[str] = frozenset()
-        if jev["standing_rules"]["enabled"]:
-            rules = sorted(
-                (item for item in pool if rule_sentences(item) and (accept is None or accept(item))),
-                key=lambda item: _parse_time(item.valid_from), reverse=True,
-            )
-            standing = frozenset(item.record_id for item in rules[: jev["standing_rules"]["keep"]])
         if deadline is not None:
             settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
+        standing: frozenset[str] = frozenset()
+        if jev["standing_rules"]["enabled"]:
+            begun = time.monotonic()
+            ends = begun + settings.timeout_seconds * SCAN_SHARE
+            standing = newest_rules(pool, jev["standing_rules"]["keep"], stale, lambda: time.monotonic() >= ends)
+            settings = replace(settings, timeout_seconds=settings.timeout_seconds - (time.monotonic() - begun))
         if sendable and not pool:
             # Everything relevant is already in this session's context.
             result = SelectionResult(outcome="no_picks")
         else:
-            result = JevSelector(settings).select(state, pool, standing=standing, accept=accept)
+            result = JevSelector(settings).select(
+                state, pool, standing=standing, stale=stale, prompt=None if prompt is None else prompt[:STATE_LIMIT],
+            )
         if result.outcome == "fallback":
             record(result)
             return SelectorDecision(
@@ -450,7 +453,7 @@ def select_prompt_payload(
             if item.section in local_sections and item.record_id not in sendable
             and item.record_id not in delivered_ids
         ]
-        local_records = [item for item in never_sent if accept is None or accept(item)]
+        local_records = [item for item in never_sent if stale is None or stale.keeps(item)]
         result = replace(result, withheld=result.withheld + len(never_sent) - len(local_records))
         local = RetrievalEngine(_FixedSource(local_records), engine.config).retrieve(
             snapshot_id=context.snapshot_id, query=state, selected_domain=explicit_domain,
@@ -480,7 +483,7 @@ def select_prompt_payload(
         # A failure after Jev answered is still one fallback line: the turn
         # fell back, even though the request itself succeeded.
         record(SelectionResult(fallback_reason="exception") if result is None else replace(
-            result, picks=(), outcome="fallback", fallback_reason="exception",
+            result, picks=(), reserved=frozenset(), outcome="fallback", fallback_reason="exception",
         ))
         return SelectorDecision(failed_method, "fallback", "exception", context=context, exclude_ids=already_sent())
 

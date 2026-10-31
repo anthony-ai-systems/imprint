@@ -36,6 +36,7 @@ from urllib.parse import urlsplit
 
 from imprint import __version__
 from imprint.capture.detector import (
+    ALWAYS_OR_NEVER,
     detect_explicit_feedback,
     feedback_sentences,
     operator_words,
@@ -72,7 +73,8 @@ _STANDING = re.compile(r"\b(?:from now on|going forward|from here on|always|neve
 # A rule is set by how a sentence is built, not by the word: "Always use X" sets
 # one, and "we can always change it" sets nothing.
 _RULE_SENTENCE = re.compile(
-    r"\A(?:(?:thanks|also|and|great|ok|okay|so)[,!.]?\s+)?(?:from now on|going forward|from here on|always|never|whenever)\b"
+    r"\A(?:[-*\u2022]\s+)?(?:(?:thanks|also|and|great|ok|okay|so)[,!.]?\s+)?"
+    r"(?:(?:from now on|going forward|from here on|whenever)\b|" + ALWAYS_OR_NEVER + r")"
     r"|\b(?:from now on|going forward|from here on)[.!]*\Z",
     re.I,
 )
@@ -80,9 +82,9 @@ _RULE_SENTENCE = re.compile(
 _RULE_WORDS = frozenset({"always", "alway", "never", "whenever", "from", "now", "going", "forward", "here"})
 _STANDING_READ_CHARS = 1000
 _FEEDBACK_READ_CHARS = 8000
-# The stale check shares a turn's time with the request, so it stops at this part
-# of the timeout and the request carries what was judged by then.
-_STALE_SCAN_SHARE = 1 / 3
+# Reading records for rules and for staleness shares a turn's time with the request,
+# so each stops at this part of the time left when it starts.
+SCAN_SHARE = 1 / 3
 # The only route where a record had to read as feedback to get in.
 _DETECTED_MECHANISM = "claude_code_stop_hook"
 _KEY = re.compile(r"[\x21-\x7e]{1,4096}")
@@ -191,35 +193,45 @@ def egress_text(record: RetrievalRecord) -> str | None:
 
 
 def reads_as_feedback(record: RetrievalRecord) -> bool:
-    """Whether a record the detector let in still reads as feedback under today's rules.
+    """Whether a captured message still reads as feedback under today's rules.
 
-    Older builds kept messages the rules have since stopped matching. The record
-    stays in the store. Only stop-hook captures are judged: ratified knowledge, an
-    explicit capture and an import never met the detector, and a record with no
-    words has nothing to judge. Each judged record was a reply, so the rules for
-    replies apply. A hook runs this per prompt, so it reads as far as moves the
-    answer for almost every record.
+    Each record judged was a reply, so the rules for replies apply. A record with
+    no words has nothing to judge. A hook runs this per prompt, so it reads as far
+    as moves the answer for almost every record.
     """
-    if record.authority_tier != "captured_judgment" or record.capture_mechanism != _DETECTED_MECHANISM:
-        return True
     words = _words(record)[:_FEEDBACK_READ_CHARS]
     if not words.strip():
         return True
     return detect_explicit_feedback(words, prior_assistant_output="-").is_feedback or bool(feedback_sentences(words))
 
 
-def stale_filter(before: str) -> Callable[[RetrievalRecord], bool]:
-    """Return the check that keeps a record unless it is stale, given when the rules last changed.
+@dataclass(frozen=True)
+class StaleCheck:
+    """Which records must still read as feedback, given when the rules last changed.
 
-    A capture since then met today's rules as it was made. What is stored has lost
-    the quote those rules read around, so judging it again can only be wrong.
+    Older builds kept messages the rules have since stopped matching. The record
+    stays in the store. Only stop-hook captures are judged: ratified knowledge, an
+    explicit capture and an import never met the detector. A capture since the
+    change met today's rules as it was made, and what is stored has lost the quote
+    those rules read around, so judging it again could only be wrong.
     """
-    changed = _parse_time(before)
 
-    def fresh(record: RetrievalRecord) -> bool:
-        return _parse_time(record.valid_from) >= changed or reads_as_feedback(record)
+    changed: datetime
 
-    return fresh
+    @classmethod
+    def since(cls, before: str) -> "StaleCheck":
+        return cls(_parse_time(before))
+
+    def applies_to(self, record: RetrievalRecord) -> bool:
+        """Whether a record has to be read at all, which takes no reading to answer."""
+        return (
+            record.authority_tier == "captured_judgment"
+            and record.capture_mechanism == _DETECTED_MECHANISM
+            and _parse_time(record.valid_from) < self.changed
+        )
+
+    def keeps(self, record: RetrievalRecord) -> bool:
+        return not self.applies_to(record) or reads_as_feedback(record)
 
 
 def rule_sentences(record: RetrievalRecord) -> list[str]:
@@ -227,11 +239,23 @@ def rule_sentences(record: RetrievalRecord) -> list[str]:
     words = _words(record)
     if not _STANDING.search(words, 0, STATEMENT_LIMIT):
         return []
-    words = words[:_STANDING_READ_CHARS]
     return [
-        sentence for sentence in feedback_sentences(words)
+        sentence for sentence in feedback_sentences(words, within=_STANDING_READ_CHARS, any_length=True)
         if _RULE_SENTENCE.search(sentence) and words.find(sentence) < STATEMENT_LIMIT
     ]
+
+
+def newest_rules(
+    entries: Sequence[RetrievalRecord], keep: int, stale: StaleCheck | None, stop: Callable[[], bool],
+) -> frozenset[str]:
+    """Return the newest ``keep`` records that set a rule, as far as ``stop`` allows."""
+    found: list[str] = []
+    for item in sorted(entries, key=lambda item: _parse_time(item.valid_from), reverse=True):
+        if len(found) >= keep or stop():
+            break
+        if rule_sentences(item) and (stale is None or stale.keeps(item)):
+            found.append(item.record_id)
+    return frozenset(found)
 
 
 def _folded(value: str) -> set[str]:
@@ -248,8 +272,9 @@ def rare_matches(
     """
     query = _folded(turn_text) - _RULE_WORDS
     counts: dict[str, int] = {}
-    for item in entries:
-        for word in _folded(egress_text(item) or "") & query:
+    # Saying a rule again must not cost it its rare word.
+    for text in {egress_text(item) or "" for item in entries}:
+        for word in _folded(text) & query:
             counts[word] = counts.get(word, 0) + 1
     # A word only the rule itself uses is rare in a pool of any size.
     limit = max(1.0, share * len(entries))
@@ -268,15 +293,13 @@ def prefilter(
     turn_text: str, entries: Sequence[RetrievalRecord], keep: int = 150,
     *, standing: frozenset[str] = frozenset(),
     accept: Callable[[RetrievalRecord], bool] | None = None,
-    stop: Callable[[], bool] | None = None,
 ) -> list[RetrievalRecord]:
     """Keep the IDF-weighted lexical best ``keep`` candidates before egress.
 
     Ties (including turns with no lexical overlap) prefer newer records, then
     record id bytes, so the kept set is deterministic. ``standing`` records are
     kept whatever their overlap, in place of the weakest. ``accept`` can pass over
-    a record, and is asked only of those that would otherwise be kept. ``stop``
-    ends that asking early, and the records not reached are not kept.
+    a record, and is asked only of those that would otherwise be kept.
     """
     if keep <= 0:
         return []
@@ -298,11 +321,7 @@ def prefilter(
     for *_, item in ranked:
         if len(others) >= keep - len(rules):
             break
-        if item.record_id in standing:
-            continue
-        if stop is not None and stop():
-            break
-        if accept is None or accept(item):
+        if item.record_id not in standing and (accept is None or accept(item)):
             others.append(item)
     return others + rules
 
@@ -503,20 +522,20 @@ class JevSelector:
 
     def select(
         self, state: str, entries: Sequence[RetrievalRecord], *, standing: frozenset[str] = frozenset(),
-        accept: Callable[[RetrievalRecord], bool] | None = None,
+        stale: StaleCheck | None = None, prompt: str | None = None,
     ) -> SelectionResult:
         """Return picks or a fallback reason. Never raises.
 
         ``timeout_seconds`` is a total wall-clock deadline for key resolution,
         prefiltering, the request, and parsing. The best ``standing`` records at
-        or above their own floor that share a rare word with the turn lead the
-        picks, so the budget reaches them first. ``accept`` keeps a record out of
-        the request, and a record it has not reached in its share of the deadline
-        stays out too.
+        or above their own floor that share a rare word with ``prompt``, or with
+        the turn when it is only the prompt, lead the picks, so the budget reaches
+        them first. ``stale`` keeps records out of the request, and a record it has
+        not read in its share of the deadline stays out too.
         """
         started = self._clock()
         deadline = started + self.settings.timeout_seconds
-        scan_ends = started + self.settings.timeout_seconds * _STALE_SCAN_SHARE
+        scan_ends: float | None = None
         sent = 0
         request_bytes = 0
         request_sent = False
@@ -524,26 +543,28 @@ class JevSelector:
         scan_cut = False
 
         def passed(item: RetrievalRecord) -> bool:
-            nonlocal withheld
-            keep = accept is None or accept(item)
-            withheld += not keep
-            return keep
-
-        def out_of_time() -> bool:
-            nonlocal scan_cut
-            scan_cut = self._clock() >= scan_ends
-            return scan_cut
+            nonlocal scan_ends, scan_cut, withheld
+            if stale is None or not stale.applies_to(item):
+                return True
+            now = self._clock()
+            if scan_ends is None:
+                scan_ends = now + (deadline - now) * SCAN_SHARE
+            if now >= scan_ends:
+                scan_cut = True
+                return False
+            fresh = reads_as_feedback(item)
+            withheld += not fresh
+            return fresh
 
         try:
             try:
                 key = resolve_api_key(self.settings)
             except _KeyUnavailable as exc:
                 return self._result(started, fallback_reason=exc.reason)
+            if self._clock() >= deadline:
+                return self._result(started, fallback_reason="timeout")
             sendable = [item for item in entries if egress_text(item)]
-            candidates = prefilter(
-                state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed,
-                stop=None if accept is None else out_of_time,
-            )
+            candidates = prefilter(state, sendable, self.settings.prefilter_keep, standing=standing, accept=passed)
             if not candidates and scan_cut:
                 return self._result(started, fallback_reason="timeout", withheld=withheld, scan_cut=True)
             if not candidates and withheld:
@@ -588,11 +609,18 @@ class JevSelector:
             if not valid:
                 raise _BadResponse("response carries no valid answer for a sent question")
             scored.sort(key=lambda item: (-item[1], item[0].record_id.encode("utf-8")))
-            matched = rare_matches(state, sendable, standing, self.settings.standing_rare_share) if standing else frozenset()
-            reserved = [
-                pick for pick in scored
-                if pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
-            ][: self.settings.standing_slots]
+            matched = frozenset()
+            if standing:
+                matched = rare_matches(state if prompt is None else prompt, sendable, standing, self.settings.standing_rare_share)
+            # Copies of one rule take one place, or a repeated rule would crowd out another.
+            reserved: list[tuple[RetrievalRecord, float]] = []
+            for pick in scored:
+                if (
+                    pick[0].record_id in matched and pick[1] >= self.settings.standing_floor
+                    and egress_text(pick[0]) not in {egress_text(item[0]) for item in reserved}
+                ):
+                    reserved.append(pick)
+            reserved = reserved[: self.settings.standing_slots]
             held = {pick[0].record_id for pick in reserved}
             picks = tuple((reserved + [
                 pick for pick in scored if pick[1] >= self.settings.score_floor and pick[0].record_id not in held
@@ -841,9 +869,11 @@ __all__ = [
     "JevSelector",
     "JevSettings",
     "QUESTION_PREFIX",
+    "SCAN_SHARE",
     "STATEMENT_LIMIT",
     "STATE_LIMIT",
     "SelectionResult",
+    "StaleCheck",
     "api_key_present",
     "decision_entry",
     "decision_log_summary",
@@ -852,6 +882,7 @@ __all__ = [
     "forget_statements",
     "http_post",
     "log_decision",
+    "newest_rules",
     "prefilter",
     "rare_matches",
     "reads_as_feedback",
@@ -860,6 +891,5 @@ __all__ = [
     "request_body",
     "resolve_api_key",
     "selector_health",
-    "stale_filter",
     "transfer_marker_path",
 ]
