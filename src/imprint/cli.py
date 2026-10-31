@@ -1192,13 +1192,13 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 from .capture.detector import (
                     detect_explicit_feedback,
+                    operator_words,
                     strip_delimited_pastes,
                     strip_embedded_host_content,
                 )
                 from .capture.provenance import HOST_RECORD_BASIS
                 from .capture.t3_origin import (
                     T3_RECORD_UNAVAILABLE_REASON,
-                    operator_words,
                     t3_host_origin,
                 )
                 from .capture.marks import (
@@ -1207,6 +1207,7 @@ def main(argv: list[str] | None = None) -> int:
                     turn_identity,
                 )
                 operator_text = event.get("operator_text") or event.get("last_user_message")
+                spoken_text = operator_text
                 prior_assistant = event.get("prior_assistant_output")
                 case_description = event.get("case_description")
                 contextual_evidence = []
@@ -1259,7 +1260,13 @@ def main(argv: list[str] | None = None) -> int:
                         if attested:
                             extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
                         operator_text = operator_words(operator_text)
-                    operator_text = strip_delimited_pastes(strip_embedded_host_content(operator_text))
+                    # Detection keeps the pastes in place: the line after a quote
+                    # is the operator's, the same line after a bare colon is not.
+                    spoken_text = strip_embedded_host_content(operator_text)
+                    operator_text = strip_delimited_pastes(spoken_text)
+                    if not operator_text:
+                        _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                        return 0
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
                     source_entry_id = native.get("source_entry_id")
@@ -1272,7 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "feedback_text_unavailable"})
                     return 0
                 detection = detect_explicit_feedback(
-                    operator_text,
+                    spoken_text,
                     prior_operator_text=event.get("prior_operator_text"),
                     prior_assistant_output=prior_assistant,
                 )

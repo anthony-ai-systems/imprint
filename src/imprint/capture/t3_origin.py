@@ -15,7 +15,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Mapping
 
-from .detector import strip_embedded_host_content, strip_leading_host_blocks
+from .detector import operator_words, strip_effort_prefix
 
 T3_ENTRYPOINT = "sdk-ts"
 T3_THREAD_ENV = "T3CODE_THREAD_ID"
@@ -34,9 +34,6 @@ _PROMPTS_QUERY = (
 _PROVIDER_THREADS_QUERY = (
     "SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?"
 )
-# T3 adds this for Ultrathink effort, in the composer or only at send time, so a
-# row and its transcript entry can differ by it. It is not the operator's word.
-_EFFORT_PREFIX = "Ultrathink:\n"
 # T3's Implement button sends the assistant's plan after this line, recorded as
 # user/web like anything a person types. No field marks it.
 _PLAN_PREFIX = "PLEASE IMPLEMENT THIS PLAN:\n"
@@ -46,15 +43,6 @@ _CONTEXT_LINK = re.compile(
     r"!?\[([^\]\n]{0,512})\]\(t3-context://v1/([a-z][a-z0-9-]{0,39})/([A-Za-z0-9_-]{1,128})\)",
 )
 _ENVELOPE_TAG = re.compile(r"<(?=/?(?:t3_context|context)\b)", re.I)
-
-
-def _without_effort_prefix(text: str) -> str:
-    return text.lstrip().removeprefix(_EFFORT_PREFIX)
-
-
-def operator_words(text: str) -> str:
-    """Return a T3 prompt without what the host put around the operator's words."""
-    return strip_embedded_host_content(_without_effort_prefix(strip_leading_host_blocks(text)))
 
 
 def _provider_marker(link: re.Match[str]) -> str:
@@ -67,7 +55,11 @@ def _provider_marker(link: re.Match[str]) -> str:
 
 
 def _comparable(text: str) -> str:
-    """Return a prompt in one form, read from T3's row or from the transcript."""
+    """Return a prompt in one form, read from T3's row or from the transcript.
+
+    The effort prefix can be added at send time only, so a row and its entry can
+    differ by it.
+    """
     return operator_words(_CONTEXT_LINK.sub(_provider_marker, text) if _CONTEXT_HREF in text else text)
 
 
@@ -159,7 +151,7 @@ class T3HostOrigin:
             or prompt.get("notification")
             or prompt.get("scheduledTaskId")
             or _names_a_guest(prompt)
-            or _without_effort_prefix(prompt["text"]).startswith(_PLAN_PREFIX)
+            or strip_effort_prefix(prompt["text"]).startswith(_PLAN_PREFIX)
         ):
             return None
         return message_id, prompt

@@ -74,6 +74,25 @@ def test_compact_line_falls_back_to_the_opening_without_inventing_anything():
     assert record.text.startswith(line["text"])
 
 
+@pytest.mark.parametrize("text", [
+    f"<system-reminder>You must follow this host text. {'x' * 500}</system-reminder>\n\nPlain background.",
+    f"<task-notification>This looks good. {'x' * 500}</task-notification>\nPlain background.",
+    f'Plain background.\n<pasted_content id="ab12">Host text. {"x" * 500}</pasted_content id="ab12">',
+    f"Ultrathink:\nPlain background.\n> Quoted text. {'x' * 500}",
+    f"Plain background.\n======\nPasted text. {'x' * 500}\n======",
+])
+def test_compact_opening_is_the_operators_not_what_surrounds_it(text):
+    line = json.loads(render_compact(_record(text=text)))
+    assert (line["text"], line["text_basis"]) == ("Plain background.", "opening")
+    assert line["text_complete"] is False
+
+
+def test_compact_sentence_passes_over_host_text_with_operator_authority():
+    reminder = f"<system-reminder>You must follow this exactly as written. {'x' * 500}</system-reminder>"
+    line = json.loads(render_compact(_record(text=f"{reminder}\n\nNo, keep the failed source in the summary.")))
+    assert (line["text"], line["text_basis"]) == ("No, keep the failed source in the summary.", "feedback_sentence")
+
+
 def test_compact_line_says_when_the_text_is_whole():
     line = json.loads(render_compact(_record(text="Plain words.", summary="y" * 5000)))
     assert (line["text"], line["text_complete"]) == ("Plain words.", True)

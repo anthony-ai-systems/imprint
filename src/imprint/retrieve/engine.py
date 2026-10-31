@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from imprint.capture.detector import feedback_sentence
+from imprint.capture.detector import feedback_sentence, operator_words, strip_delimited_pastes
 
 from .models import (
     CHOSEN_FUTURE_PARTITION,
@@ -169,11 +169,12 @@ def render_compact(record: RetrievalRecord, *, selector: dict[str, object] | Non
 
     This shapes one delivery only; the canonical record is untouched. The text
     is the record's own words, never a rewrite: the sentence that reads as
-    feedback, else the opening, cut at a byte limit. ``detail`` is how to read
-    the whole record locally.
+    feedback, else the opening of what the operator said, cut at a byte limit.
+    ``detail`` is how to read the whole record locally.
     """
     sentence = feedback_sentence(record.text)
-    text = (sentence or record.text).encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
+    words = sentence or strip_delimited_pastes(operator_words(record.text))
+    text = words.encode("utf-8")[:COMPACT_TEXT_BYTES].decode("utf-8", errors="ignore")
     return _line({
         "authority": _authority(record),
         "case_ids": list(record.case_ids),

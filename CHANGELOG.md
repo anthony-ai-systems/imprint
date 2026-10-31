@@ -33,12 +33,25 @@
   and log the skip content-free to `logs/capture-skips.jsonl`. Symlinks and
   non-regular files are still refused.
 - Keep pasted text out of capture: `<pasted_content>` blocks in the form Claude
-  Code writes them, `<t3_context>` blocks, attachment lines, `>` block quotes and
-  text pasted between `====` runs are removed before detection and storage, and
-  the detector ignores quotations inside a sentence.
-- Detect `From now on ...` as a standard, and short `It should be ...` and
-  `Why ... should be ...` replies as corrections after an assistant turn. A bare
-  `need to` no longer counts as a standard; its subject must be the work itself.
+  Code writes them, `<t3_context>` blocks, lines that are one attachment bracket,
+  `>` block quotes and text pasted between `====` runs are removed before
+  detection and storage. A lone `====` run hides nothing unless a colon introduces
+  it. The detector also ignores double, curly and single quotations, code fences
+  and `---` blocks, which stay in stored text.
+- Detect a new standing rule (`From now on use ...`, `Thanks, going forward keep
+  ...`) as a standard, but not a question, a description of what will happen or a
+  line a colon introduces. Detect short replies that name a target (`It should be
+  a table.`) and `Why ... should be ...` statements as corrections after an
+  assistant turn, but not closing remarks (`That should be enough.`) or real
+  questions. `need to` counts only with the work or the assistant as its subject,
+  and not in a question or an `if` clause.
+- Detect a correction that replies to a quoted line, and one that follows T3's
+  `Ultrathink:` prefix.
+- Choose a compact line's sentence by the lesson it states rather than rule order,
+  stop splitting file names and version numbers, and never show text a host
+  prepended as the operator's. The sentence is always an exact part of the record.
+- Bound the detector's patterns so long blank runs, unclosed tags and unclosed
+  quotes no longer stall a hook past its time limit.
 
 - Add an optional, fail-open Jev (TypeSafe System One) relevance selector for
   prompt-time retrieval. The default `selector.mode` stays `deterministic` with

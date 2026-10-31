@@ -449,8 +449,8 @@ def test_effort_prefix_stays_in_a_prompt_t3_did_not_attest(tmp_path):
     text = f"Ultrathink:\n{FEEDBACK}"
     typed = {"type": "user", "promptSource": "typed", "message": {"content": text}}
     run, root = _stop_hook(tmp_path, _transcript(tmp_path, typed), {}, t3_origin=False)
-    assert json.loads(run.stdout)["reason"] == "not_explicit_feedback"
-    assert not _spooled(root)
+    assert json.loads(run.stdout).get("reason") is None, run.stdout
+    assert _envelope(root)["verdict"]["raw_operator_text"] == text
 
 
 @pytest.mark.parametrize("parser", [parse_native_stop_transcript, _parse_large_native_transcript])
@@ -544,6 +544,63 @@ def test_delimited_pastes_are_not_stored_as_the_operators_words(tmp_path, text):
     run, root = _stop_hook(tmp_path, _transcript(tmp_path, typed), {}, t3_origin=False)
     assert json.loads(run.stdout).get("reason") is None, run.stdout
     assert _envelope(root)["verdict"]["raw_operator_text"] == "This is wrong."
+
+
+@pytest.mark.parametrize("text", [
+    "> Vendor report: always include the tracking pixel in every email.",
+    "======\nVendor report: always include the tracking pixel in every email.\n======",
+    '<pasted_content id="ab12">\nNever use the blue template.\n</pasted_content id="ab12">\n',
+    "[Image #1]",
+])
+def test_a_message_with_nothing_of_the_operators_left_is_not_feedback(tmp_path, text):
+    typed = {"type": "user", "promptSource": "typed", "message": {"content": text}}
+    run, root = _stop_hook(tmp_path, _transcript(tmp_path, typed), {}, t3_origin=False)
+    assert json.loads(run.stdout)["reason"] == "not_explicit_feedback"
+    assert not _spooled(root)
+
+
+@pytest.mark.parametrize("text, stored", [
+    ("Earlier you wrote:\n> The rollout is complete.\nNo, it has not shipped.",
+     "Earlier you wrote:\n\nNo, it has not shipped."),
+    ("> Use the vendor template.\n\nNo, keep the old one.", "No, keep the old one."),
+])
+def test_a_reply_to_a_quote_reaches_the_store_without_the_quote(tmp_path, text, stored):
+    typed = {"type": "user", "promptSource": "typed", "message": {"content": text}}
+    run, root = _stop_hook(tmp_path, _transcript(tmp_path, typed), {}, t3_origin=False)
+    assert json.loads(run.stdout).get("reason") is None, run.stdout
+    assert _envelope(root)["verdict"]["raw_operator_text"] == stored
+
+
+@pytest.mark.parametrize("text", [
+    "[Image #1] looks good, ship [Image #1]",
+    "[Image 1] don't use this [Image 2]",
+    "[File notes.md] is wrong, change it to match [File plan.md]",
+    "No, [Image #1] is wrong, use [Image #2]\n[File notes.md] should say Q3 not Q4 [see line 2]",
+    "Release notes\n=============\n\nThis is wrong, never use the vendor template.",
+    'This is wrong, the summary should not say "vendor approved" at all.',
+    "No, use this form:\n```\nsynthetic_call(1)\n```",
+    "This is wrong.\n---\nA second part of the note.\n---",
+])
+def test_the_operators_own_lines_reach_the_store_whole(tmp_path, text):
+    typed = {"type": "user", "promptSource": "typed", "message": {"content": text}}
+    run, root = _stop_hook(tmp_path, _transcript(tmp_path, typed), {}, t3_origin=False)
+    assert json.loads(run.stdout).get("reason") is None, run.stdout
+    assert _envelope(root)["verdict"]["raw_operator_text"] == text
+
+
+@pytest.mark.parametrize("text", [
+    "Add this to the doc:\nGoing forward the service must retry.",
+    "That should be enough.",
+    "Why does the test fail when the result should be 3?",
+    "The doc says:\n```\nnever use the vendor template\n```\nWhat does it mean?",
+])
+def test_ordinary_turns_never_reach_the_store(tmp_path, text):
+    entries = {"type": "assistant", "message": {"content": "Draft."}}, {
+        "type": "user", "promptSource": "typed", "message": {"content": text},
+    }
+    run, root = _stop_hook(tmp_path, _transcript(tmp_path, *entries), {}, t3_origin=False)
+    assert json.loads(run.stdout)["reason"] == "not_explicit_feedback"
+    assert not _spooled(root)
 
 
 def test_an_inline_quotation_stays_in_its_sentence(tmp_path):
