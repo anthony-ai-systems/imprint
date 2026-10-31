@@ -32,7 +32,7 @@ A turn the capture marks can no longer answer for is not read again. Marks are s
 
 A T3 record that cannot be read is not evidence about the prompt. A missing store, a missing table or column, a locked store, a stored payload that is not valid JSON, or a message payload that is not an object all leave the entry unverified. So does a T3 home that cannot be resolved, or a newer row with no string text. The Stop receipt then gives `t3_record_unavailable` instead of `unverified_provenance`, the skip is logged to `logs/capture-skips.jsonl`, and `imprint health` reports `t3_record_unavailable` as a degraded reason for 24 hours, with `t3_record_unavailable_24h` and `t3_record_unavailable_newest_age_seconds` counted from the newest 64 KiB of that log. The turn itself is not retried.
 
-A record that decodes but cannot judge the prompt is logged the same way under its own reason, and each is counted in `capture_skips_24h`:
+A record that decodes but cannot judge the prompt is logged the same way under its own reason, and each is counted in `capture_skips_24h`. These counts are of Stop events, not lost turns, so a session that keeps hitting one skip adds a line per Stop. The log keeps one older copy, `capture-skips.1.jsonl`, once it passes 4 MiB, and health reads only the current file:
 
 - `t3_session_ref_unreadable`: the thread has provider rows and none names any session. That is a change in T3's shape, so it is also a degraded reason.
 - `t3_session_unmatched`: no row names this session. A nested run that inherits the thread reaches this in normal use, so it does not degrade health.

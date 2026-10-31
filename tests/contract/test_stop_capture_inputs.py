@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from imprint import cli
 from imprint.capture import transcript as transcript_module
 from imprint.capture.schema import _MAX_TEXT
 from imprint.capture.transcript import (
@@ -306,7 +307,7 @@ def test_a_symlink_is_still_refused_after_the_unavailable_changes(tmp_path):
     assert not _spooled(root)
 
 
-def _bridge(tmp_path, path, *, raw=None, **event):
+def _bridge(tmp_path, path, *, raw=None, origin=None, **event):
     """The real bridge, where exit 2 is what the host would see."""
     config = tmp_path / "config.json"
     data = tmp_path / "data"
@@ -316,6 +317,8 @@ def _bridge(tmp_path, path, *, raw=None, **event):
         }), encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if key != "IMPRINT_CAPTURE_ORIGIN"}
     env.update(IMPRINT_CONFIG=str(config), PYTHONPATH=str(REPO / "src"))
+    if origin:
+        env["IMPRINT_CAPTURE_ORIGIN"] = origin
     event = {"hook_event_name": "Stop", "session_id": "session-synthetic", "transcript_path": str(path), **event}
     run = subprocess.run(
         [sys.executable, str(REPO / "hooks" / "stop_capture.py")],
@@ -330,6 +333,11 @@ def test_an_event_too_deep_for_the_child_does_not_block_the_stop(tmp_path, depth
     nested = "[" * depth + "]" * depth
     run, _ = _bridge(tmp_path, tmp_path / "absent", raw=f'{{"hook_event_name":"Stop","extra":{nested}}}')
     assert run.returncode == 0, run.stderr
+
+    machine, _ = _bridge(
+        tmp_path, tmp_path / "absent", raw=f'{{"hook_event_name":"Stop","extra":{nested}}}', origin="automation",
+    )
+    assert machine.returncode == 0, machine.stderr
 
 
 def _torn(tmp_path, *entries):
@@ -540,3 +548,16 @@ def test_stops_with_no_session_id_capture_a_turn_once(tmp_path):
         run, root = _stop(tmp_path, path, session_id="")
         assert run.returncode == 0, run.stdout + run.stderr
     assert len(_spooled(root)) == 1
+
+
+def test_the_skip_log_keeps_one_old_copy_past_its_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "CAPTURE_SKIP_LOG_BYTES", 200)
+    root = tmp_path / "root"
+    for _ in range(6):
+        cli._record_capture_skip(root, "transcript_missing")
+    logs = sorted(path.name for path in (root / "logs").iterdir())
+    assert logs == ["capture-skips.1.jsonl", "capture-skips.jsonl"]
+    assert all(
+        json.loads(line)["reason"] == "transcript_missing"
+        for line in (root / "logs" / "capture-skips.1.jsonl").read_text(encoding="utf-8").splitlines()
+    )

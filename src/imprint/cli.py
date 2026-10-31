@@ -29,6 +29,9 @@ def _store(root: Path) -> ImprintStore:
     return ImprintStore(root / "imprint.db")
 
 
+CAPTURE_SKIP_LOG_BYTES = 4 * 1024 * 1024
+
+
 def _write_json(value) -> None:
     print(json.dumps(value, sort_keys=True, ensure_ascii=False))
     sys.stdout.flush()
@@ -208,6 +211,12 @@ def _opaque_session_urn(root: Path, native_session_id: str) -> str:
     return f"urn:imprint:session:{mapped}"
 
 
+def _hook_input_invalid() -> int:
+    """Skip an event a retry cannot change, without blocking the stop."""
+    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"})
+    return 0
+
+
 def _record_capture_skip(root: Path, reason: str) -> None:
     """Leave a content-free trace of a skip that would otherwise vanish. Never raises."""
     line = json.dumps({
@@ -218,12 +227,17 @@ def _record_capture_skip(root: Path, reason: str) -> None:
         os.O_WRONLY | os.O_CREAT | os.O_APPEND
         | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     )
+    path = root / "logs" / "capture-skips.jsonl"
     try:
         secure_directory(root / "logs")
-        descriptor = os.open(root / "logs" / "capture-skips.jsonl", flags, 0o600)
+        descriptor = os.open(path, flags, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            status = os.fstat(descriptor)
+            if stat.S_ISREG(status.st_mode):
                 handle.write(line)
+        # Stop fires every turn and nothing else trims this file, so keep one old copy.
+        if stat.S_ISREG(status.st_mode) and status.st_size >= CAPTURE_SKIP_LOG_BYTES:
+            os.replace(path, path.with_name("capture-skips.1.jsonl"))
     except OSError:
         pass
 
@@ -582,7 +596,10 @@ def main(argv: list[str] | None = None) -> int:
         transport_origin = os.environ.get("IMPRINT_CAPTURE_ORIGIN", "").strip().lower()
         if args.command == "hook" and args.action == "stop-capture" and transport_origin:
             from .capture.provenance import MACHINE_ORIGIN_REASON, UNVERIFIED_ENTRY_REASON
-            event = json.load(sys.stdin)
+            try:
+                event = json.load(sys.stdin)
+            except RecursionError:
+                return _hook_input_invalid()
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")
             _validate_hook_event(event, "Stop")
@@ -1037,8 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
                 event = json.loads(json.dumps(event, ensure_ascii=False).encode("utf-8", "replace"))
             except RecursionError:
                 # The bridge's own read has a little more stack, so this can get past it.
-                _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"})
-                return 0
+                return _hook_input_invalid()
             native_value = event.get("session_id") or event.get("sessionId")
             native_session = (
                 str(native_value) if native_value
