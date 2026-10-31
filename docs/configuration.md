@@ -12,6 +12,9 @@ object and preserves unknown namespaced extensions.
 - `operator_slug`: lowercase letters, digits, and hyphens; default `default`.
 - `node_id`: this machine's spool identity; default `primary`.
 - `compiler`: only one node may be `true` for a shared logical Imprint.
+- `t3_capture_origin`: `false` (default) or `true`. When `true`, Stop capture
+  reads T3's local message record to verify who wrote a T3 prompt. See
+  `docs/contracts/capture-origin.md`.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
   Values above 32,768 require `allow_higher_budget: true`.
 - `spool_retention_days`: 1–36,500; default 30. Pruning is never automatic and

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 SYNTHETIC_ENTRY_REASON = "synthetic_transcript_entry"
 NO_OPERATOR_MESSAGE_REASON = "no_operator_message"
@@ -34,6 +34,12 @@ _MARKER_PREAMBLE_CHARS = 256
 class ProvenanceVerdict:
     is_operator: bool
     basis: str
+
+
+class HostOrigin(Protocol):
+    """A host record that can vouch for an entry its transport leaves unverified."""
+
+    def attests(self, entry: Mapping[str, Any], text: str) -> bool: ...
 
 
 def _origin_kind(entry: Mapping[str, Any]) -> str | None:
@@ -105,3 +111,22 @@ def classify_entry_provenance(entry: Mapping[str, Any], text: str) -> Provenance
     if _dominant_marker(text):
         return ProvenanceVerdict(False, "marker")
     return ProvenanceVerdict(False, "structure")
+
+
+def classify_with_host(
+    entry: Mapping[str, Any], text: str, host_origin: HostOrigin | None = None,
+) -> ProvenanceVerdict:
+    """Let a host record settle only what the entry itself left unverified.
+
+    Declared origins and structural refusals are final; a host record never
+    overturns them.
+    """
+    verdict = classify_entry_provenance(entry, text)
+    if (
+        not verdict.is_operator
+        and verdict.basis == "unverified"
+        and host_origin is not None
+        and host_origin.attests(entry, text)
+    ):
+        return ProvenanceVerdict(True, "host_record")
+    return verdict

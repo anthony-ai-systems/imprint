@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
@@ -225,12 +226,28 @@ def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
     return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
 
 
-def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
+def _record_capture_skip(root: Path, reason: str) -> None:
+    """Leave a content-free trace of a skip that would otherwise vanish. Never raises."""
+    line = json.dumps({
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }, sort_keys=True) + "\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        secure_directory(root / "logs")
+        descriptor = os.open(root / "logs" / "capture-skips.jsonl", flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        pass
+
+
+def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origin=None) -> dict:
     """Recover final feedback from a huge transcript using a bounded tail read."""
     from .capture.provenance import (
         NO_OPERATOR_MESSAGE_REASON,
         SYNTHETIC_ENTRY_REASON,
-        classify_entry_provenance,
+        classify_with_host,
         skip_reason,
     )
     from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
@@ -246,7 +263,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
         newline = tail.find(b"\n")
         tail = tail[newline + 1:] if newline >= 0 else b""
     try:
-        decoded_lines = tail.decode("utf-8").splitlines(keepends=True)
+        decoded_lines = [line.decode("utf-8") for line in tail.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
     messages: list[tuple[str, str, str | None]] = []
@@ -269,7 +286,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None) -> dict:
             continue
         text = _message_text(message.get("content"))
         if item["type"] == "user":
-            verdict = classify_entry_provenance(item, text)
+            verdict = classify_with_host(item, text, host_origin)
             if not verdict.is_operator:
                 synthetic_basis = verdict.basis
                 continue
@@ -1158,10 +1175,13 @@ def main(argv: list[str] | None = None) -> int:
                 from .capture import build_capture_envelope
                 from .capture.transcript import (
                     MAX_TRANSCRIPT_BYTES,
+                    TRANSCRIPT_UNAVAILABLE_REASON,
+                    TranscriptUnavailable,
                     _parse_native_stop_snapshot,
                     _read_native_transcript_snapshot,
                 )
-                from .capture.detector import detect_explicit_feedback
+                from .capture.detector import detect_explicit_feedback, strip_embedded_host_content
+                from .capture.t3_origin import t3_host_origin
                 from .capture.marks import (
                     ALREADY_CAPTURED_REASON,
                     CapturedTurns,
@@ -1173,18 +1193,29 @@ def main(argv: list[str] | None = None) -> int:
                 contextual_evidence = []
                 extensions = {}
                 source_entry_id = None
+                host_origin = t3_host_origin(config)
                 if not operator_text and isinstance(event.get("transcript_path"), str):
-                    snapshot = _read_native_transcript_snapshot(
-                        event["transcript_path"], tail_limit=2 * 1024 * 1024,
-                    )
+                    # A missing file is not a capture failure: blocking the stop
+                    # cannot make the host write it, and the retry fails the same way.
+                    try:
+                        snapshot = _read_native_transcript_snapshot(
+                            event["transcript_path"], tail_limit=2 * 1024 * 1024,
+                        )
+                    except TranscriptUnavailable:
+                        _record_capture_skip(root, TRANSCRIPT_UNAVAILABLE_REASON)
+                        _write_json({
+                            "hook_schema_version": "1.0.0", "status": "skipped",
+                            "reason": TRANSCRIPT_UNAVAILABLE_REASON,
+                        })
+                        return 0
                     if snapshot.size > MAX_TRANSCRIPT_BYTES:
                         native = _parse_large_native_transcript(
-                            event["transcript_path"], snapshot=snapshot,
+                            event["transcript_path"], snapshot=snapshot, host_origin=host_origin,
                         )
                         if not native["skip_reason"]:
                             extensions["org.imprint.transcript"] = native["degradation"]
                     else:
-                        native = _parse_native_stop_snapshot(snapshot)
+                        native = _parse_native_stop_snapshot(snapshot, host_origin=host_origin)
                     if native["skip_reason"]:
                         skipped = {
                             "hook_schema_version": "1.0.0", "status": "skipped",
@@ -1196,7 +1227,10 @@ def main(argv: list[str] | None = None) -> int:
                             skipped["provenance_basis"] = native["provenance_basis"]
                         _write_json(skipped)
                         return 0
-                    operator_text = native["operator_text"]
+                    attested = host_origin.evidence(native["operator_text"]) if host_origin else None
+                    if attested:
+                        extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
+                    operator_text = strip_embedded_host_content(native["operator_text"])
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
                     source_entry_id = native.get("source_entry_id")
@@ -1273,7 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
                         # so the failure receipt has to say so.
                         error_details["mark_release_failed"] = True
                     raise
-                if extensions:
+                if "org.imprint.transcript" in extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
                 _write_json(receipt)
                 return 0

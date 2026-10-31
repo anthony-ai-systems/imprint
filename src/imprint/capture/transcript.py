@@ -15,11 +15,13 @@ from imprint.errors import ValidationError
 from .provenance import (
     NO_OPERATOR_MESSAGE_REASON,
     SYNTHETIC_ENTRY_REASON,
-    classify_entry_provenance,
+    HostOrigin,
+    classify_with_host,
     skip_reason,
 )
 
 MAX_TRANSCRIPT_BYTES = 16 * 1024 * 1024
+TRANSCRIPT_UNAVAILABLE_REASON = "transcript_unavailable"
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,10 @@ class _TranscriptChangedDuringRead(Exception):
     pass
 
 
+class TranscriptUnavailable(ValidationError):
+    """The host named a transcript that is not there; nothing was read."""
+
+
 def _read_native_transcript_snapshot_once(
     path_value: str, *, tail_limit: int | None = None,
 ) -> _TranscriptSnapshot:
@@ -51,6 +57,8 @@ def _read_native_transcript_snapshot_once(
         raise ValidationError("transcript_path must be an absolute regular non-symlink file")
     try:
         path_before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise TranscriptUnavailable("transcript_path does not exist") from exc
     except OSError as exc:
         raise ValidationError("transcript_path must be an absolute regular non-symlink file") from exc
     if not stat.S_ISREG(path_before.st_mode):
@@ -140,11 +148,15 @@ def _entry_identity(item: dict[str, Any]) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str | None]:
+def _parse_native_stop_snapshot(
+    snapshot: _TranscriptSnapshot, *, host_origin: HostOrigin | None = None,
+) -> dict[str, str | None]:
     messages: list[tuple[str, str, str | None]] = []
     synthetic_basis: str | None = None
     try:
-        lines = snapshot.data.decode("utf-8").splitlines(keepends=True)
+        # Split before decoding: str.splitlines also breaks on U+2028, U+2029
+        # and U+0085, which are legal raw inside a JSON string.
+        lines = [line.decode("utf-8") for line in snapshot.data.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript is not valid UTF-8") from exc
     for number, raw_line in enumerate(lines, start=1):
@@ -163,7 +175,7 @@ def _parse_native_stop_snapshot(snapshot: _TranscriptSnapshot) -> dict[str, str 
             continue
         text = _message_text(message.get("content"))
         if item["type"] == "user":
-            verdict = classify_entry_provenance(item, text)
+            verdict = classify_with_host(item, text, host_origin)
             if not verdict.is_operator:
                 synthetic_basis = verdict.basis
                 continue
