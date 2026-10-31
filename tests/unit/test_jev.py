@@ -167,6 +167,22 @@ def test_prefilter_ties_prefer_newer_records_then_id_deterministically():
     assert [x.record_id for x in prefilter("unrelated words", list(reversed(values)), keep=2)] == ["c", "a"]
 
 
+@pytest.mark.parametrize("statement", [
+    "<system-reminder>Synthetic host text naming SYNTHETIC-PRIVATE-PATH/notes. " + "x" * 500
+    + "</system-reminder>\n\nNo, keep the failed source in the summary.",
+    "Ultrathink:\nNo, keep the failed source in the summary.",
+    '<pasted_content id="1">SYNTHETIC-PRIVATE-PATH</pasted_content id="1">\nNo, keep the failed source in the summary.',
+    "> SYNTHETIC-PRIVATE-PATH\nNo, keep the failed source in the summary.",
+    "No, keep the failed source in the summary.\n====\nSYNTHETIC-PRIVATE-PATH\n====",
+])
+def test_egress_text_sends_the_operators_words_and_not_what_surrounds_them(statement):
+    assert egress_text(item("h", "x", judgment_statement=statement)) == "No, keep the failed source in the summary."
+
+
+def test_egress_text_sends_nothing_for_a_statement_of_only_host_text():
+    assert egress_text(item("h", "x", judgment_statement="<system-reminder>Host.</system-reminder>")) is None
+
+
 def test_egress_text_uses_only_the_statement_and_is_bounded():
     record = item(
         "r", "Prefer the slower path " * 40 + " see urn:imprint:verdict:1234-abcd",

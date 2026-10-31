@@ -184,16 +184,25 @@ class DeliveryReceipts:
         self, session_id: str, *, max_files: int = DELIVERED_SCAN_FILES,
         max_bytes: int = DELIVERED_SCAN_BYTES,
     ) -> set[str]:
-        """Return record ids committed to this session under any snapshot.
+        """Return record ids committed to this session under any snapshot."""
+        return self.delivery_state(session_id, max_files=max_files, max_bytes=max_bytes)[0]
+
+    def delivery_state(
+        self, session_id: str, *, max_files: int = DELIVERED_SCAN_FILES,
+        max_bytes: int = DELIVERED_SCAN_BYTES,
+    ) -> tuple[set[str], set[str]]:
+        """Return the ids delivered to this session, and those owed a whole delivery.
 
         Only committed 1.1.0 responses count; pending caches were never shown.
+        A response's ``retry_ids`` were delivered compact for want of room, so
+        they do not count as delivered, and a later whole delivery still does.
         The scan is bounded to the newest ``max_files`` regular files of at
         most ``max_bytes`` each, and a corrupt or foreign file is skipped:
         exclusion is advisory and must never fail a prompt.
         """
         directory = self.root / self._safe(session_id, "session id")
         if not directory.is_dir() or directory.is_symlink():
-            return set()
+            return set(), set()
         entries: list[tuple[float, str, Path]] = []
         for path in directory.glob("*.json"):
             if path.name.endswith(".pending.json") or path.name.startswith("."):
@@ -207,15 +216,19 @@ class DeliveryReceipts:
             entries.append((status.st_mtime, path.name, path))
         entries.sort(key=lambda item: (-item[0], item[1]))
         seen: set[str] = set()
+        owed: set[str] = set()
         for _, _, path in entries[:max(0, max_files)]:
             try:
                 response = self._decode_prepared(path)
             except Exception:  # corrupt, foreign, or vanished: skip, never fail
                 continue
             selected = response.get("selected_ids")
+            retried = response.get("retry_ids")
+            retried = {item for item in retried if isinstance(item, str)} if isinstance(retried, list) else set()
             if isinstance(selected, list):
-                seen.update(item for item in selected if isinstance(item, str))
-        return seen
+                seen.update(item for item in selected if isinstance(item, str) and item not in retried)
+                owed.update(retried)
+        return seen, owed
 
     def claim_session_start(self, session_id: str, snapshot_id: str) -> bool:
         return self._claim(session_id, snapshot_id, "session_start", None)

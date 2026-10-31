@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import signal
+import stat
 import sys
 import tempfile
 import time
@@ -26,6 +27,9 @@ from .store import ImprintStore
 
 def _store(root: Path) -> ImprintStore:
     return ImprintStore(root / "imprint.db")
+
+
+CAPTURE_SKIP_LOG_BYTES = 4 * 1024 * 1024
 
 
 def _write_json(value) -> None:
@@ -207,23 +211,10 @@ def _opaque_session_urn(root: Path, native_session_id: str) -> str:
     return f"urn:imprint:session:{mapped}"
 
 
-def _message_text(value) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "\n".join(
-            item["text"] for item in value
-            if isinstance(item, dict) and item.get("type") == "text"
-            and isinstance(item.get("text"), str)
-        )
-    return ""
-
-
-def _truncate_utf8(value: str, byte_limit: int) -> tuple[str, bool]:
-    encoded = value.encode("utf-8")
-    if len(encoded) <= byte_limit:
-        return value, False
-    return encoded[:byte_limit].decode("utf-8", errors="ignore"), True
+def _hook_input_invalid() -> int:
+    """Skip an event a retry cannot change, without blocking the stop."""
+    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"})
+    return 0
 
 
 def _record_capture_skip(root: Path, reason: str) -> None:
@@ -232,78 +223,96 @@ def _record_capture_skip(root: Path, reason: str) -> None:
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }, sort_keys=True) + "\n"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    path = root / "logs" / "capture-skips.jsonl"
     try:
         secure_directory(root / "logs")
-        descriptor = os.open(root / "logs" / "capture-skips.jsonl", flags, 0o600)
+        descriptor = os.open(path, flags, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(line)
+            status = os.fstat(descriptor)
+            if stat.S_ISREG(status.st_mode):
+                handle.write(line)
+        # Stop fires every turn and nothing else trims this file, so keep one old copy.
+        if stat.S_ISREG(status.st_mode) and status.st_size >= CAPTURE_SKIP_LOG_BYTES:
+            os.replace(path, path.with_name("capture-skips.1.jsonl"))
     except OSError:
         pass
 
 
-def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origin=None) -> dict:
-    """Recover final feedback from a huge transcript using a bounded tail read."""
-    from .capture.provenance import (
-        NO_OPERATOR_MESSAGE_REASON,
-        SYNTHETIC_ENTRY_REASON,
-        classify_with_host,
-        skip_reason,
-    )
-    from .capture.transcript import _entry_identity, _read_native_transcript_snapshot
+def _tail_turns(snapshot, host_origin) -> tuple:
+    """Read the complete lines of a tail, which may start part way through one."""
+    from .capture.transcript import collect_turns
     from .errors import ValidationError
 
-    tail_limit = 2 * 1024 * 1024
-    if snapshot is None:
-        snapshot = _read_native_transcript_snapshot(path_value, tail_limit=tail_limit)
-    size = snapshot.size
-    offset = snapshot.offset
     tail = snapshot.data
-    if offset:
+    if snapshot.offset:
         newline = tail.find(b"\n")
         tail = tail[newline + 1:] if newline >= 0 else b""
     try:
         decoded_lines = [line.decode("utf-8") for line in tail.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
         raise ValidationError("transcript tail is not valid UTF-8") from exc
-    messages: list[tuple[str, str, str | None]] = []
-    synthetic_basis: str | None = None
-    for number, raw_line in enumerate(decoded_lines, start=1):
-        complete = raw_line.endswith(("\n", "\r"))
-        raw = raw_line.rstrip("\r\n")
-        if not raw.strip():
-            continue
-        try:
-            item = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            if not complete and number == len(decoded_lines):
-                raise ValidationError(f"incomplete transcript line {number}") from exc
-            raise ValidationError(f"malformed complete transcript line {number}") from exc
-        if not isinstance(item, dict) or item.get("type") not in {"user", "assistant"}:
-            continue
-        message = item.get("message")
-        if not isinstance(message, dict):
-            continue
-        text = _message_text(message.get("content"))
-        if item["type"] == "user":
-            verdict = classify_with_host(item, text, host_origin)
-            if not verdict.is_operator:
-                synthetic_basis = verdict.basis
-                continue
-        if not text.strip():
-            continue
-        messages.append((item["type"], text, _entry_identity(item)))
-    user_indexes = [index for index, (kind, _, _) in enumerate(messages) if kind == "user"]
-    if not user_indexes:
-        # A tail with no operator turn is skipped, not raised: a raised Stop
-        # hook exits 2 and blocks the host session.
+    return (tail, *collect_turns(decoded_lines, host_origin))
+
+
+def _found_no_prompt(snapshot, turns: tuple) -> bool:
+    """Whether a read that did not reach the start of the file holds no prompt."""
+    _, messages, _, unverified_since_operator = turns
+    asked = unverified_since_operator or any(message[0] == "user" for message in messages)
+    return bool(snapshot.offset) and not asked
+
+
+def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origin=None) -> dict:
+    """Recover final feedback from a huge transcript using a bounded tail read.
+
+    A long turn can push its prompt out of the first read, so a read with no prompt
+    in it is repeated once at the full bound, and one that still finds none says so.
+    """
+    from .capture.provenance import UNVERIFIED_BASIS, skip_reason
+    from .capture.transcript import (
+        MAX_CONTEXT_BYTES,
+        MAX_TRANSCRIPT_BYTES,
+        TAIL_READ_BYTES,
+        TRANSCRIPT_TAIL_EXHAUSTED_REASON,
+        _read_native_transcript_snapshot,
+        _truncate_utf8,
+    )
+
+    if snapshot is None:
+        snapshot = _read_native_transcript_snapshot(path_value, tail_limit=TAIL_READ_BYTES)
+    turns = _tail_turns(snapshot, host_origin)
+    if _found_no_prompt(snapshot, turns):
+        snapshot = _read_native_transcript_snapshot(path_value, tail_limit=MAX_TRANSCRIPT_BYTES)
+        turns = _tail_turns(snapshot, host_origin)
+    tail, messages, synthetic_basis, unverified_since_operator = turns
+    if _found_no_prompt(snapshot, turns):
         return {
             "operator_text": None,
             "prior_assistant_output": None,
             "case_description": None,
             "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
-            "skip_reason": skip_reason(synthetic_basis),
-            "provenance_basis": synthetic_basis,
+            "skip_reason": TRANSCRIPT_TAIL_EXHAUSTED_REASON,
+            "provenance_basis": None,
+            "source_entry_id": None,
+        }
+    size, offset = snapshot.size, snapshot.offset
+    user_indexes = [index for index, message in enumerate(messages) if message[0] == "user"]
+    if not user_indexes or unverified_since_operator:
+        # A tail with no operator turn is skipped, not raised: a raised Stop
+        # hook exits 2 and blocks the host session. A newer prompt nobody can
+        # vouch for ends the search too: an older turn is not what this Stop
+        # answered.
+        basis = UNVERIFIED_BASIS if unverified_since_operator else synthetic_basis
+        return {
+            "operator_text": None,
+            "prior_assistant_output": None,
+            "case_description": None,
+            "source_locator": f"transcript-tail:sha256:{hashlib.sha256(tail).hexdigest()}",
+            "skip_reason": skip_reason(basis),
+            "provenance_basis": basis,
             "source_entry_id": None,
         }
     user_index = user_indexes[-1]
@@ -315,7 +324,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
     )
     context_truncated = False
     if prior_assistant is not None:
-        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, 64 * 1024)
+        prior_assistant, context_truncated = _truncate_utf8(prior_assistant, MAX_CONTEXT_BYTES)
     evidence_sha256 = hashlib.sha256(tail).hexdigest()
     return {
         "operator_text": operator_text,
@@ -323,8 +332,9 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
         "case_description": "Explicit operator feedback witnessed in a bounded Claude Code transcript tail",
         "source_locator": f"transcript-tail:sha256:{evidence_sha256}",
         "skip_reason": None,
-        "provenance_basis": None,
+        "provenance_basis": messages[user_index][3],
         "source_entry_id": messages[user_index][2],
+        "source_timestamp": messages[user_index][4],
         "degradation": {
             "schema_version": "1.0.0",
             "payload": {
@@ -586,7 +596,10 @@ def main(argv: list[str] | None = None) -> int:
         transport_origin = os.environ.get("IMPRINT_CAPTURE_ORIGIN", "").strip().lower()
         if args.command == "hook" and args.action == "stop-capture" and transport_origin:
             from .capture.provenance import MACHINE_ORIGIN_REASON, UNVERIFIED_ENTRY_REASON
-            event = json.load(sys.stdin)
+            try:
+                event = json.load(sys.stdin)
+            except RecursionError:
+                return _hook_input_invalid()
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")
             _validate_hook_event(event, "Stop")
@@ -1033,9 +1046,15 @@ def main(argv: list[str] | None = None) -> int:
             # escalating to SIGKILL; convert it to SystemExit so open store
             # connections unwind and close instead of orphaning WAL sidecars.
             signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-            event = json.load(sys.stdin)
-            if not isinstance(event, dict):
-                raise ImprintError("hook event must be an object")
+            try:
+                event = json.load(sys.stdin)
+                if not isinstance(event, dict):
+                    raise ImprintError("hook event must be an object")
+                # JSON can carry a lone surrogate that nothing downstream can encode.
+                event = json.loads(json.dumps(event, ensure_ascii=False).encode("utf-8", "replace"))
+            except RecursionError:
+                # The bridge's own read has a little more stack, so this can get past it.
+                return _hook_input_invalid()
             native_value = event.get("session_id") or event.get("sessionId")
             native_session = (
                 str(native_value) if native_value
@@ -1173,18 +1192,32 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "stop-capture":
                 _validate_hook_event(event, "Stop")
                 from .capture import build_capture_envelope
+                from .capture.schema import OPERATOR_TEXT_OVERSIZED_REASON, text_fits
                 from .capture.transcript import (
                     MAX_TRANSCRIPT_BYTES,
+                    TAIL_READ_BYTES,
+                    TRANSCRIPT_REFUSED_REASON,
+                    TRANSCRIPT_TAIL_EXHAUSTED_REASON,
                     TRANSCRIPT_UNAVAILABLE_REASON,
+                    TranscriptInFlux,
                     TranscriptUnavailable,
                     _parse_native_stop_snapshot,
                     _read_native_transcript_snapshot,
                 )
-                from .capture.detector import detect_explicit_feedback, strip_embedded_host_content
+                from .capture.detector import (
+                    detect_explicit_feedback,
+                    operator_words,
+                    stored_words,
+                    strip_embedded_host_content,
+                    strip_leading_host_blocks,
+                )
+                from .capture.provenance import HOST_RECORD_BASIS, UNVERIFIED_BASIS
                 from .capture.t3_origin import t3_host_origin
                 from .capture.marks import (
                     ALREADY_CAPTURED_REASON,
+                    OPERATOR_TURN_EXPIRED_REASON,
                     CapturedTurns,
+                    outlived_its_mark,
                     turn_identity,
                 )
                 operator_text = event.get("operator_text") or event.get("last_user_message")
@@ -1193,33 +1226,48 @@ def main(argv: list[str] | None = None) -> int:
                 contextual_evidence = []
                 extensions = {}
                 source_entry_id = None
-                host_origin = t3_host_origin(config)
+                host_origin = t3_host_origin(config, native_value)
                 if not operator_text and isinstance(event.get("transcript_path"), str):
-                    # A missing file is not a capture failure: blocking the stop
-                    # cannot make the host write it, and the retry fails the same way.
+                    # Blocking the stop cannot make the host write a missing or empty
+                    # file, or repair a refused one, and the retry fails the same way.
+                    # A refused file stays refused: nothing is read from it, and the
+                    # skip log is what shows it. Only a file still changing can heal.
                     try:
                         snapshot = _read_native_transcript_snapshot(
-                            event["transcript_path"], tail_limit=2 * 1024 * 1024,
+                            event["transcript_path"], tail_limit=TAIL_READ_BYTES,
                         )
-                    except TranscriptUnavailable:
-                        _record_capture_skip(root, TRANSCRIPT_UNAVAILABLE_REASON)
-                        _write_json({
-                            "hook_schema_version": "1.0.0", "status": "skipped",
-                            "reason": TRANSCRIPT_UNAVAILABLE_REASON,
-                        })
+                        if snapshot.size > MAX_TRANSCRIPT_BYTES:
+                            native = _parse_large_native_transcript(
+                                event["transcript_path"], snapshot=snapshot, host_origin=host_origin,
+                            )
+                        else:
+                            native = _parse_native_stop_snapshot(snapshot, host_origin=host_origin)
+                    except TranscriptInFlux:
+                        raise
+                    except ValidationError as exc:
+                        reason = (
+                            TRANSCRIPT_UNAVAILABLE_REASON if isinstance(exc, TranscriptUnavailable)
+                            else TRANSCRIPT_REFUSED_REASON
+                        )
+                        _record_capture_skip(root, reason)
+                        _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": reason})
                         return 0
-                    if snapshot.size > MAX_TRANSCRIPT_BYTES:
-                        native = _parse_large_native_transcript(
-                            event["transcript_path"], snapshot=snapshot, host_origin=host_origin,
-                        )
-                        if not native["skip_reason"]:
-                            extensions["org.imprint.transcript"] = native["degradation"]
-                    else:
-                        native = _parse_native_stop_snapshot(snapshot, host_origin=host_origin)
                     if native["skip_reason"]:
+                        reason = native["skip_reason"]
+                        # What T3's records could not say looks exactly like an
+                        # agent's prompt, and nothing else would show that T3
+                        # capture has stopped working.
+                        if (
+                            host_origin is not None and host_origin.skip_reason
+                            and native.get("provenance_basis") == UNVERIFIED_BASIS
+                        ):
+                            reason = host_origin.skip_reason
+                            _record_capture_skip(root, reason)
+                        elif reason == TRANSCRIPT_TAIL_EXHAUSTED_REASON:
+                            _record_capture_skip(root, reason)
                         skipped = {
                             "hook_schema_version": "1.0.0", "status": "skipped",
-                            "reason": native["skip_reason"],
+                            "reason": reason,
                         }
                         # Which tell dropped the entry, so marker-basis drops
                         # stay distinguishable from declared-provenance ones.
@@ -1227,14 +1275,24 @@ def main(argv: list[str] | None = None) -> int:
                             skipped["provenance_basis"] = native["provenance_basis"]
                         _write_json(skipped)
                         return 0
-                    attested = host_origin.evidence(native["operator_text"]) if host_origin else None
-                    if attested:
-                        extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
-                    operator_text = strip_embedded_host_content(native["operator_text"])
+                    if outlived_its_mark(native.get("source_timestamp")):
+                        _write_json({
+                            "hook_schema_version": "1.0.0", "status": "skipped",
+                            "reason": OPERATOR_TURN_EXPIRED_REASON,
+                        })
+                        return 0
+                    if native.get("degradation"):
+                        extensions["org.imprint.transcript"] = native["degradation"]
+                    operator_text = native["operator_text"]
+                    if native["provenance_basis"] == HOST_RECORD_BASIS and host_origin is not None:
+                        attested = host_origin.evidence(operator_text)
+                        if attested:
+                            extensions["org.imprint.host_origin"] = {"schema_version": "1.0.0", "payload": attested}
+                        operator_text = operator_words(host_origin.recorded_words(operator_text))
                     prior_assistant = native["prior_assistant_output"]
                     case_description = native["case_description"]
                     source_entry_id = native.get("source_entry_id")
-                    if isinstance(prior_assistant, str) and prior_assistant:
+                    if isinstance(prior_assistant, str) and prior_assistant.strip():
                         contextual_evidence = [{
                             "kind": "context", "content": prior_assistant,
                             "source_locator": native["source_locator"],
@@ -1242,20 +1300,41 @@ def main(argv: list[str] | None = None) -> int:
                 if not isinstance(operator_text, str) or not operator_text.strip():
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "feedback_text_unavailable"})
                     return 0
+                # Detection keeps the pastes in place: the line after a quote is
+                # the operator's, the same line after a bare colon is not.
+                spoken_text = strip_embedded_host_content(strip_leading_host_blocks(operator_text))
+                operator_text = stored_words(spoken_text)
+                if not operator_text:
+                    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                    return 0
                 detection = detect_explicit_feedback(
-                    operator_text,
+                    spoken_text,
                     prior_operator_text=event.get("prior_operator_text"),
                     prior_assistant_output=prior_assistant,
                 )
                 if not detection.is_feedback:
                     _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
                     return 0
+                # A verbatim record is never cut to fit, and blocking the stop cannot
+                # make the text any shorter, so this turn is skipped and says so.
+                if not text_fits(operator_text):
+                    _record_capture_skip(root, OPERATOR_TEXT_OVERSIZED_REASON)
+                    _write_json({
+                        "hook_schema_version": "1.0.0", "status": "skipped",
+                        "reason": OPERATOR_TEXT_OVERSIZED_REASON,
+                    })
+                    return 0
                 # Stop fires on every assistant turn, so the same trailing
                 # operator utterance is re-read until the operator speaks again.
                 # Claim the turn once per session or the Verdict is duplicated.
                 marks = CapturedTurns(root)
                 turn_id = turn_identity(source_entry_id, operator_text)
-                if not marks.claim(session, turn_id):
+                # With no session id every event gets a session of its own, which
+                # no mark would survive, but the transcript still names the session.
+                mark_scope = session
+                if not native_value and isinstance(event.get("transcript_path"), str):
+                    mark_scope = _opaque_session_urn(root, f"transcript:{event['transcript_path']}")
+                if not marks.claim(mark_scope, turn_id):
                     _write_json({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": ALREADY_CAPTURED_REASON,
@@ -1302,7 +1381,7 @@ def main(argv: list[str] | None = None) -> int:
                         if counts["quarantined"]:
                             receipt["unrelated_quarantine_count"] = counts["quarantined"]
                 except BaseException:
-                    if envelope_path is None and not marks.release(session, turn_id):
+                    if envelope_path is None and not marks.release(mark_scope, turn_id):
                         # A stuck mark silently costs the next retry of this turn,
                         # so the failure receipt has to say so.
                         error_details["mark_release_failed"] = True

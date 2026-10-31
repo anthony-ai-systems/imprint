@@ -34,6 +34,7 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from imprint import __version__
+from imprint.capture.detector import operator_words, stored_words
 from imprint.config import SELECTOR_STATE_LIMIT, effective_selector_mode
 from imprint.permissions import secure_directory, secure_file
 
@@ -130,12 +131,15 @@ def egress_text(record: RetrievalRecord) -> str | None:
     """The only record content a remote selector may receive.
 
     Built from ``judgment_statement`` (never the retrieval ``text`` fallback
-    chain), whitespace-collapsed, with Imprint URNs replaced, and truncated.
+    chain), keeping only the operator's words, whitespace-collapsed, with Imprint
+    URNs replaced, and truncated. A record stored by an older build can open with
+    host text, which would otherwise fill the whole statement.
     """
     value = record.judgment_statement
     if not isinstance(value, str):
         return None
-    text = " ".join(_URN.sub("[ref]", value).split())[:STATEMENT_LIMIT]
+    words = stored_words(operator_words(value))
+    text = " ".join(_URN.sub("[ref]", words).split())[:STATEMENT_LIMIT]
     return text or None
 
 
@@ -448,11 +452,17 @@ def _utc_stamp(value: datetime | None = None) -> str:
 
 def decision_entry(
     result: SelectionResult, *, mode: str, session_ref: str, receipt_scope: str | None,
-    stages: Mapping[str, int] | None = None,
+    stages: Mapping[str, int] | None = None, delivery_outcome: str | None = None,
 ) -> dict[str, object]:
-    """A content-free decision record: no prompt, judgment text, or key."""
+    """A content-free decision record: no prompt, judgment text, or key.
+
+    ``outcome`` is Jev's result; ``delivery_outcome`` and ``stages`` are what became
+    of it in this turn, and are null on a shadow or fallback line, which delivers
+    nothing of Jev's.
+    """
     return {
         "candidates_sent": result.candidates_sent,
+        "delivery_outcome": delivery_outcome,
         "elapsed_ms": result.elapsed_ms,
         "fallback_reason": result.fallback_reason,
         "mode": mode,

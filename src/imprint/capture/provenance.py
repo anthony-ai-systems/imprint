@@ -9,6 +9,12 @@ SYNTHETIC_ENTRY_REASON = "synthetic_transcript_entry"
 NO_OPERATOR_MESSAGE_REASON = "no_operator_message"
 UNVERIFIED_ENTRY_REASON = "unverified_provenance"
 MACHINE_ORIGIN_REASON = "machine_origin"
+UNVERIFIED_BASIS = "unverified"
+HOST_RECORD_BASIS = "host_record"
+# Marks a prompt queued into a running turn, which records no transport of its
+# own. No interactive source has this name, so it is unverified until a host
+# record says otherwise.
+MID_TURN_SOURCE = "mid_turn_queue"
 
 _HUMAN_ORIGIN_KIND = "human"
 # Only measured interactive provenance is positive evidence of human input.
@@ -62,7 +68,7 @@ def _prompt_source(entry: Mapping[str, Any]) -> str | None:
 
 
 def skip_reason(basis: str | None) -> str:
-    if basis == "unverified":
+    if basis == UNVERIFIED_BASIS:
         return UNVERIFIED_ENTRY_REASON
     return SYNTHETIC_ENTRY_REASON if basis else NO_OPERATOR_MESSAGE_REASON
 
@@ -105,7 +111,7 @@ def classify_entry_provenance(entry: Mapping[str, Any], text: str) -> Provenance
             return ProvenanceVerdict(False, "structure")
         if source in _INTERACTIVE_PROMPT_SOURCES:
             return ProvenanceVerdict(True, "promptSource")
-        return ProvenanceVerdict(False, "unverified")
+        return ProvenanceVerdict(False, UNVERIFIED_BASIS)
     if _is_synthetic_structure(entry):
         return ProvenanceVerdict(False, "structure")
     if _dominant_marker(text):
@@ -124,9 +130,9 @@ def classify_with_host(
     verdict = classify_entry_provenance(entry, text)
     if (
         not verdict.is_operator
-        and verdict.basis == "unverified"
+        and verdict.basis == UNVERIFIED_BASIS
         and host_origin is not None
         and host_origin.attests(entry, text)
     ):
-        return ProvenanceVerdict(True, "host_record")
+        return ProvenanceVerdict(True, HOST_RECORD_BASIS)
     return verdict

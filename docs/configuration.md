@@ -13,8 +13,14 @@ object and preserves unknown namespaced extensions.
 - `node_id`: this machine's spool identity; default `primary`.
 - `compiler`: only one node may be `true` for a shared logical Imprint.
 - `t3_capture_origin`: `false` (default) or `true`. When `true`, Stop capture
-  reads T3's local message record to verify who wrote a T3 prompt. See
-  `docs/contracts/capture-origin.md`.
+  reads T3's local message and provider-thread records to verify who wrote a T3
+  prompt. A record it cannot read is reported as `t3_record_unavailable`. See
+  `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
+  hooks are registered, so a host with its own Claude config directory needs
+  `install.sh --settings <that directory>/settings.json`. Set this key after
+  the build that knows it is installed. An older build refuses any config that
+  has it, which fails every hook and `imprint version`, so before reinstalling
+  an older build, remove `t3_capture_origin` from the config.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
   Values above 32,768 require `allow_higher_budget: true`.
 - `spool_retention_days`: 1–36,500; default 30. Pruning is never automatic and
@@ -108,9 +114,32 @@ Selection semantics:
   skipped. When every sendable record was already delivered, the prompt is
   `no_picks` and Jev is not called.
 - Each delivered line is the ordinary JSON retrieval line plus
-  `"selector": {"mode": "jev", "rank": N, "score": S}`.
-- If Jev answers but nothing clears `score_floor`, or nothing it picked fits
-  the budget, no pick is injected and `selector_outcome` is `no_picks`.
+  `"selector": {"mode": "jev", "rank": N, "score": S}`, unless it is compact.
+- Picks that all fit the budget are delivered whole. Otherwise a pick over a
+  quarter of the budget is delivered as a compact line, and so is any pick the
+  budget has no room left for. A compact line keeps `authority`, `case_ids`,
+  `evidence_ids`, `record_id`, `source_receipt_ids` and `selector`, drops
+  `case_summaries` and `ontology`, and adds `compact`, `detail` (the `imprint
+  history` command for the record), `text_basis` and `text_complete`.
+- A compact line's `text` is limited to 400 bytes and is always the record's own
+  words. `text_basis` says which: `whole` is the record's text unchanged;
+  `feedback_sentences` is every sentence that reads as feedback, in document
+  order and one per line, filled backward from the last so a later correction
+  survives an earlier approval; `opening` is the start of the operator's words,
+  without host text or pastes. Both of the shorter forms also keep the
+  message's last sentence where it fits, feedback or not, and `feedback_sentences`
+  cuts one over half the limit. Only `whole` has `text_complete: true`.
+- A compact pick that could fit the budget on its own is listed in the receipt's
+  `retry_ids` and does not count as delivered, so a later turn or the
+  deterministic fallback can deliver it whole. Once cut this way it is no longer
+  compacted for its size, only when the budget has no room for it. A pick larger
+  than the whole budget counts as delivered from its compact line and is not
+  repeated.
+- If Jev answers but nothing clears `score_floor`, no pick is injected and
+  `selector_outcome` is `no_picks`. If Jev picked records and none could be
+  delivered even compact, `selector_outcome` is `oversized_picks`, or
+  `crowded_picks` when a pick would have fit without the local records. Those
+  picks stay undelivered and can be chosen again on a later turn.
 - A missing or unsafe key, timeout, HTTP error, malformed answer, no
   candidates, or any internal exception returns the deterministic behavior
   for that prompt, minus records Jev already delivered to the session, and
@@ -130,10 +159,17 @@ Selection semantics:
 Decision log: with `log_decisions`, each selector call appends one line to
 `<operator root>/logs/jev-selector.jsonl` (private file mode) with the time,
 hashed session reference, receipt scope, candidates sent, picked record ids and
-scores, elapsed milliseconds, echoed model, token usage, outcome, and fallback
-reason. It never contains prompt text, judgment text, or the key. The line is
-written once the turn's delivery is settled, so a failure after Jev answered
-is one `fallback` line. At 5 MiB the file rotates once to
+scores, elapsed milliseconds, echoed model, token usage, request size, outcome,
+delivery outcome, stages, and fallback reason. `outcome` is Jev's own result
+(`picked`, `no_picks`, or `fallback`), and it alone decides what counts as a
+successful transfer. `delivery_outcome` is what the hook reported for the turn,
+such as `oversized_picks`, `crowded_picks`, or `already_delivered`. `stages`
+counts records `eligible`, `picked`, `delivered`, `delivered_compact`, and
+`unfit`, plus `local_records` and `local_bytes` delivered ahead of the picks.
+`delivery_outcome` and `stages` are null on `shadow` and `fallback` lines, which
+deliver nothing of Jev's. The log never contains prompt text, judgment text, or
+the key. The line is written once the turn's delivery is settled, so a failure
+after Jev answered is one `fallback` line. At 5 MiB the file rotates once to
 `jev-selector.jsonl.1`.
 
 Health reports `selector_mode`, `selector_key_present` (a boolean; the key file

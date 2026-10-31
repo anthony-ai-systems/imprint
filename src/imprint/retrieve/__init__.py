@@ -198,22 +198,34 @@ class _FixedSource:
         return self._records
 
 
-# One pick may take this fraction of the budget in full. Past it, a single large
-# record would crowd out the others Jev ranked just below it.
+# When the picks cannot all fit, one may still take this fraction of the budget in
+# full. Past it, a single large record would crowd out the others Jev ranked below it.
 _FULL_RENDER_SHARE = 4
 
 
 def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
     eligible_count: int, budget: int, local: RetrievalResult | None = None,
+    retried: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     """Render ``local`` (the matched domain's never-sent records, ranked
     deterministically) and then picks in score order, never exceeding the
-    selector budget. A pick too large to share the budget is delivered compact.
-    Picks that cannot fit even then report ``oversized_picks``, because that is
-    not the same as nothing being relevant."""
+    selector budget.
+
+    Picks that all fit stay whole. Otherwise a pick too large to share the budget
+    is delivered compact, and so is any pick the budget has run out for. A compact
+    pick that could fit on its own goes in ``retry_ids``, so the session is not
+    latched against its whole form. ``retried`` holds picks already cut that way:
+    they are no longer held back for size, or two large picks Jev keeps choosing
+    would be cut on every turn. Only a pick that can never fit is latched compact.
+
+    Picks that cannot be delivered at all report ``oversized_picks``, or
+    ``crowded_picks`` when one would have fit without the local records, because
+    neither is the same as nothing being relevant.
+    """
     rendered: list[bytes] = []
     selected_ids: list[str] = []
+    retry_ids: list[str] = []
     section_bytes = {"core": 0, "general": 0, "domain": 0}
     selected_by_partition: dict[str, list[str]] = {}
     total = 0
@@ -225,24 +237,30 @@ def _jev_response(
             section_bytes[section] += size
         for partition, ids in local.selected_by_partition.items():
             selected_by_partition.setdefault(partition, []).extend(ids)
+    local_bytes = total
+    selections = [{"mode": "jev", "rank": rank, "score": round(score, 4)} for rank, (_, score) in enumerate(picks, 1)]
+    whole_lines = [_render(record, selector=selection) for (record, _), selection in zip(picks, selections)]
+    all_fit = total + sum(len(line) for line in whole_lines) <= budget
     delivered_picks = compact_picks = 0
-    for rank, (record, score) in enumerate(picks, 1):
-        selection = {"mode": "jev", "rank": rank, "score": round(score, 4)}
-        line = _render(record, selector=selection)
-        compact = len(line) > budget // _FULL_RENDER_SHARE or total + len(line) > budget
-        if compact:
-            line = render_compact(record, selector=selection)
+    crowded = False
+    for (record, _), selection, whole in zip(picks, selections, whole_lines):
+        too_large = len(whole) > budget // _FULL_RENDER_SHARE and record.record_id not in retried
+        compact = (not all_fit and too_large) or total + len(whole) > budget
+        line = render_compact(record, selector=selection) if compact else whole
         if total + len(line) > budget:
+            crowded |= len(line) <= budget
             continue
         compact_picks += compact
         total += len(line)
         delivered_picks += 1
         rendered.append(line)
         selected_ids.append(record.record_id)
+        if compact and len(whole) <= budget:
+            retry_ids.append(record.record_id)
         section_bytes[record.section] += len(line)
         selected_by_partition.setdefault(record.ontology_partition, []).append(record.record_id)
     if outcome == "picked" and not delivered_picks:
-        outcome = "oversized_picks"
+        outcome = "crowded_picks" if crowded else "oversized_picks"
     payload = b"".join(rendered)
     if len(payload) > budget:  # defensive invariant
         raise RuntimeError("selector budget invariant violated")
@@ -251,6 +269,7 @@ def _jev_response(
         "snapshot_id": snapshot_id,
         "payload": payload.decode("utf-8"),
         "selected_ids": selected_ids,
+        "retry_ids": retry_ids,
         "selected_bytes": len(payload),
         "budget_bytes": budget,
         "eligible_count": eligible_count,
@@ -269,6 +288,8 @@ def _jev_response(
             "delivered": delivered_picks,
             "delivered_compact": compact_picks,
             "unfit": len(picks) - delivered_picks,
+            "local_records": len(local.selected_ids) if local is not None else 0,
+            "local_bytes": local_bytes,
         },
     }
 
@@ -307,6 +328,7 @@ def select_prompt_payload(
     scope: str | None = None
     result: SelectionResult | None = None
     delivered_ids: set[str] = set()
+    retried_ids: set[str] = set()
     session_ref = _session_ref(session_id)
 
     def already_sent() -> frozenset[str]:
@@ -318,13 +340,20 @@ def select_prompt_payload(
     except Exception:
         jev, log = None, False
 
-    def record(value: SelectionResult, stages: Mapping[str, int] | None = None) -> None:
+    def record(
+        value: SelectionResult, stages: Mapping[str, int] | None = None, delivery: str | None = None,
+    ) -> None:
         """Exactly one content-free decision line per call, written once its
-        delivery is settled, plus the transfer marker whenever bytes left."""
+        delivery is settled, plus the transfer marker whenever bytes left.
+
+        ``value.outcome`` stays Jev's own result, which is what transfer health
+        counts as a success. ``delivery`` is what became of it in this turn.
+        """
         try:
             if log:
                 log_decision(root, decision_entry(
                     value, mode=mode, session_ref=session_ref, receipt_scope=scope, stages=stages,
+                    delivery_outcome=delivery,
                 ))
             if value.request_sent:
                 record_transfer(root, success=value.outcome in {"picked", "no_picks"})
@@ -361,7 +390,8 @@ def select_prompt_payload(
                         "jev", str(cached.get("selector_outcome") or "picked"),
                         response=cached, context=context,
                     )
-        delivered_ids = set() if refresh else receipts.delivered_ids(session_ref)
+        if not refresh:
+            delivered_ids, retried_ids = receipts.delivery_state(session_ref)
         node_types = set(jev["node_types"])
         excluded_domains = set(jev["exclude_domains"])
         candidates = engine.eligible_candidates(
@@ -403,22 +433,22 @@ def select_prompt_payload(
         ) if local_records else None
         response = _jev_response(
             context.snapshot_id, scope, result.picks, result.outcome,
-            len(pool) + len(local_records), selector_budget, local,
+            len(pool) + len(local_records), selector_budget, local, frozenset(retried_ids),
         )
         outcome = str(response["selector_outcome"])
         stages = response["selector_stages"]
         if refresh:
-            record(result, stages)
+            record(result, stages, outcome)
             return SelectorDecision("jev", outcome, response=response, context=context)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
-            record(result, stages)
+            record(result, stages, "already_delivered")
             return SelectorDecision(
                 "jev", "already_delivered",
                 response=_already_delivered(context.snapshot_id), context=context,
             )
         assert cached is not None
-        record(result, stages)
+        record(result, stages, outcome)
         return SelectorDecision("jev", outcome, response=cached, context=context)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn

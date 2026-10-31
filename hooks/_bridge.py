@@ -115,15 +115,22 @@ def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
 def run(action: str) -> int:
     try:
         event = json.load(sys.stdin)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        # Stays ASCII: a lone surrogate in the event cannot be encoded for the pipe.
+        payload = json.dumps(event, separators=(",", ":"))
+    except (ValueError, RecursionError):
         return _failure(action, "hook_input_invalid")
-    stop_hook_active = isinstance(event, dict) and bool(event.get("stop_hook_active"))
+    if not isinstance(event, dict):
+        return _failure(action, "hook_input_invalid")
+    stop_hook_active = bool(event.get("stop_hook_active"))
     try:
         process = _graceful_run(
             [sys.executable, "-m", "imprint.cli", "hook", action],
-            json.dumps(event, ensure_ascii=False, separators=(",", ":")),
+            payload,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # The hook reports success to the host, so this is the only trace of the
+        # work it gave up on.
+        _persist_failure(action, subprocess.CompletedProcess(exc.cmd, None, "", "hook action timed out"))
         return _failure(action, "hook_action_timeout", stop_hook_active=stop_hook_active)
     except OSError:
         return _failure(action, "hook_executable_unavailable", stop_hook_active=stop_hook_active)

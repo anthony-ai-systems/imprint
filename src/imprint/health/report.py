@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import Literal
+from dataclasses import asdict, dataclass, field
+from typing import Literal, Mapping
 
 HEALTH_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_RECORD_MAJOR = 3
 SUPPORTED_HOOK_MAJOR = 1
+# A refused transcript used to surface as a hook failure. T3 session references
+# going unreadable stops all T3 capture. Any one of either needs someone to look.
+_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_refused")
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,9 @@ class HealthInputs:
     quarantine_count: int = 0
     hook_failure_count: int = 0
     hook_failure_newest_age_seconds: int = -1
+    t3_record_unavailable_24h: int = 0
+    t3_record_unavailable_newest_age_seconds: int = -1
+    capture_skips_24h: Mapping[str, int] = field(default_factory=dict)
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
     selected_bytes: int = 0
@@ -114,6 +120,9 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("quarantine_present")
     if values.hook_failure_count > 0:
         reasons.append("hook_failures_present")
+    if values.t3_record_unavailable_24h > 0:
+        reasons.append("t3_record_unavailable")
+    reasons.extend(reason for reason in _DEGRADING_CAPTURE_SKIPS if values.capture_skips_24h.get(reason))
     if not values.permissions_ok or values.unsafe_permission_count > 0:
         reasons.append("unsafe_permissions")
     if values.selected_bytes > values.retrieval_budget_bytes:
@@ -173,6 +182,10 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_count": max(0, values.hook_failure_count),
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
+        "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
+        "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
+        "t3_record_evidence": "operator_logs_capture_skips_tail",
+        "capture_skips_24h": dict(values.capture_skips_24h),
         "permissions_ok": values.permissions_ok,
         "unsafe_permission_count": max(0, values.unsafe_permission_count),
         "permissions_evidence": "posix_mode_scan_or_platform_acl_contract",
