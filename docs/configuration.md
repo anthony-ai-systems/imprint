@@ -46,6 +46,12 @@ object and preserves unknown namespaced extensions.
 - `experimental.profile_learning`: experimental; disabled by default.
 - `selector`: optional prompt-time relevance selection; see below. The default
   `mode` is `deterministic`, which makes no network request.
+- `org.imprint.short_lines.prompt`: `false` (default) or `true`. Delivers what the
+  UserPromptSubmit hook sends on short lines; see Short lines below.
+- `org.imprint.short_lines.session_start`: `false` (default) or `true`. The same
+  for SessionStart. Leave it off until session start can filter by client: it
+  sends records from every client, and short lines let it send about three times
+  as many of them.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -169,7 +175,8 @@ Selection semantics:
   skipped. When every sendable record was already delivered, the prompt is
   `no_picks` and Jev is not called.
 - Each delivered line is the ordinary JSON retrieval line plus
-  `"selector": {"mode": "jev", "rank": N, "score": S}`, unless it is compact.
+  `"selector": {"mode": "jev", "rank": N, "score": S}`, unless it is compact or
+  short.
 - Picks that all fit the budget are delivered whole. Otherwise a pick over a
   quarter of the budget is delivered as a compact line, and so is any pick the
   budget has no room left for. A compact line keeps `authority`, `case_ids`,
@@ -225,7 +232,8 @@ counts records `eligible`, `picked`, `delivered`, `delivered_compact`, and
 `unfit`, plus `local_records` and `local_bytes` delivered ahead of the picks.
 `delivery_outcome` and `stages` are null on `shadow` and `fallback` lines, which
 deliver nothing of Jev's. When there is something to report, `stages` also has
-`reserved`, the reserved rules delivered, and `stale_withheld`, and every line can
+`reserved`, the reserved rules delivered, `stale_withheld`, and `delivered_short`,
+the picks delivered on short lines, and every line can
 carry `reserved_picks`, the rules in Jev's picks, `stale_withheld`, and
 `stale_scan_cut`. The log never contains prompt text, judgment text, or
 the key. The line is written once the turn's delivery is settled, so a failure
@@ -242,6 +250,54 @@ timestamps. It is written even when `log_decisions` is `false`, so turning the
 log off or rotating it cannot hide a transfer. `selector_fallbacks_24h` counts
 decision-log lines (current and rotated file), so it stays 0 when
 `log_decisions` is `false`.
+
+## Short lines
+
+A rule's references cost more than its words. On a whole line, 160 bytes of text
+takes about 760 bytes, so a budget of 4,096 bytes carries 5 rules on a prompt and 4
+at session start, which spends only its core and general sections. A short line
+carries the words and leaves the rest one lookup away. This shapes delivery only:
+the record, the store and the record ids in receipts are untouched, and with both
+switches off delivery is unchanged.
+
+- Each switch covers one route. `org.imprint.short_lines.prompt` covers everything
+  the UserPromptSubmit hook delivers: Jev's picks, the local records ahead of them,
+  the matched domain in `deterministic` mode, and the deterministic answer after a
+  fallback. `shadow` delivers what `deterministic` delivers, so it goes short with
+  it. `org.imprint.short_lines.session_start` covers SessionStart, which stays
+  deterministic: the same store and request give the same bytes. `imprint retrieve`,
+  with or without `--prompt`, and analytical retrieval always give whole lines.
+- A short line has `authority`, `record_id` and `text`. `text` follows the compact
+  line's rules above, so it is always the record's own words. Text that was cut adds
+  `text_basis` and `"text_complete": false`, and a line without them has all of its
+  text. Picks go short even when they would all fit whole.
+- The first short line of a payload also has `"detail": "imprint history
+  <record_id>"`, which holds for every line in it.
+- `selector` appears only on a reserved rule, as `{"reserved": true}`. Nothing reads
+  the rest of the block: the order of the lines is the rank, and the decision log
+  has each pick's score.
+- `imprint history <record_id>` returns what a short line leaves out. Its
+  `whole_line` is the record's whole retrieval line, with `case_ids`,
+  `case_summaries`, `evidence_ids`, `ontology` and `source_receipt_ids`. It is `null`
+  for a node retrieval never delivers, such as Evidence, and for a record closed
+  since, whose `versions` and `dispositions` say why.
+- A rule whose whole text went out on a short line counts as delivered, so it is
+  not sent again. One whose text was cut is listed in `retry_ids` if its whole line
+  could fit the budget, and when it is picked again it arrives on a whole line, as
+  long as there is room, and is then done. One whose whole line can never fit counts
+  as delivered from its short line.
+- Once a section has refused a line, the rest of its records over 400 bytes are
+  passed over without being cut, because cutting reads all of a long record and
+  session start meets every eligible one. Shorter records can still fill the room.
+
+With a 56-byte record id, 160 bytes of text and a budget of 4,096 bytes, 15 rules
+fit a prompt and 11 fit session start. Session start reaches 12 only with text of
+146 bytes or less: 12 lines and the lookup have 252 bytes a line, and the line's
+keys and id take 106 of them. A prompt of nothing but `imported_floor` rules holds 14,
+and so does one with 5 reserved rules. Text cut to 400 bytes costs more than these.
+
+Both keys are dotted, so an older build keeps them and reads nothing into them, and
+rolling back needs no change to the config.
 
 ## Environment overrides
 

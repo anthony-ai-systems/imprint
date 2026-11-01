@@ -107,10 +107,12 @@ declared theory separate from observed operating evidence.
 
 Every rendered retrieval record carries an `ontology` object with its semantic
 `partition`, `type`, `path`, optional `confidence`, and plain-language
-`disclosure`. The one exception is a compact line from the optional selector
-(see `docs/configuration.md`), which keeps `authority`, its evidence, case, and
-receipt references, and a `detail` command for reading the record locally. The
-stable partitions are `judgment`, `self_model`,
+`disclosure`. There are two exceptions, both described in
+`docs/configuration.md`. A compact line from the optional selector keeps
+`authority`, its evidence, case, and receipt references, and a `detail` command
+for reading the record locally. A short line, off by default, keeps `authority`
+and `record_id`, and `imprint history <record_id>` returns the rest. Analytical
+retrieval is never compact or short. The stable partitions are `judgment`, `self_model`,
 `chosen_future`, `default_future`, `direction_comparison`,
 `business_declared`, and `business_observed`. Declared business theory and
 observed operating evidence therefore remain distinguishable even when both
