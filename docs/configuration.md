@@ -24,7 +24,10 @@ object and preserves unknown namespaced extensions.
   home it lists, and reports homes with no hooks or another data root under
   `t3_homes`, without changing `status`. The prompt hook and `imprint retrieve
   --prompt` also read T3's thread and provider-thread records, and send Jev nothing
-  from a thread T3 places in its scratch folder. Set this key after the build that
+  from a scratch thread when those records place it there and a provider row names
+  the session. Short of that they keep Jev and send the prompt, so
+  `IMPRINT_SELECTOR=off` is what keeps a prompt local; see
+  `docs/privacy-and-recovery.md`. Set this key after the build that
   knows it is installed. An older build refuses any config that has it, which
   fails every hook and `imprint version`, so before reinstalling an older build,
   remove `t3_capture_origin` from the config.
@@ -57,9 +60,12 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
     snapshot, or skips when no domain matches.
   - `jev`: every non-empty UserPromptSubmit (and `imprint retrieve --prompt`)
     asks Jev which eligible judgments apply to the turn, even when no domain
-    matches, and injects the picks. With `t3_capture_origin: true`, a thread T3
-    places in its scratch folder is the exception, in `shadow` mode too: it gets
-    the `deterministic` context and sends nothing.
+    matches, and injects the picks. With `t3_capture_origin: true`, a thread T3's
+    records place in its scratch folder is the exception when a provider row names
+    the session, in `shadow` mode too: it gets the `deterministic` context and
+    sends nothing. A nested run, a `retrieve` run T3 cannot tie to a session and
+    T3 records that cannot be read all keep Jev and send the prompt, so use
+    `IMPRINT_SELECTOR=off` for work that must stay local.
   - `shadow`: calls Jev and logs the decision, but always delivers exactly the
     `deterministic` context, including after compact or resume. Use it to
     evaluate picks before switching.
@@ -200,8 +206,8 @@ Selection semantics:
 - Hook output carries content-free `selector_method` (`deterministic`, `jev`,
   `deterministic_fallback`, or `shadow`), `selector_outcome`, and
   `fallback_reason`. The existing `selection_method` field still reports how
-  the domain was matched. A turn in a T3 scratch chat has `selector_outcome`
-  `t3_scratch_thread`.
+  the domain was matched. A turn the T3 scratch check keeps from Jev has
+  `selector_outcome` `t3_scratch_thread`.
 
 Decision log: with `log_decisions`, each selector call appends one line to
 `<operator root>/logs/jev-selector.jsonl` (private file mode) with the time,

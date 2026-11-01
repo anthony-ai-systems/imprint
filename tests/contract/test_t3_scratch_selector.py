@@ -243,6 +243,11 @@ def _provider_not_json(tmp_path, scratch):
     return _t3_store(tmp_path, provider_payloads=["{"], project_root=str(scratch))
 
 
+def _one_provider_not_json(tmp_path, scratch):
+    matching = json.dumps({"nativeThreadRef": {"nativeId": SESSION}})
+    return _t3_store(tmp_path, provider_payloads=[matching, "{"], project_root=str(scratch))
+
+
 def _relative_folder(tmp_path, scratch):
     return _t3_store(tmp_path, thread_payload='{"worktreePath": "scratch/relative"}', project_root="/synthetic/project")
 
@@ -258,7 +263,7 @@ def _no_folder(tmp_path, scratch):
 @ROUTES
 @pytest.mark.parametrize("build", [
     _no_store, _no_tables, _no_thread_row, _no_provider_row, _thread_not_json, _thread_not_an_object,
-    _provider_not_json, _relative_folder, _folder_of_another_type, _no_folder,
+    _provider_not_json, _one_provider_not_json, _relative_folder, _folder_of_another_type, _no_folder,
 ])
 def test_a_thread_t3_cannot_place_keeps_jev(tmp_path, transport, monkeypatch, capsys, route, build):
     config = _config(tmp_path)
@@ -299,6 +304,26 @@ def test_a_nested_run_in_a_scratch_thread_keeps_jev_on_retrieve(tmp_path, transp
     monkeypatch.setenv(CLAUDE_SESSION_ENV, "session-of-a-nested-run")
     _retrieve(config, monkeypatch, capsys, session=SESSION)
     assert len(transport.calls) == 1
+
+
+def test_retrieve_with_a_label_t3_does_not_know_sends_the_prompt(tmp_path, transport, monkeypatch, capsys):
+    """Run by hand or by a script, there is no session to tie to the scratch thread."""
+    config = _config(tmp_path)
+    _seed(config, monkeypatch, capsys)
+    _in_t3(monkeypatch, _t3_store(tmp_path, project_root=str(tmp_path / "t3" / "scratch")))
+    _retrieve(config, monkeypatch, capsys, session="my-script-label")
+    assert [request["state"] for request in transport.calls] == [PROMPT]
+
+
+@pytest.mark.parametrize("name", ["docs/privacy-and-recovery.md", "docs/configuration.md"])
+def test_the_docs_do_not_promise_a_scratch_thread_stays_local(name):
+    """The check fails open, so these pages name what still sends and how to stop it."""
+    page = " ".join((Path(__file__).resolve().parents[2] / name).read_text(encoding="utf-8").split())
+    assert "send Jev nothing from a thread T3 places" not in page
+    assert "neither sends anything from a thread T3 places" not in page
+    assert "places in its scratch folder is the exception" not in page
+    start = page.index("provider row")
+    assert "`IMPRINT_SELECTOR=off`" in page[start:start + 700]
 
 
 def test_retrieve_finds_a_scratch_thread_whatever_label_it_is_given(tmp_path, transport, monkeypatch, capsys):
