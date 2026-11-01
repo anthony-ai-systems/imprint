@@ -56,6 +56,19 @@ def test_hook_failure_backlog_is_visible_as_counts_and_ages_only():
     assert report.metrics["hook_failure_evidence"] == "operator_logs_hook_failures_file_scan"
 
 
+def test_only_a_recent_hook_failure_degrades_and_every_one_stays_counted():
+    report = healthy(hook_failure_count=64, hook_failure_recent_count=0, hook_failure_newest_age_seconds=900000)
+    assert "hook_failures_present" not in report.degraded_reasons
+    assert report.metrics["hook_failure_count"] == 64
+    assert report.metrics["hook_failure_recent_count"] == 0
+    assert report.metrics["hook_failure_old_count"] == 64
+
+    report = healthy(hook_failure_count=64, hook_failure_recent_count=1)
+    assert "hook_failures_present" in report.degraded_reasons
+    assert report.metrics["hook_failure_recent_count"] == 1
+    assert report.metrics["hook_failure_old_count"] == 63
+
+
 def test_absent_hook_failure_backlog_is_healthy_and_reports_unknown_age():
     report = healthy()
     assert report.status == "green"

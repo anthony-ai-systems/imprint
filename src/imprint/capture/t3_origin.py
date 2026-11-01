@@ -116,25 +116,49 @@ def _database_path(environ: Mapping[str, str]) -> Path | None:
     return base / "userdata" / "statev2.sqlite"
 
 
-def _read_records(
-    database: Path, thread_id: str,
-) -> tuple[tuple[Any, ...] | None, tuple[Any, ...], tuple[tuple[Any, Mapping[str, Any]], ...]] | None:
-    """Return the thread's folders, provider rows and newest prompts, or None if unreadable.
+def t3_settings_path(environ: Mapping[str, str] | None = None) -> Path | None:
+    """Return T3's settings file, which sits beside its store, if its home resolves."""
+    database = _database_path(os.environ if environ is None else environ)
+    return None if database is None else database.with_name("settings.json")
 
-    A thread with no row gets None for its folders: T3 keeps a test server's state
-    apart, so a run can name a thread that this store does not hold.
-    """
+
+def _connect(database: Path) -> sqlite3.Connection | None:
     try:
-        connection = sqlite3.connect(
+        return sqlite3.connect(
             f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_SECONDS,
         )
     except (sqlite3.Error, OSError, ValueError, RuntimeError):
         return None
+
+
+def _thread_records(connection: sqlite3.Connection, thread_id: str) -> tuple[Any, Any, tuple[Any, ...]]:
+    """Return the thread's row, its decoded payload and its provider rows."""
+    thread = connection.execute(_THREAD_QUERY, (thread_id,)).fetchone()
+    payload = None if thread is None else json.loads(thread[0])
+    rows = connection.execute(_PROVIDER_THREADS_QUERY, (thread_id,)).fetchall()
+    return thread, payload, tuple(json.loads(row) for (row,) in rows)
+
+
+def _thread_folders(thread: Any, payload: Any) -> tuple[Any, ...] | None:
+    """Return the thread's folders, or None when the store holds no such thread.
+
+    T3 keeps a test server's state apart, so a run can name a thread that this
+    store does not hold.
+    """
+    if thread is None:
+        return None
+    return tuple(folder for folder in (payload.get("worktreePath"), thread[1]) if folder is not None)
+
+
+def _read_records(
+    database: Path, thread_id: str,
+) -> tuple[tuple[Any, ...] | None, tuple[Any, ...], tuple[tuple[Any, Mapping[str, Any]], ...]] | None:
+    """Return the thread's folders, provider rows and newest prompts, or None if unreadable."""
+    connection = _connect(database)
+    if connection is None:
+        return None
     try:
-        thread = connection.execute(_THREAD_QUERY, (thread_id,)).fetchone()
-        payload = None if thread is None else json.loads(thread[0])
-        rows = connection.execute(_PROVIDER_THREADS_QUERY, (thread_id,)).fetchall()
-        providers = tuple(json.loads(payload) for (payload,) in rows)
+        thread, payload, providers = _thread_records(connection, thread_id)
         rows = connection.execute(_PROMPTS_QUERY, (thread_id, _RECENT_PROMPTS)).fetchall()
         prompts = tuple((message_id, json.loads(payload)) for (message_id, payload) in rows)
     except (sqlite3.Error, ValueError, TypeError, RecursionError):
@@ -147,26 +171,61 @@ def _read_records(
     )
     if not usable:
         return None
-    if thread is None:
-        return None, providers, prompts
-    folders = tuple(folder for folder in (payload.get("worktreePath"), thread[1]) if folder is not None)
-    return folders, providers, prompts
+    return _thread_folders(thread, payload), providers, prompts
+
+
+def _read_placement(database: Path, thread_id: str) -> tuple[tuple[Any, ...] | None, tuple[Any, ...]] | None:
+    """Return the thread's folders and provider rows, or None if unreadable.
+
+    This reads no prompt, so it costs a prompt hook as little as it can.
+    """
+    connection = _connect(database)
+    if connection is None:
+        return None
+    try:
+        thread, payload, providers = _thread_records(connection, thread_id)
+    except (sqlite3.Error, ValueError, TypeError, RecursionError):
+        return None
+    finally:
+        connection.close()
+    if thread is not None and not isinstance(payload, dict):
+        return None
+    return _thread_folders(thread, payload), providers
+
+
+def _scratch_placement(folders: tuple[Any, ...] | None, database: Path) -> bool | None:
+    """Say whether T3's records place a thread in its scratch folder.
+
+    True when a folder is in scratch, False when every folder can be read and none
+    is, and None when the records cannot say: no thread row, no folder, or a folder
+    that is not absolute or cannot be read.
+    """
+    if not folders:
+        return None
+    try:
+        scratch = (database.parents[1] / _SCRATCH_FOLDER).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    placement: bool | None = False
+    for folder in folders:
+        try:
+            path = Path(folder)
+            if not path.is_absolute():
+                placement = None
+            elif path.resolve().is_relative_to(scratch):
+                return True
+        except (OSError, RuntimeError, TypeError, ValueError):
+            placement = None
+    return placement
 
 
 def _in_scratch(folders: tuple[Any, ...] | None, database: Path) -> bool:
-    """Answer whether T3 keeps this thread in its scratch folder.
+    """Answer whether to credit nothing because this thread may be in scratch.
 
     A folder that cannot be read is not credited, since it could be that one. So
     is a session with no thread row, which leaves no folder to read.
     """
-    if not folders:
-        return True
-    try:
-        scratch = (database.parents[1] / _SCRATCH_FOLDER).resolve()
-        paths = tuple(Path(folder) for folder in folders)
-        return any(not path.is_absolute() or path.resolve().is_relative_to(scratch) for path in paths)
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return True
+    return _scratch_placement(folders, database) is not False
 
 
 def _native_session(provider_row: Any) -> Any:
@@ -268,6 +327,23 @@ class T3HostOrigin:
         ):
             return None
         return words, message_id, prompt
+
+    def in_scratch(self) -> bool:
+        """Answer whether T3's records place this session's thread in its scratch folder.
+
+        Capture refuses whatever it cannot place. Selection is the other way round:
+        this turns a service off, so a thread the records cannot place keeps it, and
+        only a clear placement counts. A run inherits T3CODE_THREAD_ID from whatever
+        started it, so unless a provider row names this exact session the thread's
+        folder says nothing about this run.
+        """
+        records = None if self._database is None else _read_placement(self._database, self._thread_id)
+        if records is None:
+            return False
+        folders, providers = records
+        if self._session_id not in [_native_session(row) for row in providers]:
+            return False
+        return _scratch_placement(folders, self._database) is True
 
     def attests(self, entry: Mapping[str, Any], text: str) -> bool:
         """Answer for an SDK prompt or a mid-turn one, which records no entrypoint."""

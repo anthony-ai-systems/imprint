@@ -8,11 +8,11 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .errors import ValidationError
-from .paths import default_data_root, operator_root, validate_data_root
+from .paths import default_data_root, expand_home, home_directory, operator_root, validate_data_root
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -267,35 +267,42 @@ def _validate_config(data: dict[str, Any]) -> None:
     _validate_selector(data)
 
 
-def config_path() -> Path:
-    override = os.environ.get("IMPRINT_CONFIG")
+def config_path(environ: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if environ is None else environ
+    override = values.get("IMPRINT_CONFIG")
     if override:
-        return Path(override).expanduser()
+        return expand_home(override, environ)
     if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home()))
+        base = Path(values.get("APPDATA", home_directory(environ)))
         return base / "Imprint" / "config.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "imprint" / "config.json"
+    return Path(values.get("XDG_CONFIG_HOME", home_directory(environ) / ".config")) / "imprint" / "config.json"
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
     target = path or config_path()
-    data = copy.deepcopy(DEFAULTS)
+    loaded: Any = {}
     if target.exists():
         try:
             loaded = json.loads(target.read_text())
         except (OSError, json.JSONDecodeError) as exc:
             raise ValidationError(f"corrupt config: {target}") from exc
-        if not isinstance(loaded, dict):
-            raise ValidationError("config must be an object")
-        unknown = {key for key in loaded if key not in KNOWN_TOP_LEVEL and "." not in key}
-        if unknown:
-            raise ValidationError(
-                f"unknown config keys: {sorted(unknown)}; namespace extensions with a dot"
-            )
-        if "selector" in loaded:
-            # A partial selector object overlays the defaults instead of replacing them.
-            loaded["selector"] = _merge_selector(DEFAULTS["selector"], loaded["selector"])
-        data.update(loaded)
+    return parse_config(loaded)
+
+
+def parse_config(loaded: Any) -> dict[str, Any]:
+    """Validate a decoded config over the defaults, for a caller that read it itself."""
+    if not isinstance(loaded, dict):
+        raise ValidationError("config must be an object")
+    unknown = {key for key in loaded if key not in KNOWN_TOP_LEVEL and "." not in key}
+    if unknown:
+        raise ValidationError(
+            f"unknown config keys: {sorted(unknown)}; namespace extensions with a dot"
+        )
+    if "selector" in loaded:
+        # A partial selector object overlays the defaults instead of replacing them.
+        loaded["selector"] = _merge_selector(DEFAULTS["selector"], loaded["selector"])
+    data = copy.deepcopy(DEFAULTS)
+    data.update(loaded)
     _validate_config(data)
     try:
         from .domains import registry_from_config
@@ -305,7 +312,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return data
 
 
-def resolved_operator_root(config: dict[str, Any]) -> Path:
+def resolved_operator_root(config: dict[str, Any], environ: Mapping[str, str] | None = None) -> Path:
     explicit = config.get("data_root")
-    base = validate_data_root(Path(explicit).expanduser()) if explicit else default_data_root()
+    base = validate_data_root(Path(explicit), environ=environ) if explicit else default_data_root(environ)
     return operator_root(str(config["operator_slug"]), base)

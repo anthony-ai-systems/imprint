@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Send Jev nothing from T3's scratch chats. Under `t3_capture_origin`, the prompt
+  hook and `imprint retrieve --prompt` give a thread T3's records place in its
+  scratch folder the deterministic answer, with `selector_outcome`
+  `t3_scratch_thread`. A thread the records cannot place keeps Jev, including when
+  they cannot be read, and so do a nested run, whose session no provider row names,
+  and a `retrieve` run with a label T3 does not know. Each still sends its whole
+  request, so this does not keep prompts local: `IMPRINT_SELECTOR=off` where the hook
+  will see it does, and so does `selector.mode: deterministic`. Session start is
+  unchanged, and T3's store is not opened with the setting off or on a turn that
+  would not call Jev.
+- Report the Claude homes T3 launches that have no Imprint hooks, or send them to
+  another store, as `t3_homes` in `imprint health`. The homes come from T3's own
+  settings file, under `t3_capture_origin`, so nothing is read with it off and no
+  setting is added. A missing or unreadable file is reported, not a failure, and
+  one home that cannot be read keeps its row without costing the others. Each home
+  is resolved as a hook would resolve it, including a `HOME` it sets, so the
+  launcher's `IMPRINT_CONFIG` no longer hides what a home sets. This reports and
+  does not change `status`.
+- Correct the docs on adding hooks to a Claude home: they pointed at the
+  installer, which is a full reinstall that resets the operator and data root.
+  They now name the packaged `manage_hooks.py` `register`, `unregister` and
+  `status` commands, run under `umask 077`.
+- Stop an old hook failure holding health at `degraded`. Only a failure from the
+  last 7 days degrades it. `hook_failure_count` still counts every file, and
+  `hook_failure_recent_count` and `hook_failure_old_count` split it. Nothing is
+  deleted or pruned.
+- Say what turned a transcript away. The four checks behind `transcript_path must
+  be an absolute regular non-symlink file` each log their own `code` to
+  `logs/capture-skips.jsonl`, with `errno` where there is one, a `path_class` and
+  a keyed `path_hash`, and no line holds a path. A malformed line or text that is
+  not UTF-8 now returns `transcript_malformed` rather than `transcript_refused`,
+  so the two count apart in `capture_skips_24h`. Both degrade health.
 - Stop crediting prompts in T3's "No project" chats, which live in its `scratch`
   folder, and report them as `t3_scratch_thread`. A script driving the T3 app is
   recorded as `user` and `web` like a person, so its prompts were stored as the

@@ -19,10 +19,20 @@ object and preserves unknown namespaced extensions.
   `t3_record_unavailable`. See
   `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
   hooks are registered, so a host with its own Claude config directory needs
-  `install.sh --settings <that directory>/settings.json`. Set this key after
-  the build that knows it is installed. An older build refuses any config that
-  has it, which fails every hook and `imprint version`, so before reinstalling
-  an older build, remove `t3_capture_origin` from the config.
+  them registered there with `manage_hooks.py`; see Hook registration below.
+  When `true`, `imprint health` also reads T3's settings file and each Claude
+  home it lists, and reports homes with no hooks or another data root under
+  `t3_homes`, without changing `status`. In `jev` or `shadow` mode, the prompt hook
+  and `imprint retrieve --prompt` also read T3's thread and provider-thread records,
+  and send Jev nothing from a scratch thread when those records place it there and
+  a provider row names the session. Short of that they keep Jev and send the same
+  request as any other turn: the prompt, any previous-reply excerpt and the judgment
+  statements. So this does not keep prompts local. Setting `IMPRINT_SELECTOR=off`
+  where the hook will see it does, and so does `selector.mode: deterministic`; see
+  `docs/privacy-and-recovery.md`. Set this key after the build that
+  knows it is installed. An older build refuses any config that has it, which
+  fails every hook and `imprint version`, so before reinstalling an older build,
+  remove `t3_capture_origin` from the config.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
   Values above 32,768 require `allow_higher_budget: true`.
 - `spool_retention_days`: 1–36,500; default 30. Pruning is never automatic and
@@ -52,7 +62,14 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
     snapshot, or skips when no domain matches.
   - `jev`: every non-empty UserPromptSubmit (and `imprint retrieve --prompt`)
     asks Jev which eligible judgments apply to the turn, even when no domain
-    matches, and injects the picks.
+    matches, and injects the picks. With `t3_capture_origin: true`, a thread T3's
+    records place in its scratch folder is the exception when a provider row names
+    the session, in `shadow` mode too: it gets the `deterministic` context and
+    sends nothing. A nested run, a `retrieve` run T3 cannot tie to a session and
+    T3 records that cannot be read all keep Jev and send the same request as any
+    other turn, so this does not keep prompts local. For work that must stay
+    local, set `IMPRINT_SELECTOR=off` where the hook will see it, or use
+    `selector.mode: deterministic`.
   - `shadow`: calls Jev and logs the decision, but always delivers exactly the
     `deterministic` context, including after compact or resume. Use it to
     evaluate picks before switching.
@@ -193,7 +210,8 @@ Selection semantics:
 - Hook output carries content-free `selector_method` (`deterministic`, `jev`,
   `deterministic_fallback`, or `shadow`), `selector_outcome`, and
   `fallback_reason`. The existing `selection_method` field still reports how
-  the domain was matched.
+  the domain was matched. A turn the T3 scratch check keeps from Jev has
+  `selector_outcome` `t3_scratch_thread`.
 
 Decision log: with `log_decisions`, each selector call appends one line to
 `<operator root>/logs/jev-selector.jsonl` (private file mode) with the time,
@@ -232,10 +250,14 @@ decision-log lines (current and rotated file), so it stays 0 when
   example `off`, `deterministic`, `0`, `false`, or `disabled`) forces
   deterministic retrieval over any config. `jev` and `shadow` leave the
   configured mode in force. It can only turn the selector off; no value turns
-  it on.
+  it on. It is read from the process that sends, so set it where the hook will
+  see it: under T3, the instance's `environment`, the home's `env` or the server's
+  environment. A shell export reaches only what that shell runs.
 - `IMPRINT_DATA_ROOT`: default data root used when config omits `data_root`.
 - `IMPRINT_INSTALL_ROOT`: installer/application destination.
-- `CLAUDE_SETTINGS_PATH`: Claude Code settings path used by installers.
+- `CLAUDE_SETTINGS_PATH`: the Claude Code settings path an installer registers
+  hooks in as part of a full install. To add hooks to one more home, use
+  `manage_hooks.py`; see Hook registration.
 - `XDG_CONFIG_HOME` and `XDG_DATA_HOME`: respected on POSIX systems.
 
 ## Multi-operator and multi-node use
@@ -252,3 +274,34 @@ The installer edits only `hooks.SessionStart`, `hooks.UserPromptSubmit`, and
 `hooks.Stop`. Before every edit it creates a timestamped settings backup. Managed
 entries contain `imprint-local-managed-hook`; reinstall first removes those
 entries, then adds one copy of each intended hook. Unrelated entries are retained.
+
+To add or remove hooks in one Claude home, such as a host's own config directory,
+run the packaged `manage_hooks.py` from the install root, under `umask 077`. It
+edits only that home's settings file, in the same way and with the same backup.
+Do not use the installer for this, whatever its `--settings` option suggests: it
+is a full reinstall. It sets `operator_slug` back to `default` unless `--operator`
+is passed, and `data_root` back to its default unless `--data-root` is.
+
+```bash
+umask 077
+INSTALL_ROOT="${IMPRINT_INSTALL_ROOT:-$HOME/.local/lib/imprint-local}"
+PYTHON="$INSTALL_ROOT/venv/bin/python"
+SETTINGS="/path/to/claude-home/settings.json"
+
+# Add the hooks to this home.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" register \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+
+# Check them. Exit 0 means each hook is registered once.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" status \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+
+# Remove only Imprint's hooks from this home.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" unregister \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+```
+
+`register` and `unregister` replace the settings file, so `umask 077` keeps the new
+one private. On Windows the same commands use `venv\Scripts\python.exe` and
+`tools\manage_hooks.py` under the install root, which defaults to
+`%LOCALAPPDATA%\ImprintApp\app`, and `umask` does not apply.

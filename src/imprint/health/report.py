@@ -6,9 +6,10 @@ from typing import Literal, Mapping
 HEALTH_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_RECORD_MAJOR = 3
 SUPPORTED_HOOK_MAJOR = 1
-# A refused transcript used to surface as a hook failure. T3 session references
-# going unreadable stops all T3 capture. Any one of either needs someone to look.
-_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_refused")
+# A transcript refused or malformed used to surface as a hook failure. T3 session
+# references going unreadable stops all T3 capture. Any one of these needs someone
+# to look.
+_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_malformed", "transcript_refused")
 
 
 @dataclass(frozen=True)
@@ -27,10 +28,12 @@ class HealthInputs:
     spool_retention_days: int = 30
     quarantine_count: int = 0
     hook_failure_count: int = 0
+    hook_failure_recent_count: int | None = None
     hook_failure_newest_age_seconds: int = -1
     t3_record_unavailable_24h: int = 0
     t3_record_unavailable_newest_age_seconds: int = -1
     capture_skips_24h: Mapping[str, int] = field(default_factory=dict)
+    t3_homes: Mapping[str, object] | None = None
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
     selected_bytes: int = 0
@@ -94,6 +97,11 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         if values.oldest_unacknowledged_spool_age_seconds is None
         else values.oldest_unacknowledged_spool_age_seconds
     )
+    hook_failure_recent_count = (
+        values.hook_failure_count
+        if values.hook_failure_recent_count is None
+        else values.hook_failure_recent_count
+    )
     if values.compiler_count == 0:
         reasons.append("compiler_missing")
     elif values.compiler_count > 1:
@@ -118,7 +126,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("spool_stale")
     if values.quarantine_count > 0:
         reasons.append("quarantine_present")
-    if values.hook_failure_count > 0:
+    if hook_failure_recent_count > 0:
         reasons.append("hook_failures_present")
     if values.t3_record_unavailable_24h > 0:
         reasons.append("t3_record_unavailable")
@@ -180,6 +188,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "retrieval_omitted_count": max(0, values.retrieval_omitted_count),
         "quarantine_count": max(0, values.quarantine_count),
         "hook_failure_count": max(0, values.hook_failure_count),
+        "hook_failure_recent_count": max(0, hook_failure_recent_count),
+        "hook_failure_old_count": max(0, values.hook_failure_count - hook_failure_recent_count),
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
@@ -205,6 +215,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "spool_evidence": "regular_spool_files_mtime_and_durable_commit_evidence",
         "stale_lock_count": max(0, values.stale_lock_count),
     }
+    if values.t3_homes is not None:
+        metrics["t3_homes"] = dict(values.t3_homes)
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
         status="red" if reasons else "green",

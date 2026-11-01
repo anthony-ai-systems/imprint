@@ -87,6 +87,37 @@ _PREVIOUS_REPLY_LABEL = "Previous assistant reply:"
 # HOOK_TIMEOUT_SECONDS (10); the rest covers interpreter start-up and the
 # deterministic fallback, so a slow endpoint can never empty the hook output.
 HOOK_SELECTOR_BUDGET_SECONDS = 6.0
+# Claude Code sets this for what a session runs, and each nested session has its own.
+CLAUDE_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
+
+
+def _t3_scratch_thread(config: dict, native_session: str | None) -> bool:
+    """Whether T3's records place this session's thread in its scratch folder.
+
+    This turns a service off for a turn, so a check that fails leaves it on.
+    """
+    if config.get("t3_capture_origin") is not True:
+        return False
+    try:
+        from .capture.t3_origin import t3_host_origin
+        origin = t3_host_origin(config, native_session)
+        return origin is not None and origin.in_scratch()
+    except Exception:
+        return False
+
+
+def _turn_selector(config: dict, prompt: str, native_session: str | None) -> tuple[str, dict[str, object]]:
+    """Return this turn's selector mode and what its output says about the choice.
+
+    T3's scratch chats get no Jev, and T3 is asked only on a turn that would call it.
+    """
+    from .config import effective_selector_mode
+    mode = effective_selector_mode(config.get("selector"))
+    fields: dict[str, object] = {"selector_method": "deterministic"}
+    if mode != "deterministic" and prompt.strip() and _t3_scratch_thread(config, native_session):
+        from .capture.t3_origin import T3_SCRATCH_THREAD_REASON
+        return "deterministic", {**fields, "selector_outcome": T3_SCRATCH_THREAD_REASON}
+    return mode, fields
 
 
 def _selector_state(prompt: str, event: dict, selector: dict) -> str:
@@ -217,9 +248,22 @@ def _hook_input_invalid() -> int:
     return 0
 
 
-def _record_capture_skip(root: Path, reason: str) -> None:
+def _rejection_detail(root: Path, path_value: str, error: ValidationError) -> dict[str, str]:
+    """Say why a transcript was turned away, without ever naming its path.
+
+    The hash is keyed, so it tells one file failing again from many files failing
+    once, and a guessed path cannot be checked against the log.
+    """
+    reference = hmac.new(
+        _session_key(root), f"transcript-path:{path_value}".encode("utf-8", "replace"), hashlib.sha256,
+    )
+    return {"code": "unclassified", **getattr(error, "detail", {}), "path_hash": reference.hexdigest()[:16]}
+
+
+def _record_capture_skip(root: Path, reason: str, detail: dict[str, str] | None = None) -> None:
     """Leave a content-free trace of a skip that would otherwise vanish. Never raises."""
     line = json.dumps({
+        **(detail or {}),
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }, sort_keys=True) + "\n"
@@ -244,8 +288,7 @@ def _record_capture_skip(root: Path, reason: str) -> None:
 
 def _tail_turns(snapshot, host_origin) -> tuple:
     """Read the complete lines of a tail, which may start part way through one."""
-    from .capture.transcript import collect_turns
-    from .errors import ValidationError
+    from .capture.transcript import NOT_UTF8, TranscriptMalformed, collect_turns
 
     tail = snapshot.data
     if snapshot.offset:
@@ -254,7 +297,7 @@ def _tail_turns(snapshot, host_origin) -> tuple:
     try:
         decoded_lines = [line.decode("utf-8") for line in tail.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
-        raise ValidationError("transcript tail is not valid UTF-8") from exc
+        raise TranscriptMalformed("transcript tail is not valid UTF-8", NOT_UTF8) from exc
     return (tail, *collect_turns(decoded_lines, host_origin))
 
 
@@ -983,10 +1026,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "retrieve":
             from .retrieve import retrieve_payload
-            from .config import effective_selector_mode
             store.initialize()
-            selector_mode = effective_selector_mode(config.get("selector"))
-            selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+            # --session can be any label, so the host's own id is the one T3 records.
+            selector_mode, selector_fields = _turn_selector(
+                config, args.prompt, os.environ.get(CLAUDE_SESSION_ENV, "").strip() or args.session,
+            )
             context = None
             exclude_ids: frozenset[str] = frozenset()
             if selector_mode != "deterministic" and args.prompt.strip():
@@ -1115,9 +1159,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt,
                 )
                 domain = selection.domain_id
-                from .config import effective_selector_mode
-                selector_mode = effective_selector_mode(config.get("selector"))
-                selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+                selector_mode, selector_fields = _turn_selector(config, prompt, native_value)
                 context = None
                 exclude_ids: frozenset[str] = frozenset()
                 if selector_mode != "deterministic" and prompt.strip():
@@ -1196,10 +1238,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .capture.transcript import (
                     MAX_TRANSCRIPT_BYTES,
                     TAIL_READ_BYTES,
+                    TRANSCRIPT_MALFORMED_REASON,
                     TRANSCRIPT_REFUSED_REASON,
                     TRANSCRIPT_TAIL_EXHAUSTED_REASON,
                     TRANSCRIPT_UNAVAILABLE_REASON,
                     TranscriptInFlux,
+                    TranscriptMalformed,
                     TranscriptUnavailable,
                     _parse_native_stop_snapshot,
                     _read_native_transcript_snapshot,
@@ -1245,11 +1289,14 @@ def main(argv: list[str] | None = None) -> int:
                     except TranscriptInFlux:
                         raise
                     except ValidationError as exc:
+                        unavailable = isinstance(exc, TranscriptUnavailable)
                         reason = (
-                            TRANSCRIPT_UNAVAILABLE_REASON if isinstance(exc, TranscriptUnavailable)
+                            TRANSCRIPT_UNAVAILABLE_REASON if unavailable
+                            else TRANSCRIPT_MALFORMED_REASON if isinstance(exc, TranscriptMalformed)
                             else TRANSCRIPT_REFUSED_REASON
                         )
-                        _record_capture_skip(root, reason)
+                        detail = None if unavailable else _rejection_detail(root, event["transcript_path"], exc)
+                        _record_capture_skip(root, reason, detail)
                         _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": reason})
                         return 0
                     if native["skip_reason"]:

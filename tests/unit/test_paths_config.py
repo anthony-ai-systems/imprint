@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from imprint.config import resolved_operator_root
+from imprint.config import config_path, resolved_operator_root
 from imprint.config import load_config
 from imprint.errors import SafetyError, ValidationError
+from imprint.paths import default_data_root, operator_root, validate_data_root
 
 
 def test_explicit_data_root_with_spaces_is_validated_and_supported(tmp_path):
@@ -52,3 +53,63 @@ def test_unsupported_config_version_is_rejected(tmp_path):
     config.write_text('{"config_version":"2.0.0"}')
     with pytest.raises(ValidationError, match="config_version"):
         load_config(config)
+
+
+def _variables(tmp_path, **extra):
+    """Name another user's home in a mapping, which this process's own does not match."""
+    home = tmp_path / "another-home"
+    return home, {"HOME": str(home), **extra}
+
+
+def test_supplied_variables_decide_the_default_config_path(tmp_path):
+    home, variables = _variables(tmp_path)
+    assert config_path(variables) == home / ".config" / "imprint" / "config.json"
+
+
+def test_supplied_variables_decide_the_default_data_root(tmp_path):
+    home, variables = _variables(tmp_path)
+    assert default_data_root(variables) == (home / ".local" / "share" / "imprint").resolve()
+
+
+def test_a_tilde_in_a_supplied_variable_uses_the_supplied_home(tmp_path):
+    home, variables = _variables(tmp_path, IMPRINT_CONFIG="~/custom.json", IMPRINT_DATA_ROOT="~/data")
+    assert config_path(variables) == home / "custom.json"
+    assert default_data_root(variables) == (home / "data").resolve()
+
+
+def test_a_tilde_in_a_config_data_root_uses_the_supplied_home(tmp_path):
+    home, variables = _variables(tmp_path)
+    config = {"data_root": "~/data", "operator_slug": "operator-a"}
+    assert resolved_operator_root(config, variables) == (home / "data").resolve() / "operator-a"
+
+
+def test_a_supplied_home_is_the_home_the_data_root_may_not_be(tmp_path):
+    home, variables = _variables(tmp_path, IMPRINT_DATA_ROOT=str(tmp_path / "another-home"))
+    with pytest.raises(SafetyError):
+        default_data_root(variables)
+
+
+def test_with_no_supplied_home_the_process_home_still_decides(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert config_path({}) == tmp_path / "process-home" / ".config" / "imprint" / "config.json"
+    assert default_data_root({}) == (tmp_path / "process-home" / ".local" / "share" / "imprint").resolve()
+    assert config_path({"IMPRINT_CONFIG": "~/custom.json"}) == tmp_path / "process-home" / "custom.json"
+
+
+@pytest.mark.parametrize("home", ["~/alt", "~synthetic", "~root"])
+@pytest.mark.parametrize("call", [
+    config_path,
+    default_data_root,
+    lambda: operator_root("operator-a"),
+    lambda: validate_data_root(Path("~/x")),
+    lambda: resolved_operator_root({"data_root": "~/x", "operator_slug": "operator-a"}),
+], ids=["config path", "data root", "operator root", "validate", "config data root"])
+def test_with_no_variables_given_expanduser_still_decides_a_tilde(monkeypatch, home, call):
+    """Path.home() takes these on some Python versions, and a real hook passes no variables."""
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("IMPRINT_CONFIG", "~/c.json")
+    monkeypatch.setenv("IMPRINT_DATA_ROOT", "~/x")
+    with pytest.raises(RuntimeError, match="home directory"):
+        call()

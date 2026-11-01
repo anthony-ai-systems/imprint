@@ -157,7 +157,7 @@ def test_huge_transcript_fails_closed_on_malformed_complete_tail_line(tmp_path):
     })
     # Still refused: nothing is captured. Blocking the stop could not repair the line.
     assert result.returncode == 0
-    assert json.loads(result.stdout)["reason"] == "transcript_refused"
+    assert json.loads(result.stdout)["reason"] == "transcript_malformed"
     assert not list((data / "test" / "spool").glob("*/*.json"))
 
 

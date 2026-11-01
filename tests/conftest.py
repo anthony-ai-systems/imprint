@@ -63,11 +63,15 @@ def isolated_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     The IMPRINT_CONFIG target intentionally does not exist: ``load_config``
     then falls back to packaged defaults (operator ``default``) rooted at the
     isolated data root. Tests that need a specific config still win by
-    setting IMPRINT_CONFIG themselves.
+    setting IMPRINT_CONFIG themselves. T3's records are pinned the same way, so
+    a run inside a T3 thread cannot reach the real ones.
     """
     data_root = tmp_path / "imprint-isolated-data"
     monkeypatch.setenv("IMPRINT_CONFIG", str(tmp_path / "imprint-isolated-config.json"))
     monkeypatch.setenv("IMPRINT_DATA_ROOT", str(data_root))
+    monkeypatch.setenv("T3CODE_HOME", str(tmp_path / "t3-isolated"))
+    monkeypatch.delenv("T3CODE_THREAD_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     return data_root
 
 
