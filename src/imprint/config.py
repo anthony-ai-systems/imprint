@@ -28,8 +28,8 @@ DEFAULTS = {
     # Reads T3's own message records to verify who wrote a prompt. Off by
     # default: an installation opts in to trusting that local record.
     "t3_capture_origin": False,
-    # Deliver each route's records on short lines. Separate switches, because
-    # session start is not filtered by client and a wider one reaches further.
+    # Deliver each route's records on short lines. Separate switches: session
+    # start is not filtered by client, so widening it widens what every session gets.
     SHORT_LINES_PROMPT: False,
     SHORT_LINES_SESSION_START: False,
     "context_budget_bytes": 32768,
