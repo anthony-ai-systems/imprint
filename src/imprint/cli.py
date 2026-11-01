@@ -18,7 +18,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
-from .config import SELECTOR_STATE_LIMIT, load_config, resolved_operator_root
+from .config import (
+    SELECTOR_STATE_LIMIT,
+    SHORT_LINES_PROMPT,
+    SHORT_LINES_SESSION_START,
+    load_config,
+    resolved_operator_root,
+)
 from .errors import ImprintError, ValidationError
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
@@ -1132,6 +1138,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = retrieve_payload(
                     store, root=root, session_id=session, prompt="",
                     budget=int(config["context_budget_bytes"]), refresh=refresh,
+                    short_lines=config[SHORT_LINES_SESSION_START],
                 )
                 response = {
                     "hook_schema_version": "1.0.0",
@@ -1172,6 +1179,7 @@ def main(argv: list[str] | None = None) -> int:
                         explicit_domain=domain, budget=int(config["context_budget_bytes"]),
                         selector=config["selector"], mode=selector_mode,
                         deadline=started + HOOK_SELECTOR_BUDGET_SECONDS,
+                        short_lines=config[SHORT_LINES_PROMPT],
                     )
                     selector_fields = decision.fields()
                     context = decision.context
@@ -1213,6 +1221,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt, explicit_domain=domain,
                     budget=int(config["context_budget_bytes"]), domain_only=True,
                     context=context, exclude_ids=exclude_ids,
+                    short_lines=config[SHORT_LINES_PROMPT],
                 )
                 response = {
                     "hook_schema_version": "1.0.0",

@@ -515,6 +515,118 @@ def test_a_standing_rule_reaches_its_short_line_with_its_mark(tmp_path, transpor
     assert decision.response["selector_stages"]["reserved"] == 1
 
 
+# -- the two routes ------------------------------------------------------------------
+
+RESEARCH = [{"domain_id": "research", "public_label": "Research"}]
+
+
+@pytest.fixture
+def routes(tmp_path, records):
+    """Both routes over the same records: session start and a matched domain."""
+    records.append(record(1, text=RULE))
+    records.append(record(2, text="Report the failed source.", section="domain", domain_id="research"))
+
+    def run(monkeypatch, capsys, session="s", **config_values):
+        config, _ = write_config(tmp_path, domains=RESEARCH, **config_values)
+        start = hook(config, "session-start", {"session_id": session}, monkeypatch, capsys)
+        prompt = hook(
+            config, "user-prompt-submit", {"session_id": session, "prompt": "go", "domain_id": "research"},
+            monkeypatch, capsys,
+        )
+        return delivered(start), delivered(prompt)
+    return run
+
+
+def is_short(line: dict) -> bool:
+    return "ontology" not in line and "evidence_ids" not in line
+
+
+def test_with_both_switches_off_both_routes_stay_whole(routes, monkeypatch, capsys):
+    start, prompt = routes(monkeypatch, capsys)
+    assert not any(map(is_short, start + prompt))
+
+
+def test_the_prompt_switch_leaves_session_start_whole(routes, monkeypatch, capsys):
+    start, prompt = routes(monkeypatch, capsys, **{SHORT_LINES_PROMPT: True})
+    assert not any(map(is_short, start))
+    assert all(map(is_short, prompt))
+
+
+def test_the_session_start_switch_leaves_the_prompt_route_whole(routes, monkeypatch, capsys):
+    start, prompt = routes(monkeypatch, capsys, **{SHORT_LINES_SESSION_START: True})
+    assert all(map(is_short, start))
+    assert not any(map(is_short, prompt))
+
+
+def test_session_start_redelivers_the_same_bytes_after_a_compact(tmp_path, records, monkeypatch, capsys):
+    records.extend(record(index, text=f"Rule {index}. {BACKGROUND if index % 2 else ''}") for index in range(8))
+    config, _ = write_config(tmp_path, **{SHORT_LINES_SESSION_START: True})
+    startup = hook(config, "session-start", {"session_id": "s", "source": "startup"}, monkeypatch, capsys)
+    compact = hook(config, "session-start", {"session_id": "s", "source": "compact"}, monkeypatch, capsys)
+    other = hook(config, "session-start", {"session_id": "other", "source": "startup"}, monkeypatch, capsys)
+    assert startup["hookSpecificOutput"] == compact["hookSpecificOutput"] == other["hookSpecificOutput"]
+    assert startup["hookSpecificOutput"]["additionalContext"]
+
+
+def jev_config(tmp_path, mode="jev", **values):
+    return write_config(tmp_path, selector=selector_config(mode), domains=RESEARCH, **values)[0]
+
+
+def test_the_prompt_switch_covers_picks_and_their_local_records(tmp_path, records, transport, monkeypatch, capsys):
+    records.append(record(1, text=RULE))
+    records.append(record(2, text="A declared offer.", section="domain", domain_id="research",
+                          ontology_partition="business_declared", ontology_type="Offer", judgment_statement=None))
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True})
+    event = {"session_id": "s", "prompt": "go", "domain_id": "research"}
+    body = hook(config, "user-prompt-submit", event, monkeypatch, capsys)
+    assert body["selector_method"] == "jev"
+    assert [line["record_id"] for line in delivered(body)] == [records[1].record_id, records[0].record_id]
+    assert all(map(is_short, delivered(body)))
+
+
+def test_the_prompt_switch_covers_a_fallback(tmp_path, records, transport, monkeypatch, capsys):
+    records.append(record(1, text="Report the failed source.", section="domain", domain_id="research"))
+    transport.error = TimeoutError("synthetic timeout")
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True})
+    event = {"session_id": "s", "prompt": "go", "domain_id": "research"}
+    body = hook(config, "user-prompt-submit", event, monkeypatch, capsys)
+    assert body["selector_method"] == "deterministic_fallback"
+    assert all(map(is_short, delivered(body))) and delivered(body)
+
+
+def test_shadow_still_delivers_what_deterministic_delivers(tmp_path, records, transport, monkeypatch, capsys):
+    records.append(record(1, text="Report the failed source.", section="domain", domain_id="research"))
+    event = {"prompt": "go", "domain_id": "research"}
+    bodies = []
+    for name, mode in (("shadow", "shadow"), ("deterministic", "deterministic")):
+        (tmp_path / name).mkdir()
+        config = jev_config(tmp_path / name, mode, **{SHORT_LINES_PROMPT: True})
+        bodies.append(hook(config, "user-prompt-submit", {**event, "session_id": name}, monkeypatch, capsys))
+    assert bodies[0]["hookSpecificOutput"] == bodies[1]["hookSpecificOutput"]
+    assert all(map(is_short, delivered(bodies[0])))
+
+
+def cli_retrieve(config: Path, capsys, *arguments) -> dict:
+    assert cli.main(["--config", str(config), "retrieve", "--session", "by-hand", *arguments]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_explicit_retrieval_keeps_whole_lines_with_both_switches_on(tmp_path, records, capsys):
+    records.append(record(1, text=RULE))
+    config, _ = write_config(tmp_path, **{SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True})
+    assert not any(map(is_short, map(json.loads, cli_retrieve(config, capsys, "--refresh")["payload"].splitlines())))
+
+
+def test_explicit_retrieval_of_a_prompt_keeps_whole_lines_under_jev(tmp_path, records, transport, capsys):
+    records.append(record(1, text=RULE))
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True})
+    response = cli_retrieve(config, capsys, "--refresh", "--prompt", "go")
+    assert response["selector_method"] == "jev"
+    (line,) = [json.loads(item) for item in response["payload"].splitlines()]
+    assert not is_short(line)
+    assert line["selector"]["mode"] == "jev"
+
+
 # -- imprint history -----------------------------------------------------------------
 
 def test_history_returns_the_line_a_whole_delivery_carries(tmp_path, monkeypatch, capsys):
