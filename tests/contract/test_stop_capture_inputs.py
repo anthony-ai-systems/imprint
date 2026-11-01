@@ -365,22 +365,22 @@ def _symlink(tmp_path):
     return link
 
 
-@pytest.mark.parametrize("build", [
-    lambda tmp_path: _torn(tmp_path, _user()),
-    _not_utf8,
-    _directory,
-    _symlink,
-    lambda tmp_path: "relative/transcript.jsonl",
-    lambda tmp_path: "/" + "x" * 5000,
-    lambda tmp_path: "/synthetic/with\u0000null.jsonl",
-    lambda tmp_path: "~no-such-user-synthetic/transcript.jsonl",
+@pytest.mark.parametrize("build, reason", [
+    (lambda tmp_path: _torn(tmp_path, _user()), "transcript_malformed"),
+    (_not_utf8, "transcript_malformed"),
+    (_directory, "transcript_refused"),
+    (_symlink, "transcript_refused"),
+    (lambda tmp_path: "relative/transcript.jsonl", "transcript_refused"),
+    (lambda tmp_path: "/" + "x" * 5000, "transcript_refused"),
+    (lambda tmp_path: "/synthetic/with\u0000null.jsonl", "transcript_refused"),
+    (lambda tmp_path: "~no-such-user-synthetic/transcript.jsonl", "transcript_refused"),
 ], ids=["torn line", "not utf-8", "directory", "symlink", "relative", "too long", "null byte", "unknown home"])
-def test_a_transcript_that_cannot_heal_is_refused_without_blocking(tmp_path, build):
+def test_a_transcript_that_cannot_heal_is_refused_without_blocking(tmp_path, build, reason):
     run, root = _bridge(tmp_path, build(tmp_path))
     assert run.returncode == 0, run.stdout + run.stderr
     assert run.stderr == ""
-    assert json.loads(run.stdout)["reason"] == "transcript_refused"
-    assert _skips(root) == ["transcript_refused"]
+    assert json.loads(run.stdout)["reason"] == reason
+    assert _skips(root) == [reason]
     assert not _spooled(root)
     assert not (root / "logs" / "hook-failures").exists()
 
@@ -394,7 +394,7 @@ def test_every_later_stop_over_a_bad_line_is_refused_the_same_way(tmp_path, buil
     for turn in range(1, 4):
         run, root = _bridge(tmp_path, path)
         assert run.returncode == 0, run.stdout + run.stderr
-        assert _skips(root) == ["transcript_refused"] * turn
+        assert _skips(root) == ["transcript_malformed"] * turn
 
 
 def test_an_incomplete_final_line_can_heal_so_it_still_blocks(tmp_path):

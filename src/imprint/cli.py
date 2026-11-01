@@ -217,9 +217,22 @@ def _hook_input_invalid() -> int:
     return 0
 
 
-def _record_capture_skip(root: Path, reason: str) -> None:
+def _rejection_detail(root: Path, path_value: str, error: ValidationError) -> dict[str, str]:
+    """Say why a transcript was turned away, without ever naming its path.
+
+    The hash is keyed, so it tells one file failing 64 times from 64 files, and a
+    guessed path cannot be checked against the log.
+    """
+    reference = hmac.new(
+        _session_key(root), f"transcript-path:{path_value}".encode("utf-8", "replace"), hashlib.sha256,
+    )
+    return {"code": "unclassified", **getattr(error, "detail", {}), "path_hash": reference.hexdigest()[:16]}
+
+
+def _record_capture_skip(root: Path, reason: str, detail: dict[str, str] | None = None) -> None:
     """Leave a content-free trace of a skip that would otherwise vanish. Never raises."""
     line = json.dumps({
+        **(detail or {}),
         "reason": reason,
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }, sort_keys=True) + "\n"
@@ -244,8 +257,7 @@ def _record_capture_skip(root: Path, reason: str) -> None:
 
 def _tail_turns(snapshot, host_origin) -> tuple:
     """Read the complete lines of a tail, which may start part way through one."""
-    from .capture.transcript import collect_turns
-    from .errors import ValidationError
+    from .capture.transcript import NOT_UTF8, TranscriptMalformed, collect_turns
 
     tail = snapshot.data
     if snapshot.offset:
@@ -254,7 +266,7 @@ def _tail_turns(snapshot, host_origin) -> tuple:
     try:
         decoded_lines = [line.decode("utf-8") for line in tail.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
-        raise ValidationError("transcript tail is not valid UTF-8") from exc
+        raise TranscriptMalformed("transcript tail is not valid UTF-8", NOT_UTF8) from exc
     return (tail, *collect_turns(decoded_lines, host_origin))
 
 
@@ -1196,10 +1208,12 @@ def main(argv: list[str] | None = None) -> int:
                 from .capture.transcript import (
                     MAX_TRANSCRIPT_BYTES,
                     TAIL_READ_BYTES,
+                    TRANSCRIPT_MALFORMED_REASON,
                     TRANSCRIPT_REFUSED_REASON,
                     TRANSCRIPT_TAIL_EXHAUSTED_REASON,
                     TRANSCRIPT_UNAVAILABLE_REASON,
                     TranscriptInFlux,
+                    TranscriptMalformed,
                     TranscriptUnavailable,
                     _parse_native_stop_snapshot,
                     _read_native_transcript_snapshot,
@@ -1245,11 +1259,14 @@ def main(argv: list[str] | None = None) -> int:
                     except TranscriptInFlux:
                         raise
                     except ValidationError as exc:
+                        unavailable = isinstance(exc, TranscriptUnavailable)
                         reason = (
-                            TRANSCRIPT_UNAVAILABLE_REASON if isinstance(exc, TranscriptUnavailable)
+                            TRANSCRIPT_UNAVAILABLE_REASON if unavailable
+                            else TRANSCRIPT_MALFORMED_REASON if isinstance(exc, TranscriptMalformed)
                             else TRANSCRIPT_REFUSED_REASON
                         )
-                        _record_capture_skip(root, reason)
+                        detail = None if unavailable else _rejection_detail(root, event["transcript_path"], exc)
+                        _record_capture_skip(root, reason, detail)
                         _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": reason})
                         return 0
                     if native["skip_reason"]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -28,7 +29,25 @@ MAX_CONTEXT_BYTES = 64 * 1024
 TAIL_READ_BYTES = 2 * 1024 * 1024
 TRANSCRIPT_UNAVAILABLE_REASON = "transcript_unavailable"
 TRANSCRIPT_REFUSED_REASON = "transcript_refused"
+TRANSCRIPT_MALFORMED_REASON = "transcript_malformed"
 TRANSCRIPT_TAIL_EXHAUSTED_REASON = "transcript_tail_exhausted"
+# The four refusal sites share one message, so these codes are what tells a repeat
+# apart in the skip log. They are stable: anything reading that log may match them.
+PATH_NOT_ABSOLUTE = "path_not_absolute"
+PATH_STAT_FAILED = "path_stat_failed"
+PATH_NOT_REGULAR = "path_not_regular"
+PATH_OPEN_FAILED = "path_open_failed"
+MALFORMED_LINE = "malformed_line"
+NOT_UTF8 = "not_utf8"
+_PATH_REFUSED_MESSAGE = "transcript_path must be an absolute regular non-symlink file"
+_FILE_CLASSES = (
+    (stat.S_ISLNK, "symlink"),
+    (stat.S_ISDIR, "directory"),
+    (stat.S_ISFIFO, "fifo"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISBLK, "block_device"),
+    (stat.S_ISCHR, "char_device"),
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +73,42 @@ class TranscriptInFlux(ValidationError):
     """The host is still writing or replacing the transcript, so a retry can heal this."""
 
 
+class TranscriptRejected(ValidationError):
+    """A transcript no retry can read, with content-free detail for the skip log."""
+
+    def __init__(self, message: str, code: str, **detail: str) -> None:
+        super().__init__(message)
+        self.detail = {"code": code, **detail}
+
+
+class TranscriptRefused(TranscriptRejected):
+    """A path that cannot be read as a transcript. Nothing here holds the path itself."""
+
+    def __init__(self, code: str, path_class: str, cause: Exception | None = None) -> None:
+        number = getattr(cause, "errno", None)
+        detail = {} if number is None else {"errno": errno.errorcode.get(number, str(number))}
+        super().__init__(_PATH_REFUSED_MESSAGE, code, path_class=path_class, **detail)
+
+
+class TranscriptMalformed(TranscriptRejected):
+    """A file that was read and holds a line that cannot be trusted."""
+
+
+def _path_class(value: str) -> str:
+    """Name the shape of a path value without any of its text."""
+    if not value:
+        return "empty"
+    if "\x00" in value:
+        return "null_byte"
+    if value.startswith("~"):
+        return "home_relative"
+    return "absolute" if os.path.isabs(value) else "relative"
+
+
+def _file_class(mode: int) -> str:
+    return next((name for matches, name in _FILE_CLASSES if matches(mode)), "other")
+
+
 def _read_native_transcript_snapshot_once(
     path_value: str, *, tail_limit: int | None = None,
 ) -> _TranscriptSnapshot:
@@ -66,14 +121,14 @@ def _read_native_transcript_snapshot_once(
     try:
         path = Path(path_value).expanduser()
         if not path.is_absolute():
-            raise ValidationError("transcript_path must be an absolute regular non-symlink file")
+            raise TranscriptRefused(PATH_NOT_ABSOLUTE, _path_class(path_value))
         path_before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError as exc:
         raise TranscriptUnavailable("transcript_path does not exist") from exc
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ValidationError("transcript_path must be an absolute regular non-symlink file") from exc
+        raise TranscriptRefused(PATH_STAT_FAILED, _path_class(path_value), exc) from exc
     if not stat.S_ISREG(path_before.st_mode):
-        raise ValidationError("transcript_path must be an absolute regular non-symlink file")
+        raise TranscriptRefused(PATH_NOT_REGULAR, _file_class(path_before.st_mode))
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -82,7 +137,7 @@ def _read_native_transcript_snapshot_once(
     except FileNotFoundError as exc:
         raise TranscriptUnavailable("transcript_path does not exist") from exc
     except OSError as exc:
-        raise ValidationError("transcript_path must be an absolute regular non-symlink file") from exc
+        raise TranscriptRefused(PATH_OPEN_FAILED, _path_class(path_value), exc) from exc
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _identity(opened) != _identity(path_before):
@@ -237,7 +292,7 @@ def collect_turns(
         except json.JSONDecodeError as exc:
             if not complete and number == len(lines):
                 raise TranscriptInFlux(f"incomplete transcript line {number}") from exc
-            raise ValidationError(f"malformed complete transcript line {number}") from exc
+            raise TranscriptMalformed(f"malformed complete transcript line {number}", MALFORMED_LINE) from exc
         except (ValueError, RecursionError):
             continue  # Valid JSON too deep or too long to read says nothing about this turn.
         entry = _transcript_entry(item, host_origin)
@@ -271,7 +326,7 @@ def _parse_native_stop_snapshot(
         # and U+0085, which are legal raw inside a JSON string.
         lines = [line.decode("utf-8") for line in snapshot.data.splitlines(keepends=True)]
     except UnicodeDecodeError as exc:
-        raise ValidationError("transcript is not valid UTF-8") from exc
+        raise TranscriptMalformed("transcript is not valid UTF-8", NOT_UTF8) from exc
     messages, synthetic_basis, unverified_since_operator = collect_turns(lines, host_origin)
     evidence_sha256 = hashlib.sha256(snapshot.data).hexdigest()
     locator = f"transcript:sha256:{evidence_sha256}"

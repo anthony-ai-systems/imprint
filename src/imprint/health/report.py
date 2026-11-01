@@ -6,9 +6,10 @@ from typing import Literal, Mapping
 HEALTH_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_RECORD_MAJOR = 3
 SUPPORTED_HOOK_MAJOR = 1
-# A refused transcript used to surface as a hook failure. T3 session references
-# going unreadable stops all T3 capture. Any one of either needs someone to look.
-_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_refused")
+# A transcript refused or malformed used to surface as a hook failure. T3 session
+# references going unreadable stops all T3 capture. Any one of these needs someone
+# to look.
+_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_malformed", "transcript_refused")
 
 
 @dataclass(frozen=True)

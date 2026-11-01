@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Say what turned a transcript away. The four checks behind `transcript_path must
+  be an absolute regular non-symlink file` each log their own `code` to
+  `logs/capture-skips.jsonl`, with `errno` where there is one, a `path_class` and
+  a keyed `path_hash`, and no line holds a path. A malformed line or text that is
+  not UTF-8 now returns `transcript_malformed` rather than `transcript_refused`,
+  so the two count apart in `capture_skips_24h`. Both degrade health.
 - Stop crediting prompts in T3's "No project" chats, which live in its `scratch`
   folder, and report them as `t3_scratch_thread`. A script driving the T3 app is
   recorded as `user` and `web` like a person, so its prompts were stored as the
