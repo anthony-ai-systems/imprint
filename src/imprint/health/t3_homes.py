@@ -17,8 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from imprint.capture.t3_origin import t3_settings_path
-from imprint.config import config_path, load_config, resolved_operator_root
-from imprint.errors import ImprintError
+from imprint.config import config_path, parse_config, resolved_operator_root
 
 CLAUDE_DRIVER = "claudeAgent"
 # These two mirror tools/install/manage_hooks.py, which runs without this package.
@@ -27,10 +26,9 @@ HOOK_ENTRIES = {"SessionStart": 2, "UserPromptSubmit": 1, "Stop": 1}
 _SETTINGS_BYTES = 4 * 1024 * 1024
 # T3 refuses a settings file with any other instance id.
 _INSTANCE_ID = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}")
-# The variables that decide which store a hook opens.
-_ROOT_ENVIRONMENT = (
-    "IMPRINT_CONFIG", "IMPRINT_DATA_ROOT", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "APPDATA", "LOCALAPPDATA",
-)
+# What this process has and a hook does not: the launcher exports IMPRINT_CONFIG
+# for `imprint` alone, and a session-start health check inherits its own home's.
+_NOT_INHERITED = ("IMPRINT_CONFIG", "IMPRINT_DATA_ROOT")
 
 
 def _read_object(path: Path) -> tuple[str, dict[str, Any] | None]:
@@ -89,14 +87,16 @@ def _home_path(config: Mapping[str, Any], environment: Mapping[str, str]) -> Pat
     """Resolve a home as T3 does, or None if T3 could not use it.
 
     The T3 server's own environment cannot be seen from here, so an instance with
-    no home of its own is taken to be the default home.
+    no home of its own is taken to be the default home. T3 expands `~` in homePath
+    only: an inherited CLAUDE_CONFIG_DIR stays literal, so `~/x` there is relative.
     """
     chosen = config.get("homePath", "")
     if not isinstance(chosen, str):
         return None
-    chosen = chosen.strip() or environment.get("CLAUDE_CONFIG_DIR", "").strip()
+    chosen = chosen.strip()
+    inherited = environment.get("CLAUDE_CONFIG_DIR", "").strip()
     try:
-        path = Path(chosen).expanduser() if chosen else Path.home() / ".claude"
+        path = Path(chosen).expanduser() if chosen else Path(inherited or Path.home() / ".claude")
         return path.resolve() if path.is_absolute() else None
     except (OSError, RuntimeError, ValueError):
         return None
@@ -125,16 +125,23 @@ def _hook_state(settings: Mapping[str, Any]) -> str:
 def _data_root(root: Path, overrides: Mapping[str, str]) -> str:
     """Compare the store a hook would open under these overrides with this one.
 
-    A home that sets none of the variables resolves what this process resolves.
+    The T3 server's environment cannot be seen from here, so this process's stands
+    in for it. The path can come from any home and this runs inside a session-start
+    hook, so the file is read with the same guard as settings, and nothing about one
+    home can cost the report on the others.
     """
-    environ = {**os.environ, **overrides}
-    if all(environ.get(name) == os.environ.get(name) for name in _ROOT_ENVIRONMENT):
-        return "same"
+    environ = {name: value for name, value in os.environ.items() if name not in _NOT_INHERITED}
+    environ.update(overrides)
     try:
-        resolved = resolved_operator_root(load_config(config_path(environ)), environ)
-    except (ImprintError, OSError, ValueError, RuntimeError):
+        path = config_path(environ)
+        # A relative path is relative to a hook's folder, which cannot be known here.
+        state, loaded = _read_object(path) if path.is_absolute() else ("unreadable", None)
+        if state == "unreadable":
+            return "unknown"
+        resolved = resolved_operator_root(parse_config(loaded or {}), environ)
+        return "same" if resolved == root.resolve() else "different"
+    except Exception:
         return "unknown"
-    return "same" if resolved == root.resolve() else "different"
 
 
 def _worst(values: Iterable[str]) -> str:
@@ -159,9 +166,14 @@ def _home_row(home: Path | str, members: list[tuple[str, bool, dict[str, str]]],
         name: value for name, value in (declared if isinstance(declared, dict) else {}).items()
         if isinstance(value, str)
     }
-    row["hooks"] = _hook_state(settings)
-    # Claude Code applies a home's env over the one it was started with.
-    row["data_root"] = _worst(_data_root(root, {**environment, **declared}) for _, _, environment in members)
+    try:
+        row["hooks"] = _hook_state(settings)
+    except Exception:  # A command too deep to read, say. The row stays unreadable.
+        pass
+    # A disabled instance launches nothing, so it speaks only for a home where none
+    # can run. Claude Code applies a home's env over the one it was started with.
+    running = [member for member in members if member[1]] or members
+    row["data_root"] = _worst(_data_root(root, {**environment, **declared}) for _, _, environment in running)
     return row
 
 

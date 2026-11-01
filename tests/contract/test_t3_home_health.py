@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -23,10 +24,15 @@ ON = {"t3_capture_origin": True}
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
-    """A T3 home, a user home and this store, none of them real."""
+    """A T3 home, a user home and this store, none of them real.
+
+    This store is the one a hook reaches with no override, as in a default install.
+    """
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("T3CODE_HOME", str(tmp_path / "t3"))
+    for name in ("IMPRINT_CONFIG", "IMPRINT_DATA_ROOT", "XDG_CONFIG_HOME", "XDG_DATA_HOME"):
+        monkeypatch.delenv(name, raising=False)
     return tmp_path
 
 
@@ -80,8 +86,24 @@ def _by_instance(section):
 
 def _other_store(world, *, slug="other", data="other-data", name="other.json"):
     path = world / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"data_root": str(world / data), "operator_slug": slug}), encoding="utf-8")
     return path
+
+
+def _this_store(world):
+    """Write the config a hook reads by default, naming the store health opens."""
+    return _other_store(world, slug="default", data="this-data", name="home/.config/imprint/config.json")
+
+
+def _without_blocking(call):
+    """Run a call that must not block, so a regression fails and does not hang the run."""
+    results = []
+    worker = threading.Thread(target=lambda: results.append(call()), daemon=True)
+    worker.start()
+    worker.join(10)
+    assert results, "the call blocked"
+    return results[0]
 
 
 def test_the_marker_and_events_match_the_hook_manager():
@@ -192,27 +214,178 @@ def test_an_override_that_opens_this_store_is_not_flagged(world):
     assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
 
 
-def test_a_data_root_variable_a_config_overrides_is_not_flagged(world, monkeypatch):
-    root = world / "configured" / "default"
-    config = world / "configured.json"
-    config.write_text(json.dumps({"data_root": str(root.parent)}), encoding="utf-8")
-    monkeypatch.setenv("IMPRINT_CONFIG", str(config))
+def test_a_data_root_variable_a_config_overrides_is_not_flagged(world):
+    _this_store(world)
     home = world / MARKER / "home"
     _hooked(home, env={"IMPRINT_DATA_ROOT": str(world / "ignored")})
     _t3_settings(world, claudeAgent=_instance(home))
     assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
 
 
-def test_a_config_that_cannot_be_read_leaves_the_store_unknown(world):
+@pytest.mark.parametrize("launcher", [True, False], ids=["launcher", "no launcher"])
+def test_the_launcher_export_does_not_hide_what_a_home_sets(world, monkeypatch, launcher):
+    """`imprint` runs with IMPRINT_CONFIG set and a hook does not, so one home reads the same either way."""
+    config = _this_store(world)
+    if launcher:
+        monkeypatch.setenv("IMPRINT_CONFIG", str(config))
+    other = _other_store(world, name="xdg/imprint/config.json")
     home = world / MARKER / "home"
-    broken = world / "broken.json"
-    broken.write_text("{", encoding="utf-8")
-    _hooked(home, env={"IMPRINT_CONFIG": str(broken)})
+    _hooked(home, env={"XDG_CONFIG_HOME": str(other.parents[1])})
     _t3_settings(world, claudeAgent=_instance(home))
     section = _homes(world)
-    assert _by_instance(section)["claudeAgent"]["data_root"] == "unknown"
-    assert section["homes_unreadable"] == 1
+    assert _by_instance(section)["claudeAgent"]["data_root"] == "different"
+    assert section["homes_different_data_root"] == 1
+
+
+def test_a_default_install_reads_the_same_from_the_launcher(world, monkeypatch):
+    monkeypatch.setenv("IMPRINT_CONFIG", str(_this_store(world)))
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
+
+
+def test_a_home_that_sets_nothing_is_still_compared(world, monkeypatch):
+    """After `install.sh --config` the launcher names a config no hook reads."""
+    monkeypatch.setenv("IMPRINT_CONFIG", str(_other_store(world, data="custom-data", name="custom.json")))
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "different"
+
+
+def test_a_data_root_only_this_process_has_reaches_no_hook(world, monkeypatch):
+    monkeypatch.setenv("IMPRINT_DATA_ROOT", str(world / "exported-data"))
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "different"
+
+
+def test_health_run_inside_one_home_compares_the_others_with_that_store(world, monkeypatch):
+    """The session-start health check inherits its home's env, and the next home does not."""
+    config = _other_store(world, data="split-data", name="split.json")
+    monkeypatch.setenv("IMPRINT_CONFIG", str(config))
+    inside, elsewhere = world / MARKER / "inside", world / MARKER / "elsewhere"
+    _hooked(inside, env={"IMPRINT_CONFIG": str(config)})
+    _hooked(elsewhere)
+    _t3_settings(world, claudeAgent=_instance(inside), claudeAgent_b=_instance(elsewhere))
+    rows = _by_instance(_homes(world))
+    assert rows["claudeAgent"]["data_root"] == "same"
+    assert rows["claudeAgent_b"]["data_root"] == "different"
+
+
+def _moved_home(world, *, with_config):
+    """A second user home, with its own config or with only the default data root."""
+    alternate = world / "alternate"
+    alternate.mkdir()
+    if with_config:
+        _other_store(world, name="alternate/.config/imprint/config.json")
+    return alternate
+
+
+@pytest.mark.parametrize("place", ["home", "t3_instance"])
+@pytest.mark.parametrize("with_config", [True, False], ids=["config", "default data root"])
+def test_a_home_that_moves_home_moves_its_store(world, place, with_config):
+    home = world / MARKER / "home"
+    alternate = str(_moved_home(world, with_config=with_config))
+    _hooked(home, **({"env": {"HOME": alternate}} if place == "home" else {}))
+    environment = [{"name": "HOME", "value": alternate}] if place == "t3_instance" else []
+    _t3_settings(world, claudeAgent=_instance(home, environment=environment))
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent"]["data_root"] == "different"
+    assert section["homes_different_data_root"] == 1
+
+
+@pytest.mark.parametrize("variable, value", [
+    ("IMPRINT_CONFIG", "~/.config/imprint/custom.json"),
+    ("IMPRINT_DATA_ROOT", "~/data"),
+])
+def test_a_tilde_in_a_home_variable_follows_the_home_it_sets(world, variable, value):
+    """Each of these reaches this store only if `~` is read from the home's own HOME."""
+    root = resolved_operator_root(load_config())
+    alternate = world / "alternate"
+    custom = alternate / ".config" / "imprint" / "custom.json"
+    custom.parent.mkdir(parents=True)
+    custom.write_text(json.dumps({"data_root": str(root.parent)}), encoding="utf-8")
+    root.parent.mkdir(parents=True)
+    (alternate / "data").symlink_to(root.parent)
+    home = world / MARKER / "home"
+    _hooked(home, env={"HOME": str(alternate), variable: value})
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
+
+
+def test_a_home_that_names_the_home_it_already_has_is_not_flagged(world):
+    home = world / MARKER / "home"
+    _hooked(home, env={"HOME": str(world / "home")})
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
+
+
+def test_a_config_with_a_relative_path_leaves_the_store_unknown(world, monkeypatch):
+    """A hook reads it from its own folder, which cannot be known from here."""
+    home = world / MARKER / "home"
+    (world / "relative.json").write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(world)
+    _hooked(home, env={"IMPRINT_CONFIG": "relative.json"})
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "unknown"
+
+
+def test_a_disabled_instance_cannot_split_the_store_of_a_home_that_runs(world):
+    home = world / MARKER / "home"
+    _hooked(home)
+    environment = [{"name": "IMPRINT_CONFIG", "value": str(_other_store(world))}]
+    _t3_settings(world, claudeAgent=_instance(home), claudeAgent_off=_instance(home, enabled=False, environment=environment))
+    section = _homes(world)
+    (row,) = section["homes"]
+    assert row["instances"] == ["claudeAgent", "claudeAgent_off"]
+    assert row["data_root"] == "same"
     assert section["homes_different_data_root"] == 0
+
+
+def test_a_disabled_instance_cannot_make_a_home_that_runs_unknown(world):
+    home = world / MARKER / "home"
+    _hooked(home)
+    broken = world / "broken.json"
+    broken.write_text("{", encoding="utf-8")
+    environment = [{"name": "IMPRINT_CONFIG", "value": str(broken)}]
+    _t3_settings(world, claudeAgent=_instance(home), claudeAgent_off=_instance(home, enabled=False, environment=environment))
+    section = _homes(world)
+    assert section["homes"][0]["data_root"] == "same"
+    assert section["homes_unreadable"] == 0
+
+
+def test_a_home_where_nothing_runs_still_shows_where_it_points(world):
+    home = world / MARKER / "home"
+    _hooked(home)
+    environment = [{"name": "IMPRINT_CONFIG", "value": str(_other_store(world))}]
+    _t3_settings(
+        world, claudeAgent=_instance(world / MARKER / "off", enabled=False),
+        claudeAgent_a=_instance(home, enabled=False), claudeAgent_b=_instance(home, enabled=False, environment=environment),
+    )
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent_a"]["data_root"] == "different"
+    assert section["homes_different_data_root"] == 0
+
+
+def test_a_project_enabled_instance_counts_on_a_shared_home(world):
+    home = world / MARKER / "home"
+    _hooked(home)
+    environment = [{"name": "IMPRINT_CONFIG", "value": str(_other_store(world))}]
+    userdata = world / "t3" / "userdata"
+    userdata.mkdir(parents=True)
+    (userdata / "settings.json").write_text(json.dumps({
+        "providerInstances": {
+            "claudeAgent": _instance(home),
+            "claudeAgent_project": _instance(home, enabled=False, environment=environment),
+        },
+        "projectSettingsOverrides": {"project-a": {"providerInstances": {"claudeAgent_project": {"enabled": True}}}},
+    }), encoding="utf-8")
+    section = _homes(world)
+    assert section["homes"][0]["data_root"] == "different"
+    assert section["homes_different_data_root"] == 1
 
 
 def test_a_disabled_instance_is_listed_and_not_counted(world):
@@ -306,6 +479,25 @@ def test_a_home_named_by_its_instance_environment_is_used(world):
     assert _by_instance(_homes(world))["claudeAgent"]["hooks"] == "complete"
 
 
+@pytest.mark.parametrize("value", ["~/tilde-home", "~"])
+def test_t3_takes_an_inherited_claude_config_dir_literally(world, value):
+    """T3 expands `~` only in homePath, so this names no folder the hooks here are in."""
+    _hooked(world / "home" / "tilde-home")
+    _hooked(world / "home")
+    _t3_settings(world, claudeAgent={
+        "driver": "claudeAgent", "environment": [{"name": "CLAUDE_CONFIG_DIR", "value": value}],
+    })
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "unreadable"
+    assert section["homes_unreadable"] == 1
+
+
+def test_a_tilde_in_a_home_path_is_expanded(world):
+    _hooked(world / "home" / "tilde-home")
+    _t3_settings(world, claudeAgent={"driver": "claudeAgent", "config": {"homePath": "~/tilde-home"}})
+    assert _by_instance(_homes(world))["claudeAgent"]["hooks"] == "complete"
+
+
 @pytest.mark.parametrize("path", ["relative/home", "~no-such-user-synthetic/home", 7])
 def test_a_home_path_t3_could_not_use_is_unreadable(world, path):
     _t3_settings(world, claudeAgent={"driver": "claudeAgent", "config": {"homePath": path}})
@@ -346,6 +538,73 @@ UNREADABLE = pytest.mark.parametrize(
     "damage", [_bad_json, _not_object, _too_deep, _not_utf8, _fifo, _directory, _too_large],
     ids=["bad json", "not an object", "too deep", "not utf-8", "fifo", "directory", "too large"],
 )
+
+
+@UNREADABLE
+def test_a_config_that_cannot_be_read_leaves_the_store_unknown(world, damage):
+    home = world / MARKER / "home"
+    config = world / "broken.json"
+    damage(config)
+    _hooked(home, env={"IMPRINT_CONFIG": str(config)})
+    _t3_settings(world, claudeAgent=_instance(home))
+    section = _without_blocking(lambda: _homes(world))
+    assert _by_instance(section)["claudeAgent"]["data_root"] == "unknown"
+    assert section["homes_unreadable"] == 1
+    assert section["homes_different_data_root"] == 0
+
+
+def test_one_bad_config_keeps_the_rows_of_every_other_home(world):
+    """A selector mode of the wrong type raises TypeError from the config check."""
+    good, bare, bad = world / MARKER / "good", world / MARKER / "bare", world / MARKER / "bad"
+    broken = world / "unhashable.json"
+    broken.write_text(json.dumps({"selector": {"mode": ["jev"]}}), encoding="utf-8")
+    _hooked(good)
+    _write_settings(bare, {})
+    _hooked(bad, env={"IMPRINT_CONFIG": str(broken)})
+    _t3_settings(world, claudeAgent=_instance(good), claudeAgent_bare=_instance(bare), claudeAgent_bad=_instance(bad))
+    section = _homes(world)
+    rows = _by_instance(section)
+    assert section["state"] == "read"
+    assert rows["claudeAgent"]["data_root"] == "same"
+    assert rows["claudeAgent_bad"]["hooks"] == "complete"
+    assert rows["claudeAgent_bad"]["data_root"] == "unknown"
+    assert section["homes_missing_hooks"] == 1
+    assert section["homes_unreadable"] == 1
+
+
+def test_one_home_too_deep_to_read_keeps_the_rows_of_every_other_home(world):
+    """Some Python versions parse this file and only fail on the command inside it."""
+    bare, deep = world / MARKER / "bare", world / MARKER / "deep"
+    _write_settings(bare, {})
+    deep.mkdir(parents=True)
+    depth = 100_000
+    command = "[" * depth + "]" * depth
+    (deep / "settings.json").write_text(
+        '{"hooks": {"Stop": [{"hooks": [{"command": ' + command + "}]}]}}", encoding="utf-8",
+    )
+    _t3_settings(world, claudeAgent=_instance(bare), claudeAgent_deep=_instance(deep))
+    section = _homes(world)
+    rows = _by_instance(section)
+    assert section["state"] == "read"
+    assert rows["claudeAgent"]["hooks"] == "none"
+    assert rows["claudeAgent_deep"]["hooks"] == "unreadable"
+    assert section["homes_missing_hooks"] == 1
+    assert section["homes_unreadable"] == 1
+
+
+def test_a_hook_check_that_fails_keeps_the_rest_of_the_row(world, monkeypatch):
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+
+    def broken(settings):
+        raise RecursionError("synthetic")
+
+    monkeypatch.setattr(t3_homes, "_hook_state", broken)
+    section = _homes(world)
+    assert section["state"] == "read"
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "unreadable"
+    assert _by_instance(section)["claudeAgent"]["data_root"] == "same"
 
 
 @UNREADABLE
