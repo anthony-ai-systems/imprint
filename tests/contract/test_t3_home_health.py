@@ -699,6 +699,22 @@ def test_one_home_too_deep_to_read_keeps_the_rows_of_every_other_home(world):
     assert section["homes_unreadable"] == 1
 
 
+def test_a_home_nested_past_the_limit_is_unreadable_on_every_python(world):
+    """Every Python parses and prints this depth, so the answer cannot rest on the stack."""
+    home = world / MARKER / "deep"
+    home.mkdir(parents=True)
+    depth = 100
+    command = "[" * depth + "]" * depth
+    (home / "settings.json").write_text(
+        '{"hooks": {"Stop": [{"hooks": [{"command": ' + command + "}]}]}}", encoding="utf-8",
+    )
+    _t3_settings(world, claudeAgent=_instance(home))
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "unreadable"
+    assert section["homes_missing_hooks"] == 0
+    assert section["homes_unreadable"] == 1
+
+
 def test_a_hook_check_that_fails_keeps_the_rest_of_the_row(world, monkeypatch):
     home = world / MARKER / "home"
     _hooked(home)

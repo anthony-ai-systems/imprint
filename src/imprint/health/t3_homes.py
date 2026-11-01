@@ -25,11 +25,28 @@ CLAUDE_DRIVER = "claudeAgent"
 HOOK_MARKER = "imprint-local-managed-hook"
 HOOK_ENTRIES = {"SessionStart": 2, "UserPromptSubmit": 1, "Stop": 1}
 _SETTINGS_BYTES = 4 * 1024 * 1024
+# Where parsing or printing a deep file gives up depends on the machine's stack, and a
+# health report must not. Real settings nest about six levels.
+_SETTINGS_DEPTH = 32
 # T3 refuses a settings file with any other instance id.
 _INSTANCE_ID = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}")
 # What this process has and a hook does not: the launcher exports IMPRINT_CONFIG
 # for `imprint` alone, and a session-start health check inherits its own home's.
 _NOT_INHERITED = ("IMPRINT_CONFIG", "IMPRINT_DATA_ROOT")
+
+
+def _nested_past_limit(value: Any) -> bool:
+    level = [value]
+    for _ in range(_SETTINGS_DEPTH):
+        level = [
+            child
+            for item in level
+            if isinstance(item, (dict, list))
+            for child in (item.values() if isinstance(item, dict) else item)
+        ]
+        if not level:
+            return False
+    return True
 
 
 def _read_object(path: Path) -> tuple[str, dict[str, Any] | None]:
@@ -49,7 +66,9 @@ def _read_object(path: Path) -> tuple[str, dict[str, Any] | None]:
         return "missing", None
     except (OSError, ValueError, RecursionError):
         return "unreadable", None
-    return ("read", value) if isinstance(value, dict) else ("unreadable", None)
+    if not isinstance(value, dict) or _nested_past_limit(value):
+        return "unreadable", None
+    return "read", value
 
 
 def _claude_instances(configured: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
