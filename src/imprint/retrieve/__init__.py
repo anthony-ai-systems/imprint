@@ -147,6 +147,20 @@ def reset_payload_delivery(*, root: Path, session_id: str) -> None:
     DeliveryReceipts(Path(root) / "receipts").reset_session(_session_ref(session_id))
 
 
+def whole_line(store, record_id: str) -> dict[str, object] | None:
+    """Return the whole retrieval line for one record, or None if it has none.
+
+    A record's versions hold no ontology labels and do not say which evidence is a
+    source receipt, so this reads the projection delivery reads, and a lookup says
+    what a whole line says. Nodes retrieval never delivers, such as Evidence, have
+    none, and nor does a record closed since, whose versions and dispositions say why.
+    """
+    for record in StoreRetrievalSource(store).retrieval_candidates(""):
+        if record.record_id == record_id:
+            return json.loads(_render(record))
+    return None
+
+
 @dataclass(frozen=True)
 class SelectorDecision:
     """What the optional relevance selector decided for one turn.
@@ -512,4 +526,5 @@ __all__ = [
     "SelectorDecision",
     "StoreRetrievalSource",
     "retrieve_payload",
+    "whole_line",
 ]

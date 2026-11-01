@@ -530,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     consent_revoke.add_argument("--reason", required=True)
     consent_revoke.add_argument("--revoked-at")
 
-    history = subs.add_parser("history", help="show immutable versions and dispositions")
+    history = subs.add_parser("history", help="show immutable versions, dispositions and the whole retrieval line")
     history.add_argument("node_id")
 
     verdict = subs.add_parser("verdict", help="append later WHY or reinforcement evidence")
@@ -933,8 +933,10 @@ def main(argv: list[str] | None = None) -> int:
             _write_json({"status": "consent_revoked", "event_id": event_id, "grant_id": args.grant_id})
             return 0
         if args.command == "history":
+            from .retrieve import whole_line
             store.initialize()
-            _write_json({"status": "ok", "history": store.node_history(args.node_id)})
+            history = store.node_history(args.node_id)
+            _write_json({"status": "ok", "history": {**history, "whole_line": whole_line(store, args.node_id)}})
             return 0
         if args.command == "verdict":
             store.initialize()
