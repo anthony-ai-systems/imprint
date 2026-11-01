@@ -627,6 +627,110 @@ def test_explicit_retrieval_of_a_prompt_keeps_whole_lines_under_jev(tmp_path, re
     assert line["selector"]["mode"] == "jev"
 
 
+# -- capacity ------------------------------------------------------------------------
+#
+# Measured on the installed budget of 4,096 bytes, with a record of realistic size:
+# a full urn:imprint:verdict:<uuid> id and 160 bytes of text. A short line holding
+# them is 266 bytes. Twelve at session start needs 12 lines and the lookup in 3,072
+# bytes, or 252 bytes a line, and the three required keys and an id cost 106 of that.
+
+CAPTURED = ("captured", "captured_judgment")
+RATIFIED = ("ratified", "ratified_knowledge")
+EXTRACTED = ("extracted", "ratified_knowledge")
+IMPORTED = ("extracted", "imported_floor")
+RULE_BYTES = 160
+
+
+def urn(kind: str, index: int) -> str:
+    return f"urn:imprint:{kind}:{uuid.uuid5(uuid.NAMESPACE_URL, f'synthetic-{kind}-{index}')}"
+
+
+def rule_text(index: int, size: int = RULE_BYTES) -> str:
+    return (f"Rule {index:03d}: keep the failed source in the summary and say plainly what was not checked. " * 3)[:size]
+
+
+def realistic(count: int, *, section: str = "general", authority=CAPTURED, size: int = RULE_BYTES, start: int = 0):
+    return [
+        RetrievalRecord(
+            record_id=urn("verdict", index), text=rule_text(index, size), section=section,
+            provenance_status=authority[0], authority_tier=authority[1],
+            evidence_ids=(urn("evidence", index),), case_ids=(urn("case", index),),
+            case_summaries=("Explicit operator feedback witnessed by explicit hook input",),
+            source_receipt_ids=(urn("evidence", index),), provenance_complete=True,
+            imported_selected=authority == IMPORTED, ontology_type="Verdict",
+            ontology_path=("judgment", "Verdict"), judgment_statement=rule_text(index, size),
+        )
+        for index in range(start, start + count)
+    ]
+
+
+def picked(items) -> list[tuple[RetrievalRecord, float]]:
+    return [(item, 0.9) for item in items]
+
+
+def session_start(root, **options) -> dict:
+    return retrieve_payload(FakeStore(), root=root, session_id="s", budget=4096, refresh=True, **options)
+
+
+def test_a_realistic_rule_costs_266_bytes_on_a_short_line():
+    (item,) = realistic(1)
+    assert len(item.text.encode("utf-8")) == RULE_BYTES
+    assert len(render_short(item)) == 266
+
+
+def test_fifteen_realistic_rules_fit_a_prompt():
+    response = respond(picked(realistic(20)))
+    assert response["selector_stages"]["delivered"] == 15
+    assert response["selector_stages"]["unfit"] == 5
+    assert response["selected_bytes"] <= 4096
+
+
+def test_fifteen_fit_with_mixed_authorities():
+    kinds = (CAPTURED, RATIFIED, EXTRACTED, IMPORTED)
+    items = [item for index, kind in enumerate(kinds) for item in realistic(5, authority=kind, start=index * 5)]
+    assert respond(picked(items))["selector_stages"]["delivered"] == 15
+
+
+@pytest.mark.parametrize("marked, delivered_rules", [(2, 15), (5, 14)])
+def test_the_reserved_mark_costs_one_rule_only_past_the_default_two_slots(marked, delivered_rules):
+    items = realistic(20)
+    reserved = {item.record_id: ["Rule."] for item in items[:marked]}
+    assert respond(picked(items), reserved=reserved)["selector_stages"]["delivered"] == delivered_rules
+
+
+def test_a_prompt_of_nothing_but_imported_rules_holds_one_fewer():
+    assert respond(picked(realistic(20, authority=IMPORTED)))["selector_stages"]["delivered"] == 14
+
+
+def test_eleven_realistic_rules_fit_session_start_not_twelve(tmp_path, records):
+    records.extend(realistic(60))
+    response = session_start(tmp_path, short_lines=True)
+    assert len(response["selected_ids"]) == 11
+    assert response["selected_bytes"] <= 3072
+    assert response["omitted_count"] == 49
+
+
+def test_eleven_fit_when_core_and_general_share_session_start(tmp_path, records):
+    records.extend(realistic(30, section="core") + realistic(30, start=30))
+    response = session_start(tmp_path, short_lines=True)
+    assert len(response["selected_ids"]) == 11
+    assert response["section_bytes"]["core"] <= 1024
+
+
+@pytest.mark.parametrize("size, count", [(146, 12), (147, 11)])
+def test_twelve_at_session_start_takes_text_of_146_bytes_or_less(tmp_path, records, size, count):
+    records.extend(realistic(60, size=size))
+    assert len(session_start(tmp_path, short_lines=True)["selected_ids"]) == count
+
+
+def test_the_same_rules_on_whole_lines_fit_a_third_as_many(tmp_path, records):
+    assert _jev_response(
+        "snapshot", "scope", picked(realistic(20)), "picked", 20, 4096,
+    )["selector_stages"]["delivered"] == 5
+    records.extend(realistic(60))
+    assert len(session_start(tmp_path)["selected_ids"]) == 4
+
+
 # -- imprint history -----------------------------------------------------------------
 
 def test_history_returns_the_line_a_whole_delivery_carries(tmp_path, monkeypatch, capsys):
