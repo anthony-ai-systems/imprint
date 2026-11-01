@@ -68,3 +68,16 @@ def test_atomic_write_creates_parseable_settings_and_backup(tmp_path):
     hooks._write(path, {"existing": True, "new": "value"})
     assert json.loads(path.read_text(encoding="utf-8")) == {"existing": True, "new": "value"}
     assert list(path.parent.glob("settings.json.imprint-backup-*"))
+
+
+DOCUMENTS = ("README.md", "docs/configuration.md", "docs/troubleshooting.md", "docs/contracts/capture-origin.md")
+
+
+def test_the_docs_name_the_packaged_hook_commands_and_never_the_installer():
+    root = MODULE_PATH.parents[2]
+    for name in DOCUMENTS:
+        assert "install.sh --settings" not in (root / name).read_text(encoding="utf-8"), name
+    guide = (root / "docs" / "configuration.md").read_text(encoding="utf-8")
+    assert "umask 077\n" in guide
+    for action in ("register", "unregister", "status"):
+        assert f'"$INSTALL_ROOT/tools/manage_hooks.py" {action} \\\n' in guide

@@ -19,8 +19,8 @@ object and preserves unknown namespaced extensions.
   `t3_record_unavailable`. See
   `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
   hooks are registered, so a host with its own Claude config directory needs
-  `install.sh --settings <that directory>/settings.json`. Set this key after
-  the build that knows it is installed. An older build refuses any config that
+  them registered there with `manage_hooks.py`; see Hook registration below. Set
+  this key after the build that knows it is installed. An older build refuses any config that
   has it, which fails every hook and `imprint version`, so before reinstalling
   an older build, remove `t3_capture_origin` from the config.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
@@ -235,7 +235,9 @@ decision-log lines (current and rotated file), so it stays 0 when
   it on.
 - `IMPRINT_DATA_ROOT`: default data root used when config omits `data_root`.
 - `IMPRINT_INSTALL_ROOT`: installer/application destination.
-- `CLAUDE_SETTINGS_PATH`: Claude Code settings path used by installers.
+- `CLAUDE_SETTINGS_PATH`: the Claude Code settings path an installer registers
+  hooks in as part of a full install. To add hooks to one more home, use
+  `manage_hooks.py`; see Hook registration.
 - `XDG_CONFIG_HOME` and `XDG_DATA_HOME`: respected on POSIX systems.
 
 ## Multi-operator and multi-node use
@@ -252,3 +254,34 @@ The installer edits only `hooks.SessionStart`, `hooks.UserPromptSubmit`, and
 `hooks.Stop`. Before every edit it creates a timestamped settings backup. Managed
 entries contain `imprint-local-managed-hook`; reinstall first removes those
 entries, then adds one copy of each intended hook. Unrelated entries are retained.
+
+To add or remove hooks in one Claude home, such as a host's own config directory,
+run the packaged `manage_hooks.py` from the install root, under `umask 077`. It
+edits only that home's settings file, in the same way and with the same backup.
+Do not use the installer for this, whatever its `--settings` option suggests: it
+is a full reinstall. It sets `operator_slug` back to `default` unless `--operator`
+is passed, and `data_root` back to its default unless `--data-root` is.
+
+```bash
+umask 077
+INSTALL_ROOT="${IMPRINT_INSTALL_ROOT:-$HOME/.local/lib/imprint-local}"
+PYTHON="$INSTALL_ROOT/venv/bin/python"
+SETTINGS="/path/to/claude-home/settings.json"
+
+# Add the hooks to this home.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" register \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+
+# Check them. Exit 0 means each hook is registered once.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" status \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+
+# Remove only Imprint's hooks from this home.
+"$PYTHON" "$INSTALL_ROOT/tools/manage_hooks.py" unregister \
+  --settings "$SETTINGS" --python "$PYTHON" --hooks-dir "$INSTALL_ROOT/hooks"
+```
+
+`register` and `unregister` replace the settings file, so `umask 077` keeps the new
+one private. On Windows the same commands use `venv\Scripts\python.exe` and
+`tools\manage_hooks.py` under the install root, which defaults to
+`%LOCALAPPDATA%\ImprintApp\app`, and `umask` does not apply.

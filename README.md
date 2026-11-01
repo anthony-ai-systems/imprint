@@ -69,12 +69,16 @@ Set-ExecutionPolicy -Scope Process Bypass
 Both installers create an isolated virtual environment, write a portable config,
 install an owned `imprint` launcher in the user's command path, register each
 managed hook exactly once, and fail if the installed CLI cannot report version
-`3.0.1`. Re-running the installer is safe and removes duplicate managed hooks
-while preserving unrelated hooks. On POSIX, the installer adds one marked PATH
-block to the active shell's login profile (`.zprofile`, `.bash_profile`, or
-`.profile`); uninstall removes that exact owned block and leaves unrelated shell
-configuration untouched. Windows uses the per-user `WindowsApps` directory,
-which is already present in a normal PowerShell user PATH.
+`3.0.1`. Re-running the installer removes duplicate managed hooks while
+preserving unrelated hooks, but it sets the operator and data root from its
+options, so pass the same `--operator` and `--data-root` again. To add hooks to
+another Claude home, use `manage_hooks.py`, not the installer; see Hook
+registration in [`docs/configuration.md`](docs/configuration.md). On POSIX, the
+installer adds one marked PATH block to the active shell's login profile
+(`.zprofile`, `.bash_profile`, or `.profile`); uninstall removes that exact owned
+block and leaves unrelated shell configuration untouched. Windows uses the
+per-user `WindowsApps` directory, which is already present in a normal PowerShell
+user PATH.
 
 Advanced non-interactive options:
 

@@ -12,7 +12,9 @@ not a durable substitute.
 The installer fails closed and leaves a timestamped settings backup. Validate
 that the settings file is JSON and that its `hooks` value is an object whose
 event values are lists. Restore the latest backup if another tool wrote invalid
-JSON, correct that writer, and rerun the installer.
+JSON, correct that writer, and rerun the installer. For a Claude home the
+installer did not set up, rerun `manage_hooks.py register` instead; see Hook
+registration in `docs/configuration.md`.
 
 ## Health is degraded
 

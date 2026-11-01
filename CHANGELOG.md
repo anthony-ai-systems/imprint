@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Correct the docs on adding hooks to a Claude home: they pointed at the
+  installer, which is a full reinstall that resets the operator and data root.
+  They now name the packaged `manage_hooks.py` `register`, `unregister` and
+  `status` commands, run under `umask 077`.
 - Stop an old hook failure holding health at `degraded`. Only a failure from the
   last 7 days degrades it. `hook_failure_count` still counts every file, and
   `hook_failure_recent_count` and `hook_failure_old_count` split it. Nothing is
