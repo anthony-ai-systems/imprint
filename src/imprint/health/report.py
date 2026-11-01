@@ -33,6 +33,7 @@ class HealthInputs:
     t3_record_unavailable_24h: int = 0
     t3_record_unavailable_newest_age_seconds: int = -1
     capture_skips_24h: Mapping[str, int] = field(default_factory=dict)
+    t3_homes: Mapping[str, object] | None = None
     permissions_ok: bool = True
     unsafe_permission_count: int = 0
     selected_bytes: int = 0
@@ -214,6 +215,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "spool_evidence": "regular_spool_files_mtime_and_durable_commit_evidence",
         "stale_lock_count": max(0, values.stale_lock_count),
     }
+    if values.t3_homes is not None:
+        metrics["t3_homes"] = dict(values.t3_homes)
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
         status="red" if reasons else "green",

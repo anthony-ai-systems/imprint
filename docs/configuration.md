@@ -19,10 +19,13 @@ object and preserves unknown namespaced extensions.
   `t3_record_unavailable`. See
   `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
   hooks are registered, so a host with its own Claude config directory needs
-  them registered there with `manage_hooks.py`; see Hook registration below. Set
-  this key after the build that knows it is installed. An older build refuses any config that
-  has it, which fails every hook and `imprint version`, so before reinstalling
-  an older build, remove `t3_capture_origin` from the config.
+  them registered there with `manage_hooks.py`; see Hook registration below.
+  When `true`, `imprint health` also reads T3's settings file and each Claude
+  home it lists, and reports homes with no hooks or another data root under
+  `t3_homes`, without changing `status`. Set this key after the build that knows
+  it is installed. An older build refuses any config that has it, which fails
+  every hook and `imprint version`, so before reinstalling an older build, remove
+  `t3_capture_origin` from the config.
 - `context_budget_bytes`: 4,096–131,072. The tested/default value is 32,768.
   Values above 32,768 require `allow_higher_budget: true`.
 - `spool_retention_days`: 1–36,500; default 30. Pruning is never automatic and

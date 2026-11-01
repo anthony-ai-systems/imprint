@@ -5,23 +5,25 @@ from __future__ import annotations
 import os
 import platform
 from pathlib import Path
+from typing import Mapping
 
 from .errors import SafetyError
 
 SYNC_MARKERS = ("Dropbox", "OneDrive", "CloudStorage", "Google Drive")
 
 
-def default_data_root() -> Path:
-    override = os.environ.get("IMPRINT_DATA_ROOT")
+def default_data_root(environ: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if environ is None else environ
+    override = values.get("IMPRINT_DATA_ROOT")
     if override:
         root = Path(override).expanduser()
     elif platform.system() == "Windows":
-        base = os.environ.get("LOCALAPPDATA")
+        base = values.get("LOCALAPPDATA")
         if not base:
             raise SafetyError("LOCALAPPDATA is required on Windows")
         root = Path(base) / "Imprint"
     else:
-        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "imprint"
+        root = Path(values.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "imprint"
     return validate_data_root(root)
 
 

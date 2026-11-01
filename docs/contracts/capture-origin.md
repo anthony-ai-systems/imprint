@@ -71,3 +71,18 @@ Blank transcript lines are skipped by both parsers. So is a line of valid JSON t
 A transcript up to 16 MiB is read whole. Over that, the last 2 MiB are read, then the last 16 MiB once if they hold no prompt. A correction further back than that is lost, and the turn is skipped as `transcript_tail_exhausted`, logged and counted in `capture_skips_24h`, rather than as a missing prompt.
 
 The prior assistant message is kept as context up to 64 KiB. Past that it is cut, and the capture and its receipt record `context_truncated` in `org.imprint.transcript`. Operator text is never cut: stored text over 256 KiB that reads as feedback is skipped as `operator_text_oversized` and logged to `logs/capture-skips.jsonl`, because blocking the stop cannot make it shorter.
+
+## T3 homes
+
+Hooks run only in a Claude home that registers them, and a home with hooks can send them to another store. Neither shows anywhere, because a home that never runs a hook writes nothing. With `t3_capture_origin: true`, `imprint health` reads the homes from T3's own `<T3CODE_HOME or ~/.t3>/userdata/settings.json`, read-only, then each home's `settings.json`, and adds a `t3_homes` metric. With it off, neither file is read and the metric is absent. This adds no setting.
+
+`t3_homes.state` is `read`, `settings_missing` or `settings_unreadable`. A file that cannot be read, or instances T3 itself would refuse, leave `homes` empty and health carries on. Each row in `homes` holds no path and no value of any setting:
+
+- `instances`: the T3 instance ids on this home. Paths that resolve to one folder are one home, and T3's default instance is included when its file leaves it out. A home with no `homePath` is `CLAUDE_CONFIG_DIR` from the instance's environment, or else `~/.claude`.
+- `enabled`: whether any of those instances can run.
+- `hooks`: `complete`, `partial`, `none` or `unreadable`, counted by Imprint's ownership marker in `SessionStart`, `UserPromptSubmit` and `Stop`. A home with no settings file has `none`. A file or home path that cannot be read is `unreadable`, not `none`.
+- `data_root`: `same`, `different` or `unknown`, from resolving the config and data root a hook would use with the instance's `environment` and then the home's `env` applied, and comparing the operator folder with this one. A home that sets none of the variables involved is `same`. A config that cannot be read is `unknown`. If instances on one home disagree, `different` wins.
+
+`homes_missing_hooks`, `homes_different_data_root` and `homes_unreadable` count enabled homes only. A disabled instance is listed and not counted, because it launches nothing.
+
+These are reports. They change neither `status` nor `degraded_reasons`, so a home that is waiting for hooks does not hold health at `degraded`. Reading the data root stops at those two places: a variable set on the T3 server's own process, or in front of a hook's command, is not seen.

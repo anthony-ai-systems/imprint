@@ -290,6 +290,10 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         selector = selector_health(root, config.get("selector"))
     except Exception:
         pass
+    t3_homes = None
+    if config.get("t3_capture_origin") is True:
+        from .t3_homes import t3_home_report
+        t3_homes = t3_home_report(root)
     report = evaluate_health(HealthInputs(
         compiler_count=1 if config.get("compiler") else 0,
         database_ok=database_ok,
@@ -308,6 +312,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         t3_record_unavailable_24h=t3_unavailable_count,
         capture_skips_24h=capture_skips,
         t3_record_unavailable_newest_age_seconds=t3_unavailable_age,
+        t3_homes=t3_homes,
         permissions_ok=not unsafe_permissions,
         unsafe_permission_count=len(unsafe_permissions),
         selected_bytes=selected_bytes,

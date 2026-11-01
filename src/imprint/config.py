@@ -8,7 +8,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from .errors import ValidationError
@@ -267,14 +267,15 @@ def _validate_config(data: dict[str, Any]) -> None:
     _validate_selector(data)
 
 
-def config_path() -> Path:
-    override = os.environ.get("IMPRINT_CONFIG")
+def config_path(environ: Mapping[str, str] | None = None) -> Path:
+    values = os.environ if environ is None else environ
+    override = values.get("IMPRINT_CONFIG")
     if override:
         return Path(override).expanduser()
     if os.name == "nt":
-        base = Path(os.environ.get("APPDATA", Path.home()))
+        base = Path(values.get("APPDATA", Path.home()))
         return base / "Imprint" / "config.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "imprint" / "config.json"
+    return Path(values.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "imprint" / "config.json"
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -305,7 +306,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
     return data
 
 
-def resolved_operator_root(config: dict[str, Any]) -> Path:
+def resolved_operator_root(config: dict[str, Any], environ: Mapping[str, str] | None = None) -> Path:
     explicit = config.get("data_root")
-    base = validate_data_root(Path(explicit).expanduser()) if explicit else default_data_root()
+    base = validate_data_root(Path(explicit).expanduser()) if explicit else default_data_root(environ)
     return operator_root(str(config["operator_slug"]), base)

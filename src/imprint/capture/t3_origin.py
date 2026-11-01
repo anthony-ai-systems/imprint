@@ -116,6 +116,12 @@ def _database_path(environ: Mapping[str, str]) -> Path | None:
     return base / "userdata" / "statev2.sqlite"
 
 
+def t3_settings_path(environ: Mapping[str, str] | None = None) -> Path | None:
+    """Return T3's settings file, which sits beside its store, if its home resolves."""
+    database = _database_path(os.environ if environ is None else environ)
+    return None if database is None else database.with_name("settings.json")
+
+
 def _read_records(
     database: Path, thread_id: str,
 ) -> tuple[tuple[Any, ...] | None, tuple[Any, ...], tuple[tuple[Any, Mapping[str, Any]], ...]] | None:

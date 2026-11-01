@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Report the Claude homes T3 launches that have no Imprint hooks, or send them to
+  another store, as `t3_homes` in `imprint health`. The homes come from T3's own
+  settings file, under `t3_capture_origin`, so nothing is read with it off and no
+  setting is added. A missing or unreadable file is reported, not a failure. This
+  reports and does not change `status`.
 - Correct the docs on adding hooks to a Claude home: they pointed at the
   installer, which is a full reinstall that resets the operator and data root.
   They now name the packaged `manage_hooks.py` `register`, `unregister` and
