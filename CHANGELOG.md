@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Stop crediting prompts in T3's "No project" chats, which live in its `scratch`
+  folder, and report them as `t3_scratch_thread`. A script driving the T3 app is
+  recorded as `user` and `web` like a person, so its prompts were stored as the
+  operator's. A script typing into a chat in a project still is, until T3 can
+  mark it.
 - Add `selector.jev.standing_rules`, off by default. The newest rules set with
   "from now on", "always", "never" or similar are sent to Jev on every turn, and
   one takes a reserved place ahead of other picks when Jev scores it at 0.25 or

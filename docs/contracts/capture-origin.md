@@ -37,6 +37,9 @@ A record that decodes but cannot judge the prompt is logged the same way under i
 - `t3_session_ref_unreadable`: the thread has provider rows and none names any session. That is a change in T3's shape, so it is also a degraded reason.
 - `t3_session_unmatched`: no row names this session. A nested run that inherits the thread reaches this in normal use, so it does not degrade health.
 - `t3_prompt_unmatched`: the session matches and no recent prompt has these words, again a normal result for a nested run.
+- `t3_scratch_thread`: T3 keeps the thread in its home's `scratch` folder, which is where its "No project" chats live. No prompt in one is credited, a person's included, and this does not degrade health. The same reason covers a thread whose folder cannot be read.
+
+The scratch rule exists because `creationSource` names the client, not the person. A script that drives the T3 app is recorded as `user` and `web`, the same as a person typing, and no field separates them. So a script typing into a chat in a project is still credited until T3 can mark it. A thread's folders are `worktreePath` on its T3 thread row and the root of its T3 project, and either one in `scratch` is enough. Both are compared after following symlinks. A path that is not absolute or cannot be read counts as scratch, as does a session whose thread has no row or no folder. A row that is not an object counts as an unreadable record. A run naming a thread this store does not hold stays `t3_session_unmatched`.
 
 A prompt T3 does record and that a check above refuses is a judgment, so it stays an ordinary `unverified_provenance` and is not logged.
 

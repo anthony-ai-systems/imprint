@@ -45,10 +45,20 @@ def _provider_thread(native_id=SESSION, *, thread=THREAD):
     return (thread, json.dumps({"nativeThreadRef": reference}))
 
 
-def _t3_home(tmp_path, *messages, providers=(_provider_thread(),)):
+def _t3_home(
+    tmp_path, *messages, providers=(_provider_thread(),), threads=((THREAD, "{}", "project-synthetic"),),
+    project_root="/synthetic/project",
+):
     userdata = tmp_path / "t3" / "userdata"
     userdata.mkdir(parents=True)
     with sqlite3.connect(userdata / "statev2.sqlite") as db:
+        db.execute(
+            "CREATE TABLE orchestration_v2_projection_threads "
+            "(thread_id TEXT PRIMARY KEY, payload_json TEXT, project_id TEXT)",
+        )
+        db.executemany("INSERT INTO orchestration_v2_projection_threads VALUES (?, ?, ?)", threads)
+        db.execute("CREATE TABLE projection_projects (project_id TEXT PRIMARY KEY, workspace_root TEXT)")
+        db.execute("INSERT INTO projection_projects VALUES ('project-synthetic', ?)", (project_root,))
         db.execute(
             "CREATE TABLE orchestration_v2_projection_messages "
             "(message_id TEXT PRIMARY KEY, thread_id TEXT, role TEXT, created_at TEXT, payload_json TEXT)",
@@ -274,6 +284,16 @@ def test_changed_record_schema_stays_unverified(tmp_path, schema):
     with sqlite3.connect(userdata / "statev2.sqlite") as db:
         db.execute(schema)
     origin = t3_host_origin(ON, SESSION, {T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp_path / "t3")})
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.read_failed is True
+
+
+@pytest.mark.parametrize("table", ["orchestration_v2_projection_threads", "projection_projects"])
+def test_a_missing_folder_table_stays_unverified(tmp_path, table):
+    env = _t3_home(tmp_path, _message(FEEDBACK))
+    with sqlite3.connect(_database(env)) as db:
+        db.execute(f"DROP TABLE {table}")
+    origin = t3_host_origin(ON, SESSION, env)
     assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
     assert origin.read_failed is True
 
@@ -1148,6 +1168,106 @@ def test_a_failed_session_join_is_logged_under_its_own_reason(tmp_path, provider
     assert [json.loads(line)["reason"] for line in _skip_log(root)] == [reason]
     assert set(json.loads(_skip_log(root)[0])) == {"reason", "timestamp"}
     assert not _spooled(root)
+
+
+def _in_folder(folder):
+    return ((THREAD, json.dumps({"worktreePath": folder}), "project-synthetic"),)
+
+
+def _scratch_chat(tmp_path):
+    return str(tmp_path / "t3" / "scratch" / "chat")
+
+
+def _judged_by_folder(tmp_path, folder=None, **home):
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK), threads=_in_folder(folder), **home))
+    return classify_with_host(_sdk_entry(), FEEDBACK, origin).basis, origin.skip_reason
+
+
+def test_no_prompt_in_a_scratch_thread_is_credited(tmp_path):
+    env = _t3_home(tmp_path, _message(FEEDBACK), threads=_in_folder(_scratch_chat(tmp_path)))
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path), env)
+    assert json.loads(run.stdout)["reason"] == "t3_scratch_thread"
+    assert [json.loads(line)["reason"] for line in _skip_log(root)] == ["t3_scratch_thread"]
+    assert not _spooled(root)
+
+
+def test_a_scratch_project_thread_with_no_folder_of_its_own_is_not_credited(tmp_path):
+    assert _judged_by_folder(tmp_path, project_root=str(tmp_path / "t3" / "scratch")) == (
+        "unverified", "t3_scratch_thread",
+    )
+
+
+@pytest.mark.parametrize("linked", ["home", "folder"])
+def test_scratch_is_found_through_a_linked_t3_home(tmp_path, linked):
+    (tmp_path / "linked").symlink_to(tmp_path / "t3", target_is_directory=True)
+    stored = tmp_path / ("linked" if linked == "folder" else "t3") / "scratch" / "chat"
+    env = _t3_home(tmp_path, _message(FEEDBACK), threads=_in_folder(str(stored)))
+    home = tmp_path / ("linked" if linked == "home" else "t3")
+    origin = t3_host_origin(ON, SESSION, {**env, "T3CODE_HOME": str(home)})
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.skip_reason == "t3_scratch_thread"
+
+
+def test_scratch_is_found_when_the_folder_itself_is_linked(tmp_path):
+    env = _t3_home(tmp_path, _message(FEEDBACK), threads=_in_folder(_scratch_chat(tmp_path)))
+    (tmp_path / "kept").mkdir()
+    (tmp_path / "t3" / "scratch").symlink_to(tmp_path / "kept", target_is_directory=True)
+    origin = t3_host_origin(ON, SESSION, env)
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.skip_reason == "t3_scratch_thread"
+
+
+@pytest.mark.parametrize("folder", ["t3/scratch-kept/chat", "project/scratch/chat", "t3"])
+def test_a_thread_outside_the_scratch_folder_is_credited(tmp_path, folder):
+    assert _judged_by_folder(tmp_path, str(tmp_path / folder))[0] == "host_record"
+
+
+def test_a_project_thread_with_no_folder_of_its_own_is_credited(tmp_path):
+    assert _judged_by_folder(tmp_path)[0] == "host_record"
+
+
+@pytest.mark.parametrize("folder", [7, ["chat"], {"path": "chat"}, "chat\x00name", "", "relative/chat"])
+def test_a_folder_that_cannot_be_read_is_not_credited(tmp_path, folder):
+    assert _judged_by_folder(tmp_path, folder) == ("unverified", "t3_scratch_thread")
+
+
+def test_a_project_root_that_cannot_be_read_is_not_credited(tmp_path):
+    assert _judged_by_folder(tmp_path, project_root=7) == ("unverified", "t3_scratch_thread")
+
+
+def test_a_thread_with_no_project_and_no_folder_is_not_credited(tmp_path):
+    threads = ((THREAD, "{}", "project-absent"),)
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK), threads=threads))
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.skip_reason == "t3_scratch_thread"
+
+
+@pytest.mark.parametrize("payload", ["[]", "{not json"])
+def test_a_thread_row_that_cannot_be_read_voids_the_records(tmp_path, payload):
+    threads = ((THREAD, payload, "project-synthetic"),)
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path), _t3_home(tmp_path, _message(FEEDBACK), threads=threads))
+    _assert_reported_unavailable(run, root)
+
+
+def test_a_session_whose_thread_has_no_row_is_not_credited(tmp_path):
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK), threads=()))
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.skip_reason == "t3_scratch_thread"
+
+
+def test_a_thread_this_store_does_not_hold_stays_unmatched_and_healthy(tmp_path):
+    env = _t3_home(tmp_path, threads=(), providers=())
+    origin = t3_host_origin(ON, SESSION, env)
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert (origin.read_failed, origin.skip_reason) == (False, "t3_session_unmatched")
+
+
+def test_a_run_nested_in_a_scratch_thread_keeps_its_own_reason(tmp_path):
+    origin = t3_host_origin(ON, "session-nested", _t3_home(
+        tmp_path, _message(FEEDBACK), threads=_in_folder(_scratch_chat(tmp_path)),
+    ))
+    assert classify_with_host(_sdk_entry(), FEEDBACK, origin).basis == "unverified"
+    assert origin.skip_reason == "t3_session_unmatched"
 
 
 def test_a_prompt_with_no_row_is_logged(tmp_path):
