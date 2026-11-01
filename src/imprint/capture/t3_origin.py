@@ -30,8 +30,8 @@ T3_SESSION_REF_UNREADABLE_REASON = "t3_session_ref_unreadable"
 T3_SESSION_UNMATCHED_REASON = "t3_session_unmatched"
 T3_PROMPT_UNMATCHED_REASON = "t3_prompt_unmatched"
 # T3's "No project" chats live in this folder of its home, as a project whose root
-# it is. Test scripts drive the app there and T3 records what they type as
-# user/web, so no prompt in one is credited, a person's included.
+# it is. Test scripts drive the app there, and old rows and unpatched builds record
+# what they type as user/web, so no prompt in one is credited, a person's included.
 T3_SCRATCH_THREAD_REASON = "t3_scratch_thread"
 _SCRATCH_FOLDER = "scratch"
 _HUMAN_AUTHOR = "user"

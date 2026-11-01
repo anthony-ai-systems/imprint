@@ -16,7 +16,7 @@ With `t3_capture_origin: true`, an unverified `sdk-ts` entry from a run with `T3
 
 - **Session.** A row in `orchestration_v2_projection_provider_threads` for that thread has `nativeThreadRef.nativeId` equal to the Stop event's `session_id`, compared as an exact string. Every job an agent starts inherits `T3CODE_THREAD_ID`, so without this a nested run could match a person's words. No such row, a missing field or any other shape leaves the entry unverified, with the reason below.
 - **Newest match.** Among the thread's newest 64 prompts, the newest with the same words decides, so an agent repeating a person's words is judged as the agent.
-- **Author.** That prompt has `createdBy=user`, a string `creationSource` of `web` or `mobile`, and a message id.
+- **Author.** That prompt has `createdBy=user`, a string `creationSource` of `web` or `mobile`, and a message id. `user` with `mcp` is a desktop window that did not report a normal launch, either one launched so a script could drive it or a misfire, and it is refused like an agent's prompt.
 - **Not a machine or a third party.** It has no truthy `senderThreadId`, `notification`, `scheduledTaskId` or `context.guest`, and a `context` of any other shape refuses it. Scheduled and webhook prompts keep `user` and `web`; so does a message sent for a guest.
 - **Not a plan.** Its text does not begin with `PLEASE IMPLEMENT THIS PLAN:\n`, after removing one leading `Ultrathink:\n`. T3's Implement button sends the assistant's plan that way and no field marks it.
 

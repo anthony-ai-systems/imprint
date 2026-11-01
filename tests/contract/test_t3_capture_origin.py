@@ -116,6 +116,7 @@ def test_web_prompt_recorded_as_human_is_operator(tmp_path):
     _message(FEEDBACK, by="agent", source="mcp"),
     _message(FEEDBACK, by="agent", source="provider"),
     _message(FEEDBACK, source="server"),
+    _message(FEEDBACK, source="mcp"),
     _message(FEEDBACK, source="future-client"),
     _message(FEEDBACK, senderThreadId="thread-other"),
     _message(FEEDBACK, notification={"kind": "synthetic"}),
