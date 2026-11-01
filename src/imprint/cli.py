@@ -87,6 +87,31 @@ _PREVIOUS_REPLY_LABEL = "Previous assistant reply:"
 # HOOK_TIMEOUT_SECONDS (10); the rest covers interpreter start-up and the
 # deterministic fallback, so a slow endpoint can never empty the hook output.
 HOOK_SELECTOR_BUDGET_SECONDS = 6.0
+# Claude Code sets this for what a session runs, and each nested session has its own.
+CLAUDE_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
+
+
+def _t3_scratch_thread(config: dict, native_session: str | None) -> bool:
+    """Whether T3's records place this session's thread in its scratch folder."""
+    if config.get("t3_capture_origin") is not True:
+        return False
+    from .capture.t3_origin import t3_host_origin
+    origin = t3_host_origin(config, native_session)
+    return origin is not None and origin.in_scratch()
+
+
+def _turn_selector(config: dict, prompt: str, native_session: str | None) -> tuple[str, dict[str, object]]:
+    """Return this turn's selector mode and what its output says about the choice.
+
+    T3's scratch chats get no Jev, and T3 is asked only on a turn that would call it.
+    """
+    from .config import effective_selector_mode
+    mode = effective_selector_mode(config.get("selector"))
+    fields: dict[str, object] = {"selector_method": "deterministic"}
+    if mode != "deterministic" and prompt.strip() and _t3_scratch_thread(config, native_session):
+        from .capture.t3_origin import T3_SCRATCH_THREAD_REASON
+        return "deterministic", {**fields, "selector_outcome": T3_SCRATCH_THREAD_REASON}
+    return mode, fields
 
 
 def _selector_state(prompt: str, event: dict, selector: dict) -> str:
@@ -995,10 +1020,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "retrieve":
             from .retrieve import retrieve_payload
-            from .config import effective_selector_mode
             store.initialize()
-            selector_mode = effective_selector_mode(config.get("selector"))
-            selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+            # --session can be any label, so the host's own id is the one T3 records.
+            selector_mode, selector_fields = _turn_selector(
+                config, args.prompt, os.environ.get(CLAUDE_SESSION_ENV, "").strip() or args.session,
+            )
             context = None
             exclude_ids: frozenset[str] = frozenset()
             if selector_mode != "deterministic" and args.prompt.strip():
@@ -1127,9 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt,
                 )
                 domain = selection.domain_id
-                from .config import effective_selector_mode
-                selector_mode = effective_selector_mode(config.get("selector"))
-                selector_fields: dict[str, object] = {"selector_method": "deterministic"}
+                selector_mode, selector_fields = _turn_selector(config, prompt, native_value)
                 context = None
                 exclude_ids: frozenset[str] = frozenset()
                 if selector_mode != "deterministic" and prompt.strip():

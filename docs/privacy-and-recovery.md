@@ -20,7 +20,8 @@ installation sets `selector.mode` to `jev` or `shadow` does Imprint send one
 HTTPS `POST` per non-empty prompt to the configured endpoint
 (`https://api.typesafe.ai/v1/systemone` by default). Two paths send it: the
 UserPromptSubmit hook, and `imprint retrieve --prompt ...` run by hand or by a
-script. Exactly this leaves the machine:
+script. With `t3_capture_origin: true`, neither sends anything from a thread T3
+places in its scratch folder. Exactly this leaves the machine:
 
 - the request body keys `model`, `state`, and `questions`, nothing else;
 - `state`: the prompt text, at most 8,000 characters, as written: unlike

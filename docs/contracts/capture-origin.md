@@ -86,3 +86,13 @@ Hooks run only in a Claude home that registers them, and a home with hooks can s
 `homes_missing_hooks`, `homes_different_data_root` and `homes_unreadable` count enabled homes only. A disabled instance is listed and not counted, because it launches nothing.
 
 These are reports. They change neither `status` nor `degraded_reasons`, so a home that is waiting for hooks does not hold health at `degraded`. Reading the data root stops at those two places: a variable set on the T3 server's own process, or in front of a hook's command, is not seen.
+
+## Scratch chats and Jev
+
+T3's scratch chats get no Jev. With `t3_capture_origin: true`, the prompt hook and `imprint retrieve --prompt` send no request, in `jev` or `shadow` mode, from a thread T3's records place in its scratch folder. The turn gets the deterministic answer, with `selector_method` `deterministic` and `selector_outcome` `t3_scratch_thread`, and no line in the decision log. Session start is unchanged, and it never calls Jev.
+
+The same records are read the other way round from capture. Capture credits nothing it cannot place, because crediting is the risk. Here the risk is losing Jev, so a thread the records cannot place keeps it: a missing or locked store, a missing table, a payload that cannot be read, no thread row, no folder, and a folder that is not absolute or cannot be read all leave the turn as it was. Only a folder that resolves into `scratch` counts, and either of the thread's two folders is enough, even if the other cannot be read.
+
+A provider row must still name this session, because every run inherits `T3CODE_THREAD_ID`. The prompt hook uses the event's `session_id`. `imprint retrieve` uses `CLAUDE_CODE_SESSION_ID`, which Claude Code sets for what a session runs, and otherwise its `--session` value, which can be any label. So a nested run has its own session and keeps Jev even inside a scratch thread, and a `retrieve` run with neither variable set and a label T3 does not know keeps it too.
+
+T3 is read only on a turn that would call Jev, with the setting on and `T3CODE_THREAD_ID` set, and then only the thread row, its project's root and its provider rows, never a prompt. With the setting off nothing changes and T3's store is not opened. The check takes about 0.2 ms on a 60 MB store and adds no measurable time to the hook. On a locked store it gives up after about 0.3 seconds, which counts against the hook's 6-second selector budget.
