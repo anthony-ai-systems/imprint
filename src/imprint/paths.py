@@ -20,10 +20,15 @@ def home_directory(environ: Mapping[str, str] | None = None) -> Path:
 
 
 def expand_home(path: Path | str, environ: Mapping[str, str] | None = None) -> Path:
-    """Expand a leading ``~`` as a process given these variables would."""
+    """Expand a leading ``~`` as a process given these variables would.
+
+    Only a home the variables name takes its own route. Anything else is
+    ``expanduser``, which is stricter about a home than ``Path.home()``.
+    """
     path = Path(path)
-    if path.parts[:1] == ("~",):
-        return home_directory(environ).joinpath(*path.parts[1:])
+    home = None if environ is None else environ.get(HOME_VARIABLE)
+    if home and path.parts[:1] == ("~",):
+        return Path(home).joinpath(*path.parts[1:])
     return path.expanduser()
 
 

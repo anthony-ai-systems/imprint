@@ -7,7 +7,7 @@ import pytest
 from imprint.config import config_path, resolved_operator_root
 from imprint.config import load_config
 from imprint.errors import SafetyError, ValidationError
-from imprint.paths import default_data_root
+from imprint.paths import default_data_root, operator_root, validate_data_root
 
 
 def test_explicit_data_root_with_spaces_is_validated_and_supported(tmp_path):
@@ -96,3 +96,20 @@ def test_with_no_supplied_home_the_process_home_still_decides(tmp_path, monkeypa
     assert config_path({}) == tmp_path / "process-home" / ".config" / "imprint" / "config.json"
     assert default_data_root({}) == (tmp_path / "process-home" / ".local" / "share" / "imprint").resolve()
     assert config_path({"IMPRINT_CONFIG": "~/custom.json"}) == tmp_path / "process-home" / "custom.json"
+
+
+@pytest.mark.parametrize("home", ["~/alt", "~synthetic", "~root"])
+@pytest.mark.parametrize("call", [
+    config_path,
+    default_data_root,
+    lambda: operator_root("operator-a"),
+    lambda: validate_data_root(Path("~/x")),
+    lambda: resolved_operator_root({"data_root": "~/x", "operator_slug": "operator-a"}),
+], ids=["config path", "data root", "operator root", "validate", "config data root"])
+def test_with_no_variables_given_expanduser_still_decides_a_tilde(monkeypatch, home, call):
+    """Path.home() takes these on some Python versions, and a real hook passes no variables."""
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.setenv("IMPRINT_CONFIG", "~/c.json")
+    monkeypatch.setenv("IMPRINT_DATA_ROOT", "~/x")
+    with pytest.raises(RuntimeError, match="home directory"):
+        call()

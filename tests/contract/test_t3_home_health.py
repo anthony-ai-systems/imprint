@@ -9,6 +9,7 @@ import pytest
 
 from imprint.capture import t3_origin
 from imprint.config import load_config, resolved_operator_root
+from imprint.errors import ValidationError
 from imprint.health import health_report, t3_homes
 from imprint.store import ImprintStore
 
@@ -246,12 +247,34 @@ def test_a_default_install_reads_the_same_from_the_launcher(world, monkeypatch):
 
 
 def test_a_home_that_sets_nothing_is_still_compared(world, monkeypatch):
-    """After `install.sh --config` the launcher names a config no hook reads."""
+    """After `install.sh --config --data-root` the launcher names a store no hook reaches."""
     monkeypatch.setenv("IMPRINT_CONFIG", str(_other_store(world, data="custom-data", name="custom.json")))
     home = world / MARKER / "home"
     _hooked(home)
     _t3_settings(world, claudeAgent=_instance(home))
     assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "different"
+
+
+def test_the_launcher_and_a_hook_compare_one_home_with_different_stores(world, monkeypatch):
+    """The home resolves alike for both, and each compares it with the store it opened."""
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
+    monkeypatch.setenv("IMPRINT_CONFIG", str(_other_store(world, data="custom-data", name="custom.json")))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "different"
+
+
+def test_install_config_alone_keeps_the_default_store(world, monkeypatch):
+    """The installer writes its default data root and operator into a `--config` file."""
+    default_root = world / "home" / ".local" / "share" / "imprint"
+    custom = world / "custom.json"
+    custom.write_text(json.dumps({"data_root": str(default_root), "operator_slug": "default"}), encoding="utf-8")
+    monkeypatch.setenv("IMPRINT_CONFIG", str(custom))
+    home = world / MARKER / "home"
+    _hooked(home)
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "same"
 
 
 def test_a_data_root_only_this_process_has_reaches_no_hook(world, monkeypatch):
@@ -480,13 +503,66 @@ def test_a_home_named_by_its_instance_environment_is_used(world):
 
 
 @pytest.mark.parametrize("value", ["~/tilde-home", "~"])
-def test_t3_takes_an_inherited_claude_config_dir_literally(world, value):
-    """T3 expands `~` only in homePath, so this names no folder the hooks here are in."""
+def test_a_tilde_in_an_instance_claude_config_dir_is_expanded(world, value):
+    """T3 expands a configured value. Only one the server inherited stays literal."""
     _hooked(world / "home" / "tilde-home")
     _hooked(world / "home")
     _t3_settings(world, claudeAgent={
         "driver": "claudeAgent", "environment": [{"name": "CLAUDE_CONFIG_DIR", "value": value}],
     })
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "complete"
+    assert section["homes_unreadable"] == 0
+
+
+def _moved_instance(alternate, **extra):
+    """An instance that moves HOME, which T3 passes on to the Claude it starts."""
+    environment = [{"name": "HOME", "value": str(alternate)}]
+    return {"driver": "claudeAgent", "environment": environment, **extra}
+
+
+def test_an_instance_that_moves_home_is_read_from_that_home(world):
+    """The server's hooks do not run for it, so they must not read as complete."""
+    alternate = world / "alternate"
+    _write_settings(alternate / ".claude", {})
+    _hooked(world / "home" / ".claude")
+    _t3_settings(world, claudeAgent=_moved_instance(alternate))
+    section = _homes(world)
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "none"
+    assert section["homes_missing_hooks"] == 1
+
+
+def test_an_instance_that_moves_home_gets_its_own_row(world):
+    alternate = world / "alternate"
+    _hooked(alternate / ".claude")
+    _write_settings(world / "home" / ".claude", {})
+    _t3_settings(world, claudeAgent=_instance(), claudeAgent_moved=_moved_instance(alternate))
+    section = _homes(world)
+    assert len(section["homes"]) == 2
+    assert _by_instance(section)["claudeAgent"]["hooks"] == "none"
+    assert _by_instance(section)["claudeAgent_moved"]["hooks"] == "complete"
+
+
+@pytest.mark.parametrize("field", ["homePath", "CLAUDE_CONFIG_DIR"])
+def test_a_named_home_wins_over_an_instance_home_and_keeps_the_server_tilde(world, field):
+    """T3 expands `~` with its own home, so the instance's HOME does not move it."""
+    alternate = world / "alternate"
+    _write_settings(alternate / "tilde-home", {})
+    _hooked(world / "home" / "tilde-home")
+    if field == "homePath":
+        instance = _moved_instance(alternate, config={"homePath": "~/tilde-home"})
+    else:
+        instance = _moved_instance(alternate)
+        instance["environment"].append({"name": field, "value": "~/tilde-home"})
+    _t3_settings(world, claudeAgent=instance)
+    assert _by_instance(_homes(world))["claudeAgent"]["hooks"] == "complete"
+
+
+@pytest.mark.parametrize("value", ["relative/home", "~/alternate"])
+def test_an_instance_home_that_is_not_absolute_is_unreadable(world, value):
+    """T3 expands no `~` in HOME, so Claude would get a relative home from either."""
+    _hooked(world / "home" / ".claude")
+    _t3_settings(world, claudeAgent=_moved_instance(value))
     section = _homes(world)
     assert _by_instance(section)["claudeAgent"]["hooks"] == "unreadable"
     assert section["homes_unreadable"] == 1
@@ -522,6 +598,22 @@ def _not_utf8(path):
     path.write_bytes(b'{"hooks": "\xff"}')
 
 
+def _byte_order_mark(path):
+    path.write_bytes(b"\xef\xbb\xbf{}")
+
+
+def _utf_16(path):
+    path.write_bytes("{}".encode("utf-16"))
+
+
+def _utf_16_without_mark(path):
+    path.write_bytes("{}".encode("utf-16-le"))
+
+
+def _utf_32(path):
+    path.write_bytes("{}".encode("utf-32"))
+
+
 def _fifo(path):
     os.mkfifo(path)
 
@@ -534,9 +626,11 @@ def _too_large(path):
     path.write_text(json.dumps({"padding": "x" * (4 * 1024 * 1024)}), encoding="utf-8")
 
 
+ENCODINGS = [_byte_order_mark, _utf_16, _utf_16_without_mark, _utf_32]
+ENCODING_IDS = ["byte order mark", "utf-16", "utf-16 without a mark", "utf-32"]
 UNREADABLE = pytest.mark.parametrize(
-    "damage", [_bad_json, _not_object, _too_deep, _not_utf8, _fifo, _directory, _too_large],
-    ids=["bad json", "not an object", "too deep", "not utf-8", "fifo", "directory", "too large"],
+    "damage", [_bad_json, _not_object, _too_deep, _not_utf8, *ENCODINGS, _fifo, _directory, _too_large],
+    ids=["bad json", "not an object", "too deep", "not utf-8", *ENCODING_IDS, "fifo", "directory", "too large"],
 )
 
 
@@ -551,6 +645,19 @@ def test_a_config_that_cannot_be_read_leaves_the_store_unknown(world, damage):
     assert _by_instance(section)["claudeAgent"]["data_root"] == "unknown"
     assert section["homes_unreadable"] == 1
     assert section["homes_different_data_root"] == 0
+
+
+@pytest.mark.parametrize("damage", ENCODINGS, ids=ENCODING_IDS)
+def test_an_encoding_no_hook_can_load_leaves_the_store_unknown(world, damage):
+    """json.loads decodes these from bytes, and a hook, which reads text, fails on them."""
+    home = world / MARKER / "home"
+    config = world / "encoded.json"
+    damage(config)
+    with pytest.raises((ValidationError, UnicodeDecodeError)):
+        load_config(config)
+    _hooked(home, env={"IMPRINT_CONFIG": str(config)})
+    _t3_settings(world, claudeAgent=_instance(home))
+    assert _by_instance(_homes(world))["claudeAgent"]["data_root"] == "unknown"
 
 
 def test_one_bad_config_keeps_the_rows_of_every_other_home(world):

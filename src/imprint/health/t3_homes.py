@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 
 from imprint.capture.t3_origin import t3_settings_path
 from imprint.config import config_path, parse_config, resolved_operator_root
+from imprint.paths import home_directory
 
 CLAUDE_DRIVER = "claudeAgent"
 # These two mirror tools/install/manage_hooks.py, which runs without this package.
@@ -32,14 +33,18 @@ _NOT_INHERITED = ("IMPRINT_CONFIG", "IMPRINT_DATA_ROOT")
 
 
 def _read_object(path: Path) -> tuple[str, dict[str, Any] | None]:
-    """Read a JSON object as read, missing or unreadable. Never raises, never blocks."""
+    """Read a JSON object as read, missing or unreadable. Never raises, never blocks.
+
+    Decoded first, because json.loads takes a byte order mark and UTF-16 from bytes,
+    and a config in either fails every hook that reads it as text.
+    """
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         with os.fdopen(os.open(path, flags), "rb") as handle:
             status = os.fstat(handle.fileno())
             if not stat.S_ISREG(status.st_mode) or status.st_size > _SETTINGS_BYTES:
                 return "unreadable", None
-            value = json.loads(handle.read(_SETTINGS_BYTES))
+            value = json.loads(handle.read(_SETTINGS_BYTES).decode("utf-8"))
     except FileNotFoundError:
         return "missing", None
     except (OSError, ValueError, RecursionError):
@@ -86,17 +91,18 @@ def _instance_environment(instance: Mapping[str, Any]) -> dict[str, str]:
 def _home_path(config: Mapping[str, Any], environment: Mapping[str, str]) -> Path | None:
     """Resolve a home as T3 does, or None if T3 could not use it.
 
-    The T3 server's own environment cannot be seen from here, so an instance with
-    no home of its own is taken to be the default home. T3 expands `~` in homePath
-    only: an inherited CLAUDE_CONFIG_DIR stays literal, so `~/x` there is relative.
+    T3 expands `~` in homePath and in an instance's CLAUDE_CONFIG_DIR with the
+    server's home, not the instance's. With neither set, T3 passes the instance's
+    HOME on and Claude finds its home there. The T3 server's own environment cannot
+    be seen from here, so an instance that sets none of these is taken to be the
+    default home.
     """
     chosen = config.get("homePath", "")
     if not isinstance(chosen, str):
         return None
-    chosen = chosen.strip()
-    inherited = environment.get("CLAUDE_CONFIG_DIR", "").strip()
+    chosen = chosen.strip() or environment.get("CLAUDE_CONFIG_DIR", "").strip()
     try:
-        path = Path(chosen).expanduser() if chosen else Path(inherited or Path.home() / ".claude")
+        path = Path(chosen).expanduser() if chosen else home_directory(environment) / ".claude"
         return path.resolve() if path.is_absolute() else None
     except (OSError, RuntimeError, ValueError):
         return None
