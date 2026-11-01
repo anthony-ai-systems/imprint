@@ -285,7 +285,8 @@ switches off delivery is unchanged.
   not sent again. One whose text was cut is listed in `retry_ids` if its whole line
   could fit the budget, and when it is picked again it arrives on a whole line, as
   long as there is room, and is then done. One whose whole line can never fit counts
-  as delivered from its short line.
+  as delivered from its short line, and so does a local record, cut or not, because
+  nothing picks it and it would otherwise go out cut on every turn.
 - Once a section has refused a line, the rest of its records over 400 bytes are
   passed over without being cut, because cutting reads all of a long record and
   session start meets every eligible one. Shorter records can still fill the room.

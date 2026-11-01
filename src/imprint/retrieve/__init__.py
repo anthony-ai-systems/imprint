@@ -245,9 +245,11 @@ def _jev_response(
     above exist to share. Only a cut can then leave a pick owed: one whose text went
     out whole has said what it was picked to say, and the rest is a lookup away, so it
     latches. One whose text was cut goes in ``retry_ids``, and arrives whole when it is
-    in ``retried`` and there is room. Its selector block keeps only the reserved mark:
-    nothing reads the rest, the order of the lines is the rank, and the decision log
-    has the scores.
+    in ``retried`` and there is room. A local record latches from its short line, cut
+    or not: nothing picks it, so a place in ``retry_ids`` would only send it cut on
+    every turn. A short line's selector block keeps only the reserved mark: nothing
+    reads the rest, the order of the lines is the rank, and the decision log has the
+    scores.
 
     Picks that cannot be delivered at all report ``oversized_picks``, or
     ``crowded_picks`` when one would have fit without the local records, because
@@ -264,7 +266,6 @@ def _jev_response(
         rendered.append(local.payload)
         total += len(local.payload)
         selected_ids.extend(local.selected_ids)
-        retry_ids.extend(local.retry_ids)
         for section, size in local.section_bytes.items():
             section_bytes[section] += size
         for partition, ids in local.selected_by_partition.items():
@@ -284,7 +285,8 @@ def _jev_response(
         rules = reserved.get(record.record_id, ())
         too_large = len(whole) > budget // _FULL_RENDER_SHARE and record.record_id not in retried
         no_room = total + len(whole) > budget
-        short = short_lines and (no_room or record.record_id not in retried)
+        owed = record.record_id in retried and not whole_text_fits(record)
+        short = short_lines and (no_room or not owed)
         compact = not short_lines and ((not all_fit and too_large) or no_room)
         if short:
             mark = {"reserved": True} if "reserved" in selection else None

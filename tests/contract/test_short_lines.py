@@ -387,9 +387,18 @@ def test_a_cut_rule_stays_owed_while_there_is_no_room_for_it():
     assert response["retry_ids"] == [owed.record_id]
 
 
-def test_cut_local_records_keep_their_claim_on_a_whole_delivery():
+def test_a_pick_whose_text_fits_is_not_owed_a_whole_line_it_was_owed_before():
+    item, score = pick(1)
+    response = respond([(item, score)], retried=frozenset({item.record_id}))
+    assert not any("ontology" in line for line in lines(response))
+    assert response["retry_ids"] == []
+
+
+def test_a_cut_local_record_is_not_listed_as_owed():
     long = record(50, text=BACKGROUND * 2)
-    assert respond([pick(1)], local=local_result(long))["retry_ids"] == [long.record_id]
+    response = respond([pick(1)], local=local_result(long))
+    assert long.record_id in response["selected_ids"]
+    assert response["retry_ids"] == []
 
 
 def test_short_picks_are_counted_apart_from_compact_ones():
@@ -500,6 +509,22 @@ def test_the_fallback_keeps_out_what_went_whole_and_not_what_was_cut(tmp_path, t
     fallback = select(tmp_path, "second turn")
     assert fallback.fallback_reason == "timeout"
     assert fallback.exclude_ids == frozenset({plain.record_id})
+
+
+def test_a_cut_local_record_is_sent_once_not_on_every_turn(tmp_path, transport, records):
+    local = record(9, text=f"An offer with a long description. {BACKGROUND * 2}", section="domain", domain_id="research",
+                   ontology_partition="business_declared", ontology_type="Offer", judgment_statement=None)
+    records.extend([local, record(1, text="Never ship on a Friday."), record(2, text="Never skip review.")])
+    sent = 0
+    for turn in range(4):
+        decision = select_prompt_payload(
+            FakeStore(), root=tmp_path, session_id="synthetic-session", state=f"turn {turn}", explicit_domain="research",
+            budget=4096, selector=selector_config(), mode="jev", short_lines=True,
+        )
+        sent += decision.response["selected_ids"].count(local.record_id)
+        if decision.response["status"] == "delivered":
+            commit(tmp_path, decision)
+    assert sent == 1
 
 
 def test_a_standing_rule_reaches_its_short_line_with_its_mark(tmp_path, transport, records):
