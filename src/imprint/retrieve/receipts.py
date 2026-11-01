@@ -194,7 +194,7 @@ class DeliveryReceipts:
         """Return the ids delivered to this session, and those owed a whole delivery.
 
         Only committed 1.1.0 responses count; pending caches were never shown.
-        A response's ``retry_ids`` were delivered compact for want of room, so
+        A response's ``retry_ids`` were delivered without all they have to say, so
         they do not count as delivered, and a later whole delivery still does.
         The scan is bounded to the newest ``max_files`` regular files of at
         most ``max_bytes`` each, and a corrupt or foreign file is skipped:

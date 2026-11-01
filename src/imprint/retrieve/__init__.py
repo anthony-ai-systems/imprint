@@ -68,11 +68,13 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
                      budget: int = 32 * 1024, refresh: bool = False,
                      domain_only: bool = False,
                      context: RetrievalContext | None = None,
-                     exclude_ids: frozenset[str] = frozenset()) -> dict[str, object]:
+                     exclude_ids: frozenset[str] = frozenset(),
+                     short_lines: bool = False) -> dict[str, object]:
     """Build one bounded payload per session/snapshot with an atomic receipt.
 
     ``exclude_ids`` drops records the selector already delivered into this
-    session, so a selector fallback never re-injects them.
+    session, so a selector fallback never re-injects them. ``short_lines`` is the
+    route's switch. A record whose text it cut is listed in ``retry_ids``.
     """
     context = context or RetrievalContext.read(store)
     snapshot_id = context.snapshot_id
@@ -92,7 +94,7 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
     # Validate every retrieval invariant before consuming the once-delivery latch.
     engine = RetrievalEngine(
         retrieval_source,
-        RetrievalConfig(total_budget_bytes=budget, allow_higher_budget=budget > 32 * 1024),
+        RetrievalConfig(total_budget_bytes=budget, allow_higher_budget=budget > 32 * 1024, short_lines=short_lines),
     )
     if domain_only and not explicit_domain:
         raise ValueError("domain_only retrieval requires an explicit selected domain")
@@ -122,6 +124,8 @@ def retrieve_payload(store, *, root: Path, session_id: str, prompt: str = "", ex
             partition: list(ids) for partition, ids in result.selected_by_partition.items()
         },
     }
+    if result.retry_ids:
+        response["retry_ids"] = list(result.retry_ids)
     if refresh:
         return response
     state, cached = receipts.prepare_delivery(

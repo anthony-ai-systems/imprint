@@ -121,6 +121,7 @@ def _rank_key(record: RetrievalRecord, query: str, selected_domain: str | None, 
 
 
 COMPACT_TEXT_BYTES = 400
+SHORT_LINE_DETAIL = "imprint history <record_id>"
 
 
 def _section_limits(total: int) -> dict[str, int]:
@@ -246,6 +247,33 @@ def render_compact(
     }, selector)
 
 
+def whole_text_fits(record: RetrievalRecord) -> bool:
+    """Whether a compact or short line can say all of a record's text."""
+    return _size(record.text) <= COMPACT_TEXT_BYTES
+
+
+def render_short(
+    record: RetrievalRecord, *, selector: dict[str, object] | None = None, rules: Sequence[str] = (),
+    lookup: bool = False,
+) -> bytes:
+    """Render a record's words with only what a reader needs to trust and find it.
+
+    This shapes one delivery only. The text follows the compact line's rules.
+    ``authority`` says how far to trust it and ``record_id`` is what ``imprint
+    history`` takes to return the rest, so neither is ever left off. ``text_basis``
+    and ``text_complete`` appear only on text that was cut, so their absence means
+    the text is all there. ``lookup`` adds ``detail``, the form of that command, which
+    one line of a payload can say for all of them.
+    """
+    text, basis = _compact_text(record.text, rules)
+    value: dict[str, object] = {"authority": _authority(record), "record_id": record.record_id, "text": text}
+    if lookup:
+        value["detail"] = SHORT_LINE_DETAIL
+    if not whole_text_fits(record):
+        value.update(text_basis=basis, text_complete=False)
+    return _line(value, selector)
+
+
 class RetrievalEngine:
     def __init__(self, source: RetrievalSource, config: RetrievalConfig | None = None):
         self.source = source
@@ -351,14 +379,26 @@ class RetrievalEngine:
         limits = _section_limits(self.config.total_budget_bytes)
         carry = 0
         selected: list[tuple[str, bytes]] = []
+        retry_ids: list[str] = []
         section_bytes: dict[str, int] = {"core": 0, "general": 0, "domain": 0}
+        short = self.config.short_lines and mode == "authoritative"
         for section in ("core", "general", "domain"):
             available = limits[section] + carry
+            full = False
             for item in by_section[section]:
-                rendered = _render(item)
+                cut = short and not whole_text_fits(item)
+                if cut and full:
+                    # Cutting reads all of a long record and this scan meets every
+                    # eligible one, so a section that has refused a line stops paying.
+                    continue
+                rendered = render_short(item, lookup=not selected) if short else _render(item)
                 if len(rendered) <= available - section_bytes[section]:
                     selected.append((item.record_id, rendered))
                     section_bytes[section] += len(rendered)
+                    if cut and len(_render(item)) <= self.config.total_budget_bytes:
+                        retry_ids.append(item.record_id)
+                else:
+                    full = True
             carry = available - section_bytes[section]
 
         payload = b"".join(value for _, value in selected)
@@ -383,4 +423,5 @@ class RetrievalEngine:
             authority_mode=mode,
             requested_partitions=partitions,
             selected_by_partition=selected_by_partition,
+            retry_ids=tuple(retry_ids),
         )
