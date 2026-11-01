@@ -5,10 +5,12 @@
 - Send Jev nothing from T3's scratch chats. Under `t3_capture_origin`, the prompt
   hook and `imprint retrieve --prompt` give a thread T3's records place in its
   scratch folder the deterministic answer, with `selector_outcome`
-  `t3_scratch_thread`. A thread the records cannot place keeps Jev, and so does a
-  nested run, whose session no provider row names, and both still send the prompt,
-  so this does not keep prompts local: `IMPRINT_SELECTOR=off` does. Session start
-  is unchanged, and T3's store is not opened with the setting off or on a turn that
+  `t3_scratch_thread`. A thread the records cannot place keeps Jev, including when
+  they cannot be read, and so do a nested run, whose session no provider row names,
+  and a `retrieve` run with a label T3 does not know. Each still sends its whole
+  request, so this does not keep prompts local: `IMPRINT_SELECTOR=off` where the hook
+  will see it does, and so does `selector.mode: deterministic`. Session start is
+  unchanged, and T3's store is not opened with the setting off or on a turn that
   would not call Jev.
 - Report the Claude homes T3 launches that have no Imprint hooks, or send them to
   another store, as `t3_homes` in `imprint health`. The homes come from T3's own

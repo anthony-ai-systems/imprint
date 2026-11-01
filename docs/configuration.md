@@ -22,11 +22,13 @@ object and preserves unknown namespaced extensions.
   them registered there with `manage_hooks.py`; see Hook registration below.
   When `true`, `imprint health` also reads T3's settings file and each Claude
   home it lists, and reports homes with no hooks or another data root under
-  `t3_homes`, without changing `status`. The prompt hook and `imprint retrieve
-  --prompt` also read T3's thread and provider-thread records, and send Jev nothing
-  from a scratch thread when those records place it there and a provider row names
-  the session. Short of that they keep Jev and send the prompt, so
-  `IMPRINT_SELECTOR=off` is what keeps a prompt local; see
+  `t3_homes`, without changing `status`. In `jev` or `shadow` mode, the prompt hook
+  and `imprint retrieve --prompt` also read T3's thread and provider-thread records,
+  and send Jev nothing from a scratch thread when those records place it there and
+  a provider row names the session. Short of that they keep Jev and send the same
+  request as any other turn: the prompt, any previous-reply excerpt and the judgment
+  statements. So this does not keep prompts local. Setting `IMPRINT_SELECTOR=off`
+  where the hook will see it does, and so does `selector.mode: deterministic`; see
   `docs/privacy-and-recovery.md`. Set this key after the build that
   knows it is installed. An older build refuses any config that has it, which
   fails every hook and `imprint version`, so before reinstalling an older build,
@@ -64,8 +66,10 @@ the defaults, so `{"selector": {"mode": "jev"}}` is a complete opt-in.
     records place in its scratch folder is the exception when a provider row names
     the session, in `shadow` mode too: it gets the `deterministic` context and
     sends nothing. A nested run, a `retrieve` run T3 cannot tie to a session and
-    T3 records that cannot be read all keep Jev and send the prompt, so use
-    `IMPRINT_SELECTOR=off` for work that must stay local.
+    T3 records that cannot be read all keep Jev and send the same request as any
+    other turn, so this does not keep prompts local. For work that must stay
+    local, set `IMPRINT_SELECTOR=off` where the hook will see it, or use
+    `selector.mode: deterministic`.
   - `shadow`: calls Jev and logs the decision, but always delivers exactly the
     `deterministic` context, including after compact or resume. Use it to
     evaluate picks before switching.
@@ -246,7 +250,9 @@ decision-log lines (current and rotated file), so it stays 0 when
   example `off`, `deterministic`, `0`, `false`, or `disabled`) forces
   deterministic retrieval over any config. `jev` and `shadow` leave the
   configured mode in force. It can only turn the selector off; no value turns
-  it on.
+  it on. It is read from the process that sends, so set it where the hook will
+  see it: under T3, the instance's `environment`, the home's `env` or the server's
+  environment. A shell export reaches only what that shell runs.
 - `IMPRINT_DATA_ROOT`: default data root used when config omits `data_root`.
 - `IMPRINT_INSTALL_ROOT`: installer/application destination.
 - `CLAUDE_SETTINGS_PATH`: the Claude Code settings path an installer registers

@@ -5,6 +5,7 @@ Every request goes to an in-process fake transport, and every T3 store is synthe
 import copy
 import io
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -315,15 +316,107 @@ def test_retrieve_with_a_label_t3_does_not_know_sends_the_prompt(tmp_path, trans
     assert [request["state"] for request in transport.calls] == [PROMPT]
 
 
-@pytest.mark.parametrize("name", ["docs/privacy-and-recovery.md", "docs/configuration.md"])
+def _keeps_jev_in_scratch(tmp_path, monkeypatch):
+    """A scratch thread with a provider row for some other session, as a nested run sees."""
+    t3 = _t3_store(tmp_path, sessions=("session-of-another-run",), project_root=str(tmp_path / "t3" / "scratch"))
+    _in_t3(monkeypatch, t3)
+
+
+def test_a_turn_that_keeps_jev_sends_the_whole_request(tmp_path, transport, monkeypatch, capsys):
+    """Not only the words typed: the previous reply and the judgments leave with them."""
+    config = _config(tmp_path)
+    settings = json.loads(config.read_text())
+    settings["selector"]["jev"]["short_prompt_context"] = {"enabled": True, "below_chars": 200, "max_chars": 120}
+    config.write_text(json.dumps(settings))
+    _seed(config, monkeypatch, capsys)
+    reply = "Synthetic reply naming a synthetic file."
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("\n".join(json.dumps(line) for line in (
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}},
+        {"type": "user", "message": {"role": "user", "content": "yes"}},
+    )) + "\n")
+    _keeps_jev_in_scratch(tmp_path, monkeypatch)
+    _main(
+        "--config", str(config), "hook", "user-prompt-submit",
+        event={"session_id": SESSION, "prompt": "yes", "transcript_path": str(transcript)},
+        monkeypatch=monkeypatch, capsys=capsys,
+    )
+    (request,) = transport.calls
+    assert request["state"] == f"yes\n\nPrevious assistant reply:\n{reply}"
+    assert "report the failed source" in json.dumps(request["questions"])
+
+
+@pytest.mark.parametrize("mode, switch, sent", [
+    ("jev", None, 1), ("jev", "off", 0), ("deterministic", None, 0),
+], ids=["no switch", "environment", "config"])
+def test_the_off_switch_and_the_config_keep_local_what_the_check_lets_through(
+    tmp_path, transport, monkeypatch, capsys, mode, switch, sent,
+):
+    """The variable is read from the process that sends, so it must be in that process."""
+    config = _config(tmp_path, mode=mode)
+    _seed(config, monkeypatch, capsys)
+    _keeps_jev_in_scratch(tmp_path, monkeypatch)
+    if switch is not None:
+        monkeypatch.setenv("IMPRINT_SELECTOR", switch)
+    _prompt_hook(config, monkeypatch, capsys)
+    assert len(transport.calls) == sent
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+# Where each page speaks of the scratch check, as the words around each passage. A
+# passage that goes away fails here. The first configuration passage opens on its
+# mode because with the default selector nothing is sent and T3 is not read.
+SCRATCH_PASSAGES = {
+    "docs/privacy-and-recovery.md": [("With `t3_capture_origin: true`, neither sends", "Exactly this leaves the machine")],
+    "docs/configuration.md": [
+        ("In `jev` or `shadow` mode, the prompt hook", "Set this key after the build"),
+        ("a thread T3's records place in its scratch folder is the exception", "`shadow`: calls Jev"),
+    ],
+    "docs/contracts/capture-origin.md": [("## Scratch chats and Jev", "T3 is read only on a turn")],
+    "CHANGELOG.md": [("Send Jev nothing from T3's scratch chats", "Report the Claude homes")],
+}
+FALSE_PROMISE = re.compile(
+    r"nothing (ever )?leaves|never sends|scratch chats get no Jev|no need"
+    r"|(never|not|no longer) (be |been )?(required|needed|necessary)",
+    re.IGNORECASE,
+)
+
+
+def _scratch_passages(name):
+    page = " ".join((REPOSITORY / name).read_text(encoding="utf-8").split())
+    passages = []
+    for opening, closing in SCRATCH_PASSAGES[name]:
+        start = page.index(opening)
+        passages.append(page[start:page.index(closing, start)])
+    return passages
+
+
+@pytest.mark.parametrize("name", SCRATCH_PASSAGES)
 def test_the_docs_do_not_promise_a_scratch_thread_stays_local(name):
-    """The check fails open, so these pages name what still sends and how to stop it."""
-    page = " ".join((Path(__file__).resolve().parents[2] / name).read_text(encoding="utf-8").split())
-    assert "send Jev nothing from a thread T3 places" not in page
-    assert "neither sends anything from a thread T3 places" not in page
-    assert "places in its scratch folder is the exception" not in page
-    start = page.index("provider row")
-    assert "`IMPRINT_SELECTOR=off`" in page[start:start + 700]
+    """The check fails open, so each page says what gets through and how to stop it."""
+    passages = _scratch_passages(name)
+    for passage in passages:
+        assert "does not keep prompts local" in passage
+        assert "`IMPRINT_SELECTOR=off`" in passage
+        assert "`selector.mode: deterministic`" in passage
+        assert FALSE_PROMISE.search(passage) is None
+    named = " ".join(passages)
+    assert "nested run" in named
+    assert "cannot be read" in named
+    assert "`retrieve` run" in named or "`CLAUDE_CODE_SESSION_ID`" in named
+
+
+@pytest.mark.parametrize("name", [name for name in SCRATCH_PASSAGES if name != "CHANGELOG.md"])
+def test_the_docs_say_what_a_kept_turn_sends_and_where_the_switch_must_be(name):
+    passages = _scratch_passages(name)
+    for passage in passages:
+        assert "the same request as any other turn" in passage
+        assert "where the hook will see it" in passage
+    named = " ".join(passages)
+    assert "the prompt, any previous-reply excerpt and the judgment statements" in named
+    assert "shell export reaches only what that shell runs" in " ".join(
+        (REPOSITORY / name).read_text(encoding="utf-8").split(),
+    )
 
 
 def test_retrieve_finds_a_scratch_thread_whatever_label_it_is_given(tmp_path, transport, monkeypatch, capsys):

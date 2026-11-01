@@ -23,11 +23,18 @@ UserPromptSubmit hook, and `imprint retrieve --prompt ...` run by hand or by a
 script. With `t3_capture_origin: true`, neither sends anything from a T3 scratch
 chat, but only when T3's records place the thread in its scratch folder and a
 provider row, T3's record of a Claude session, names this session. The check keeps
-Jev whenever it cannot be sure, so it does not keep prompts local. These still send
-the prompt from a scratch chat: a `retrieve` run with no `CLAUDE_CODE_SESSION_ID`
-and a `--session` label T3 does not know, a nested run, a session with no provider
-row, and T3 records that cannot be read, including a locked store. Use
-`IMPRINT_SELECTOR=off` for work whose prompts must stay local.
+Jev whenever it cannot be sure, so it does not keep prompts local. Each of these
+sends the same request as any other turn from a scratch chat, which is the prompt,
+any previous-reply excerpt and the judgment statements listed below: a `retrieve`
+run with no `CLAUDE_CODE_SESSION_ID` and a `--session` label T3 does not know, a
+nested run, a session with no provider row, and T3 records that cannot be read,
+including a locked store.
+
+For work whose prompts must stay local, set `IMPRINT_SELECTOR=off` where the hook
+will see it: the T3 instance's `environment`, the home's `env` or the T3 server's
+environment. A shell export reaches only what that shell runs. Or use
+`selector.mode: deterministic` in the config, which keeps them local without any
+environment.
 
 Exactly this leaves the machine:
 
