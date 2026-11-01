@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .engine import RetrievalEngine, _render, render_compact
+from .engine import RetrievalEngine, _render, render_compact, render_short, whole_text_fits
 from .models import (
     BUSINESS_DECLARED_PARTITION,
     BUSINESS_OBSERVED_PARTITION,
@@ -225,7 +225,7 @@ def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
     eligible_count: int, budget: int, local: RetrievalResult | None = None,
     retried: frozenset[str] = frozenset(), reserved: Mapping[str, Sequence[str]] | None = None,
-    withheld: int = 0,
+    withheld: int = 0, short_lines: bool = False,
 ) -> dict[str, object]:
     """Render ``local`` (the matched domain's never-sent records, ranked
     deterministically) and then picks in score order, never exceeding the
@@ -240,6 +240,14 @@ def _jev_response(
     ``reserved`` maps picks that are standing rules to their rule sentences. They
     are marked on their lines, and a compact one says its rule. ``withheld`` counts
     stale records kept from this turn.
+
+    ``short_lines`` puts every pick on a short line, which frees the room the rules
+    above exist to share. Only a cut can then leave a pick owed: one whose text went
+    out whole has said what it was picked to say, and the rest is a lookup away, so it
+    latches. One whose text was cut goes in ``retry_ids``, and arrives whole when it is
+    in ``retried`` and there is room. Its selector block keeps only the reserved mark:
+    nothing reads the rest, the order of the lines is the rank, and the decision log
+    has the scores.
 
     Picks that cannot be delivered at all report ``oversized_picks``, or
     ``crowded_picks`` when one would have fit without the local records, because
@@ -256,6 +264,7 @@ def _jev_response(
         rendered.append(local.payload)
         total += len(local.payload)
         selected_ids.extend(local.selected_ids)
+        retry_ids.extend(local.retry_ids)
         for section, size in local.section_bytes.items():
             section_bytes[section] += size
         for partition, ids in local.selected_by_partition.items():
@@ -267,22 +276,33 @@ def _jev_response(
     ]
     whole_lines = [_render(record, selector=selection) for (record, _), selection in zip(picks, selections)]
     all_fit = total + sum(len(line) for line in whole_lines) <= budget
-    delivered_picks = compact_picks = delivered_rules = 0
+    delivered_picks = compact_picks = short_picks = delivered_rules = 0
     crowded = False
+    # A local line that went out has already said how to look a record up.
+    lookup_said = local is not None and bool(local.selected_ids)
     for (record, _), selection, whole in zip(picks, selections, whole_lines):
+        rules = reserved.get(record.record_id, ())
         too_large = len(whole) > budget // _FULL_RENDER_SHARE and record.record_id not in retried
-        compact = (not all_fit and too_large) or total + len(whole) > budget
-        line = render_compact(record, selector=selection, rules=reserved.get(record.record_id, ())) if compact else whole
+        no_room = total + len(whole) > budget
+        short = short_lines and (no_room or record.record_id not in retried)
+        compact = not short_lines and ((not all_fit and too_large) or no_room)
+        if short:
+            mark = {"reserved": True} if "reserved" in selection else None
+            line = render_short(record, selector=mark, rules=rules, lookup=not lookup_said)
+        else:
+            line = render_compact(record, selector=selection, rules=rules) if compact else whole
         if total + len(line) > budget:
             crowded |= len(line) <= budget
             continue
         compact_picks += compact
+        short_picks += short
+        lookup_said |= short
         total += len(line)
         delivered_picks += 1
         delivered_rules += record.record_id in reserved
         rendered.append(line)
         selected_ids.append(record.record_id)
-        if compact and len(whole) <= budget:
+        if (compact or (short and not whole_text_fits(record))) and len(whole) <= budget:
             retry_ids.append(record.record_id)
         section_bytes[record.section] += len(line)
         selected_by_partition.setdefault(record.ontology_partition, []).append(record.record_id)
@@ -319,6 +339,7 @@ def _jev_response(
             "local_bytes": local_bytes,
             **({"reserved": delivered_rules} if delivered_rules else {}),
             **({"stale_withheld": withheld} if withheld else {}),
+            **({"delivered_short": short_picks} if short_picks else {}),
         },
     }
 
@@ -327,7 +348,7 @@ def select_prompt_payload(
     store, *, root: Path, session_id: str, state: str, explicit_domain: str | None,
     budget: int, selector: Mapping[str, Any], mode: str, refresh: bool = False,
     deadline: float | None = None, local_sections: frozenset[str] = frozenset({"domain"}),
-    prompt: str | None = None,
+    prompt: str | None = None, short_lines: bool = False,
 ) -> SelectorDecision:
     """Run the optional relevance selector for one turn. Never raises.
 
@@ -346,7 +367,8 @@ def select_prompt_payload(
     ``deadline`` (a ``time.monotonic()`` value) caps the configured
     ``timeout_seconds`` for callers with a hard wall-clock limit of their own.
     ``prompt`` is the operator's words when ``state`` carries more than that, as
-    only they can earn a standing rule its reserved place.
+    only they can earn a standing rule its reserved place. ``short_lines`` is the
+    route's switch, and it covers the local records as well as the picks.
     """
     shadow = mode == "shadow"
     failed_method = "shadow" if shadow else "deterministic_fallback"
@@ -407,6 +429,7 @@ def select_prompt_payload(
             RetrievalConfig(
                 total_budget_bytes=selector_budget,
                 allow_higher_budget=selector_budget > 32 * 1024,
+                short_lines=short_lines,
             ),
         )
         if not shadow:
@@ -481,7 +504,7 @@ def select_prompt_payload(
             context.snapshot_id, scope, result.picks, result.outcome,
             len(pool) + len(local_records), selector_budget, local, frozenset(retried_ids),
             {item.record_id: rule_sentences(item) for item, _ in result.picks if item.record_id in result.reserved},
-            result.withheld,
+            result.withheld, short_lines,
         )
         outcome = str(response["selector_outcome"])
         stages = response["selector_stages"]

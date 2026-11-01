@@ -290,6 +290,231 @@ def test_whole_lines_never_carry_retry_ids(tmp_path, records):
     assert "retry_ids" not in retrieve_payload(FakeStore(), root=tmp_path, session_id="s", refresh=True)
 
 
+# -- the selector route --------------------------------------------------------------
+
+def pick(index: int = 1, **values) -> tuple[RetrievalRecord, float]:
+    return record(index, **values), round(0.9 - index / 1000, 4)
+
+
+def respond(picks, *, budget=4096, local=None, retried=frozenset(), reserved=None):
+    return _jev_response(
+        "snapshot", "scope", picks, "picked", len(picks), budget, local, retried, reserved, 0, True,
+    )
+
+
+def lines(response: dict) -> list[dict]:
+    return [json.loads(line) for line in response["payload"].splitlines()]
+
+
+def local_result(*records_) -> RetrievalResult:
+    return run_engine(list(records_), budget=4096, selected_domain=None)
+
+
+def test_every_pick_goes_out_short_in_score_order():
+    picks = [pick(index) for index in range(1, 6)]
+    response = respond(picks)
+    assert [line["record_id"] for line in lines(response)] == [item.record_id for item, _ in picks]
+    assert response["selected_ids"] == [item.record_id for item, _ in picks]
+    assert not any({"ontology", "evidence_ids", "case_ids", "source_receipt_ids"} & set(line) for line in lines(response))
+
+
+def test_picks_that_would_all_fit_whole_still_go_out_short():
+    assert not any("ontology" in line for line in lines(respond([pick()])))
+
+
+def test_a_plain_pick_has_no_selector_block_at_all():
+    assert not any("selector" in line for line in lines(respond([pick(1), pick(2)])))
+
+
+@pytest.mark.parametrize("text", [RULE, f"{BACKGROUND}{RULE} {BACKGROUND}"])
+def test_a_standing_rule_keeps_its_mark_and_nothing_else(text):
+    item, score = pick(1, text=text)
+    first, second = lines(respond([(item, score), pick(2)], reserved={item.record_id: [RULE]}))
+    assert first["selector"] == {"reserved": True}
+    assert first["text"] == (text if text == RULE else RULE)
+    assert "selector" not in second
+
+
+def test_only_one_line_of_a_payload_says_how_to_look_the_rest_up():
+    assert ["detail" in line for line in lines(respond([pick(1), pick(2), pick(3)]))] == [True, False, False]
+
+
+def test_a_local_line_that_said_it_saves_the_picks_saying_it():
+    response = respond([pick(1), pick(2)], local=local_result(record(50)))
+    assert ["detail" in line for line in lines(response)] == [True, False, False]
+
+
+def test_a_rule_whose_whole_text_went_out_is_latched_not_retried():
+    picks = [pick(index) for index in range(1, 4)]
+    response = respond(picks)
+    assert response["retry_ids"] == []
+    assert response["selected_ids"] == [item.record_id for item, _ in picks]
+
+
+def test_a_rule_at_the_cut_limit_is_latched_too():
+    assert respond([pick(1, text="x" * COMPACT_TEXT_BYTES)])["retry_ids"] == []
+
+
+def test_a_rule_whose_text_was_cut_is_retried():
+    item, score = pick(1, text=BACKGROUND * 2)
+    response = respond([(item, score)])
+    assert response["retry_ids"] == [item.record_id]
+    assert lines(response)[0]["text_complete"] is False
+
+
+def test_a_cut_rule_that_can_never_fit_whole_is_latched_from_its_short_line():
+    assert respond([pick(1, text=BACKGROUND * 60)])["retry_ids"] == []
+
+
+def test_a_cut_rule_owed_a_whole_delivery_gets_it_when_there_is_room():
+    item, score = pick(1, text=BACKGROUND * 2)
+    response = respond([(item, score), pick(2)], retried=frozenset({item.record_id}))
+    whole, short = lines(response)
+    assert whole["text"] == item.text
+    assert whole["selector"] == {"mode": "jev", "rank": 1, "score": score}
+    assert whole["ontology"]["type"] == "Verdict"
+    assert (short["detail"], "ontology" in short) == (SHORT_LINE_DETAIL, False)
+    assert response["retry_ids"] == []
+
+
+def test_a_cut_rule_stays_owed_while_there_is_no_room_for_it():
+    first = pick(1, text="x" * COMPACT_TEXT_BYTES)
+    owed, score = pick(2, text="x" * 800)
+    whole = _render(owed, selector={"mode": "jev", "rank": 2, "score": score})
+    response = respond([first, (owed, score)], budget=len(whole), retried=frozenset({owed.record_id}))
+    line = lines(response)[-1]
+    assert (line["record_id"], line["text_complete"]) == (owed.record_id, False)
+    assert response["retry_ids"] == [owed.record_id]
+
+
+def test_cut_local_records_keep_their_claim_on_a_whole_delivery():
+    long = record(50, text=BACKGROUND * 2)
+    assert respond([pick(1)], local=local_result(long))["retry_ids"] == [long.record_id]
+
+
+def test_short_picks_are_counted_apart_from_compact_ones():
+    assert respond([pick(1), pick(2)])["selector_stages"] == {
+        "eligible": 2, "picked": 2, "delivered": 2, "delivered_compact": 0, "unfit": 0,
+        "local_records": 0, "local_bytes": 0, "delivered_short": 2,
+    }
+
+
+@pytest.mark.parametrize("budget", [4096, 4097, 4099, 8192])
+@pytest.mark.parametrize("count", [1, 20, 150])
+def test_picks_on_short_lines_never_exceed_the_budget(budget, count):
+    texts = [RULE, "x" * COMPACT_TEXT_BYTES, BACKGROUND * 3]
+    picks = [pick(index, text=texts[index % 3]) for index in range(count)]
+    retried = frozenset(item.record_id for item, _ in picks[::2])
+    assert len(respond(picks, budget=budget, retried=retried)["payload"].encode("utf-8")) <= budget
+
+
+def test_a_pick_with_many_references_no_longer_runs_out_of_room():
+    item, score = pick(1, evidence_ids=tuple(f"urn:synthetic:evidence:{index}" for index in range(200)))
+    assert respond([(item, score)])["selector_outcome"] == "picked"
+
+
+def test_a_pick_the_local_records_left_no_room_for_is_still_called_crowded():
+    local = local_result(record(50))
+    assert respond([pick(1)], budget=len(local.payload) + 20, local=local)["selector_outcome"] == "crowded_picks"
+
+
+def selector_config(mode: str = "jev", **overrides) -> dict:
+    value = json.loads(json.dumps(DEFAULTS["selector"]))
+    value["mode"] = mode
+    value["jev"]["api_key_env"] = KEY_ENV
+    value["jev"].update(overrides)
+    return value
+
+
+class Transport:
+    def __init__(self):
+        self.statements: list[set[str]] = []
+        self.error: Exception | None = None
+
+    def __call__(self, endpoint, body, headers, timeout):
+        questions = json.loads(body)["questions"]
+        self.statements.append({
+            question["instructions"][len(QUESTION_PREFIX):] for question in questions.values()
+        })
+        if self.error is not None:
+            raise self.error
+        return json.dumps({"answers": {
+            name: {"type": "noul", "noul": 0.9} for name in questions
+        }}).encode("utf-8")
+
+
+@pytest.fixture
+def transport(monkeypatch) -> Transport:
+    fake = Transport()
+    monkeypatch.setattr(jev, "http_post", fake)
+    return fake
+
+
+def select(root, state, *, store=None, **overrides):
+    return select_prompt_payload(
+        store or FakeStore(), root=root, session_id="synthetic-session", state=state, explicit_domain=None,
+        budget=4096, selector=selector_config(**overrides), mode="jev", short_lines=True,
+    )
+
+
+def commit(root, decision) -> None:
+    assert retrieval.commit_payload_delivery(
+        root=root, session_id="synthetic-session", snapshot_id=str(decision.response["snapshot_id"]),
+        domain_id=str(decision.response["receipt_scope"]),
+    )
+
+
+def test_a_rule_delivered_whole_on_a_short_line_is_not_sent_again(tmp_path, transport, records):
+    records.extend(record(index, text=f"Never use template {index}.") for index in range(3))
+    first = select(tmp_path, "first turn")
+    assert len(first.response["selected_ids"]) == 3
+    commit(tmp_path, first)
+    second = select(tmp_path, "second turn")
+    assert second.outcome == "no_picks"
+    assert second.response["selected_ids"] == []
+    assert len(transport.statements) == 1
+
+
+def test_a_rule_cut_on_a_short_line_arrives_whole_once_on_a_later_turn(tmp_path, transport, records):
+    long = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}")
+    records.extend([long, record(2, text="Never ship on a Friday.")])
+    first = select(tmp_path, "first turn")
+    assert first.response["retry_ids"] == [long.record_id]
+    commit(tmp_path, first)
+    second = select(tmp_path, "second turn")
+    assert len(transport.statements[1]) == 1
+    (line,) = [json.loads(item) for item in second.response["payload"].splitlines()]
+    assert (line["record_id"], line["text"]) == (long.record_id, long.text)
+    assert second.response["retry_ids"] == []
+    commit(tmp_path, second)
+    assert select(tmp_path, "third turn").outcome == "no_picks"
+    assert len(transport.statements) == 2
+
+
+def test_the_fallback_keeps_out_what_went_whole_and_not_what_was_cut(tmp_path, transport, records):
+    long = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}")
+    plain = record(2, text="Never ship on a Friday.")
+    records.extend([long, plain])
+    commit(tmp_path, select(tmp_path, "first turn"))
+    transport.error = TimeoutError("synthetic timeout")
+    fallback = select(tmp_path, "second turn")
+    assert fallback.fallback_reason == "timeout"
+    assert fallback.exclude_ids == frozenset({plain.record_id})
+
+
+def test_a_standing_rule_reaches_its_short_line_with_its_mark(tmp_path, transport, records):
+    statement = "From now on, a release note should be plain text."
+    records.append(record(1, text=statement, valid_from="2026-01-01T00:00:00Z"))
+    records.extend(record(index, text=f"No, the {index} banner stays.") for index in range(2, 5))
+    decision = select(
+        tmp_path, "write the release note", score_floor=0.95,
+        standing_rules={"enabled": True, "score_floor": 0.25, "rare_word_share": 0.5, "slots": 2, "keep": 30},
+    )
+    (line,) = [json.loads(item) for item in decision.response["payload"].splitlines()]
+    assert (line["text"], line["selector"]) == (statement, {"reserved": True})
+    assert decision.response["selector_stages"]["reserved"] == 1
+
+
 # -- imprint history -----------------------------------------------------------------
 
 def test_history_returns_the_line_a_whole_delivery_carries(tmp_path, monkeypatch, capsys):
