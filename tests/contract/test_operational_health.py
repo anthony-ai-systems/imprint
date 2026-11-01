@@ -77,6 +77,49 @@ def test_hook_failure_backlog_degrades_health_with_content_free_evidence(tmp_pat
     assert "hook-failures" not in encoded
 
 
+def _health_with_hook_failures(tmp_path, *ages_in_days):
+    root = tmp_path / "operator"
+    root.mkdir()
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    failures = root / "logs" / "hook-failures"
+    failures.mkdir(parents=True)
+    now = datetime.now(timezone.utc).timestamp()
+    for number, days in enumerate(ages_in_days):
+        failure = failures / f"failure-{number}.json"
+        failure.write_text("{}\n", encoding="utf-8")
+        os.utime(failure, (now - days * 86400, now - days * 86400))
+    return root, failures, health_report(root, store, _config(root))
+
+
+def test_a_hook_failure_past_seven_days_stops_degrading_and_stays_counted(tmp_path):
+    root, failures, report = _health_with_hook_failures(tmp_path, 7.01, 30, 90)
+    assert "hook_failures_present" not in report["degraded_reasons"]
+    assert report["metrics"]["hook_failure_count"] == 3
+    assert report["metrics"]["hook_failure_recent_count"] == 0
+    assert report["metrics"]["hook_failure_old_count"] == 3
+    assert report["metrics"]["hook_failure_newest_age_seconds"] >= 7 * 86400
+    assert len(list(failures.glob("*.json"))) == 3
+
+
+def test_one_failure_inside_seven_days_still_degrades_over_old_ones(tmp_path):
+    _, _, report = _health_with_hook_failures(tmp_path, 6.99, 30, 90)
+    assert "hook_failures_present" in report["degraded_reasons"]
+    assert report["metrics"]["hook_failure_count"] == 3
+    assert report["metrics"]["hook_failure_recent_count"] == 1
+    assert report["metrics"]["hook_failure_old_count"] == 2
+
+
+def test_a_failure_whose_age_cannot_be_read_still_degrades(tmp_path, monkeypatch):
+    def unknown_age(path, now):
+        return -1
+
+    monkeypatch.setattr(health_module, "_age_seconds", unknown_age)
+    _, _, report = _health_with_hook_failures(tmp_path, 30)
+    assert "hook_failures_present" in report["degraded_reasons"]
+    assert report["metrics"]["hook_failure_recent_count"] == 1
+
+
 def test_absent_hook_failure_directory_reports_zero_without_degrading(tmp_path):
     root = tmp_path / "operator"
     root.mkdir()

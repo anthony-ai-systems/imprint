@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Stop an old hook failure holding health at `degraded`. Only a failure from the
+  last 7 days degrades it. `hook_failure_count` still counts every file, and
+  `hook_failure_recent_count` and `hook_failure_old_count` split it. Nothing is
+  deleted or pruned.
 - Say what turned a transcript away. The four checks behind `transcript_path must
   be an absolute regular non-symlink file` each log their own `code` to
   `logs/capture-skips.jsonl`, with `errno` where there is one, a `path_class` and

@@ -25,6 +25,9 @@ _SIDECAR_PREFLIGHT_ERROR = (
 _DATABASE_RETRY_DELAYS = (0.25, 0.5)
 _CAPTURE_SKIP_TAIL_BYTES = 64 * 1024
 _CAPTURE_SKIP_WINDOW_SECONDS = 24 * 60 * 60
+# A hook failure this old stops degrading health and stays in the counts. Nothing
+# here deletes one: pruning is `imprint spool prune`, and it is never automatic.
+_HOOK_FAILURE_WINDOW_SECONDS = 7 * 24 * 60 * 60
 # Turns lost for a reason a receipt alone would not show. Nested T3 runs and long
 # turns reach these in normal use, so counting them is not a fault by itself.
 _COUNTED_CAPTURE_SKIPS = (
@@ -262,6 +265,10 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
     unsafe_permissions = unsafe_private_permissions(root)
     temporary_residue = _temporary_residue(root)
     hook_failure_files = _hook_failure_files(root)
+    hook_failure_recent_count = sum(
+        # A file whose age cannot be read reports -1, so it counts as recent.
+        _age_seconds(path, now) <= _HOOK_FAILURE_WINDOW_SECONDS for path in hook_failure_files
+    )
     from imprint.capture.t3_origin import T3_RECORD_UNAVAILABLE_REASON
     t3_unavailable_count, t3_unavailable_age = _recent_capture_skips(
         root, T3_RECORD_UNAVAILABLE_REASON, now,
@@ -296,6 +303,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         spool_retention_days=spool_retention_days,
         quarantine_count=len(list((root / "quarantine").glob("*.json"))) if (root / "quarantine").exists() else 0,
         hook_failure_count=len(hook_failure_files),
+        hook_failure_recent_count=hook_failure_recent_count,
         hook_failure_newest_age_seconds=_latest_age(hook_failure_files, now),
         t3_record_unavailable_24h=t3_unavailable_count,
         capture_skips_24h=capture_skips,

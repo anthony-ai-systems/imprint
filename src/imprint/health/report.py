@@ -28,6 +28,7 @@ class HealthInputs:
     spool_retention_days: int = 30
     quarantine_count: int = 0
     hook_failure_count: int = 0
+    hook_failure_recent_count: int | None = None
     hook_failure_newest_age_seconds: int = -1
     t3_record_unavailable_24h: int = 0
     t3_record_unavailable_newest_age_seconds: int = -1
@@ -95,6 +96,11 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         if values.oldest_unacknowledged_spool_age_seconds is None
         else values.oldest_unacknowledged_spool_age_seconds
     )
+    hook_failure_recent_count = (
+        values.hook_failure_count
+        if values.hook_failure_recent_count is None
+        else values.hook_failure_recent_count
+    )
     if values.compiler_count == 0:
         reasons.append("compiler_missing")
     elif values.compiler_count > 1:
@@ -119,7 +125,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("spool_stale")
     if values.quarantine_count > 0:
         reasons.append("quarantine_present")
-    if values.hook_failure_count > 0:
+    if hook_failure_recent_count > 0:
         reasons.append("hook_failures_present")
     if values.t3_record_unavailable_24h > 0:
         reasons.append("t3_record_unavailable")
@@ -181,6 +187,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "retrieval_omitted_count": max(0, values.retrieval_omitted_count),
         "quarantine_count": max(0, values.quarantine_count),
         "hook_failure_count": max(0, values.hook_failure_count),
+        "hook_failure_recent_count": max(0, hook_failure_recent_count),
+        "hook_failure_old_count": max(0, values.hook_failure_count - hook_failure_recent_count),
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
