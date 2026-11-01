@@ -272,7 +272,7 @@ def test_a_skip_that_means_capture_has_stopped_degrades_health(tmp_path, reason)
 
 
 @pytest.mark.parametrize("reason", [
-    "operator_text_oversized", "t3_prompt_unmatched", "t3_session_unmatched",
+    "operator_text_oversized", "t3_prompt_unmatched", "t3_scratch_thread", "t3_session_unmatched",
     "transcript_tail_exhausted", "transcript_unavailable",
 ])
 def test_a_skip_normal_use_reaches_is_counted_without_degrading_health(tmp_path, reason):

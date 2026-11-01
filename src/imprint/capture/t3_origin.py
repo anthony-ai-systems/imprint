@@ -29,6 +29,11 @@ T3_RECORD_UNAVAILABLE_REASON = "t3_record_unavailable"
 T3_SESSION_REF_UNREADABLE_REASON = "t3_session_ref_unreadable"
 T3_SESSION_UNMATCHED_REASON = "t3_session_unmatched"
 T3_PROMPT_UNMATCHED_REASON = "t3_prompt_unmatched"
+# T3's "No project" chats live in this folder of its home, as a project whose root
+# it is. Test scripts drive the app there and T3 records what they type as
+# user/web, so no prompt in one is credited, a person's included.
+T3_SCRATCH_THREAD_REASON = "t3_scratch_thread"
+_SCRATCH_FOLDER = "scratch"
 _HUMAN_AUTHOR = "user"
 # Sources tied to a person at a T3 client. "server" also covers older records
 # whose client is unknown, so it does not count.
@@ -38,6 +43,11 @@ _BUSY_TIMEOUT_SECONDS = 0.25
 _PROMPTS_QUERY = (
     "SELECT message_id, payload_json FROM orchestration_v2_projection_messages "
     "WHERE thread_id = ? AND role = 'user' ORDER BY created_at DESC LIMIT ?"
+)
+_THREAD_QUERY = (
+    "SELECT thread.payload_json, project.workspace_root FROM orchestration_v2_projection_threads AS thread "
+    "LEFT JOIN projection_projects AS project ON project.project_id = thread.project_id "
+    "WHERE thread.thread_id = ?"
 )
 _PROVIDER_THREADS_QUERY = (
     "SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?"
@@ -108,8 +118,12 @@ def _database_path(environ: Mapping[str, str]) -> Path | None:
 
 def _read_records(
     database: Path, thread_id: str,
-) -> tuple[tuple[Any, ...], tuple[tuple[Any, Mapping[str, Any]], ...]] | None:
-    """Return the thread's provider rows and newest prompts, or None if unreadable."""
+) -> tuple[tuple[Any, ...] | None, tuple[Any, ...], tuple[tuple[Any, Mapping[str, Any]], ...]] | None:
+    """Return the thread's folders, provider rows and newest prompts, or None if unreadable.
+
+    A thread with no row gets None for its folders: T3 keeps a test server's state
+    apart, so a run can name a thread that this store does not hold.
+    """
     try:
         connection = sqlite3.connect(
             f"{database.resolve().as_uri()}?mode=ro", uri=True, timeout=_BUSY_TIMEOUT_SECONDS,
@@ -117,6 +131,8 @@ def _read_records(
     except (sqlite3.Error, OSError, ValueError, RuntimeError):
         return None
     try:
+        thread = connection.execute(_THREAD_QUERY, (thread_id,)).fetchone()
+        payload = None if thread is None else json.loads(thread[0])
         rows = connection.execute(_PROVIDER_THREADS_QUERY, (thread_id,)).fetchall()
         providers = tuple(json.loads(payload) for (payload,) in rows)
         rows = connection.execute(_PROMPTS_QUERY, (thread_id, _RECENT_PROMPTS)).fetchall()
@@ -126,8 +142,31 @@ def _read_records(
     finally:
         connection.close()
     # A row of any other shape could be a newer author, so the window is unusable.
-    usable = all(isinstance(prompt, dict) and isinstance(prompt.get("text"), str) for _, prompt in prompts)
-    return (providers, prompts) if usable else None
+    usable = (thread is None or isinstance(payload, dict)) and all(
+        isinstance(prompt, dict) and isinstance(prompt.get("text"), str) for _, prompt in prompts
+    )
+    if not usable:
+        return None
+    if thread is None:
+        return None, providers, prompts
+    folders = tuple(folder for folder in (payload.get("worktreePath"), thread[1]) if folder is not None)
+    return folders, providers, prompts
+
+
+def _in_scratch(folders: tuple[Any, ...] | None, database: Path) -> bool:
+    """Answer whether T3 keeps this thread in its scratch folder.
+
+    A folder that cannot be read is not credited, since it could be that one. So
+    is a session with no thread row, which leaves no folder to read.
+    """
+    if not folders:
+        return True
+    try:
+        scratch = (database.parents[1] / _SCRATCH_FOLDER).resolve()
+        paths = tuple(Path(folder) for folder in folders)
+        return any(not path.is_absolute() or path.resolve().is_relative_to(scratch) for path in paths)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return True
 
 
 def _native_session(provider_row: Any) -> Any:
@@ -170,6 +209,7 @@ class T3HostOrigin:
         agent's message, not credited to the older human one. A run inherits
         T3CODE_THREAD_ID from whatever started it, so unless a provider row names
         this exact session the thread's prompts are not this transcript's at all.
+        A scratch thread's prompts are not read either, so none can be matched.
         """
         if self._index is None:
             self._index = {}
@@ -177,11 +217,15 @@ class T3HostOrigin:
             if records is None:
                 self.read_failed = True
                 return self._index
-            sessions = [_native_session(row) for row in records[0]]
+            folders, providers, prompts = records
+            sessions = [_native_session(row) for row in providers]
             if self._session_id in sessions:
-                for message_id, prompt in records[1]:
-                    self._index.setdefault(_comparable(prompt["text"]), (message_id, prompt))
-            elif records[0] and not any(isinstance(session, str) and session for session in sessions):
+                if _in_scratch(folders, self._database):
+                    self._session_problem = T3_SCRATCH_THREAD_REASON
+                else:
+                    for message_id, prompt in prompts:
+                        self._index.setdefault(_comparable(prompt["text"]), (message_id, prompt))
+            elif providers and not any(isinstance(session, str) and session for session in sessions):
                 self._session_problem = T3_SESSION_REF_UNREADABLE_REASON
             else:
                 self._session_problem = T3_SESSION_UNMATCHED_REASON

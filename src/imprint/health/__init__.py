@@ -30,6 +30,7 @@ _CAPTURE_SKIP_WINDOW_SECONDS = 24 * 60 * 60
 _COUNTED_CAPTURE_SKIPS = (
     "operator_text_oversized",
     "t3_prompt_unmatched",
+    "t3_scratch_thread",
     "t3_session_ref_unreadable",
     "t3_session_unmatched",
     "transcript_refused",

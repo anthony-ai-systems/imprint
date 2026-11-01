@@ -13,8 +13,10 @@ object and preserves unknown namespaced extensions.
 - `node_id`: this machine's spool identity; default `primary`.
 - `compiler`: only one node may be `true` for a shared logical Imprint.
 - `t3_capture_origin`: `false` (default) or `true`. When `true`, Stop capture
-  reads T3's local message and provider-thread records to verify who wrote a T3
-  prompt. A record it cannot read is reported as `t3_record_unavailable`. See
+  reads T3's local thread, project, message and provider-thread records to verify who
+  wrote a T3 prompt. Prompts in threads T3 keeps in its scratch folder, its "No
+  project" chats, are not credited. A record it cannot read is reported as
+  `t3_record_unavailable`. See
   `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
   hooks are registered, so a host with its own Claude config directory needs
   `install.sh --settings <that directory>/settings.json`. Set this key after
