@@ -83,7 +83,7 @@ Hooks run only in a Claude home that registers them, and a home with hooks can s
 - `hooks`: `complete`, `partial`, `none` or `unreadable`, counted by Imprint's ownership marker in `SessionStart`, `UserPromptSubmit` and `Stop`. A home with no settings file has `none`. A file or home path that cannot be read is `unreadable`, not `none`.
 - `data_root`: `same`, `different` or `unknown`, from resolving the config and data root a hook would use with the instance's `environment` and then the home's `env` applied, and comparing the operator folder with this one. A home that sets none of the variables involved is `same`. A config that cannot be read is `unknown`. If instances on one home disagree, `different` wins.
 
-`homes_missing_hooks`, `homes_different_data_root` and `homes_unreadable` count enabled homes only. A disabled instance is listed and not counted, because it launches nothing.
+Three counts sum these up, for enabled homes only: `homes_missing_hooks` is `none` or `partial`, `homes_different_data_root` is `different`, and `homes_unreadable` is hooks `unreadable` or a data root `unknown`. A disabled instance is listed and not counted, because it launches nothing, unless a project turns it on, because T3 then runs it there.
 
 These are reports. They change neither `status` nor `degraded_reasons`, so a home that is waiting for hooks does not hold health at `degraded`. Reading the data root stops at those two places: a variable set on the T3 server's own process, or in front of a hook's command, is not seen.
 

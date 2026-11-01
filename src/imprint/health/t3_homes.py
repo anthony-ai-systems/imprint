@@ -60,6 +60,18 @@ def _claude_instances(configured: Mapping[str, Any]) -> dict[str, dict[str, Any]
     return instances
 
 
+def _project_enabled(settings: Mapping[str, Any]) -> set[str]:
+    """Return the instances a project turns on, which T3 runs even if disabled overall."""
+    overrides = settings.get("projectSettingsOverrides")
+    enabled = set()
+    for project in overrides.values() if isinstance(overrides, dict) else ():
+        instances = project.get("providerInstances") if isinstance(project, dict) else None
+        for name, override in instances.items() if isinstance(instances, dict) else ():
+            if isinstance(override, dict) and override.get("enabled") is True:
+                enabled.add(name)
+    return enabled
+
+
 def _instance_config(instance: Mapping[str, Any]) -> Mapping[str, Any]:
     config = instance.get("config")
     return config if isinstance(config, dict) else {}
@@ -174,11 +186,14 @@ def _read_homes(root: Path) -> dict[str, Any]:
     configured = settings.get("providerInstances", {})
     if not isinstance(configured, dict) or any(_INSTANCE_ID.fullmatch(name) is None for name in configured):
         return _summary("settings_unreadable", [])
+    project_enabled = _project_enabled(settings)
     grouped: dict[Path | str, list[tuple[str, bool, dict[str, str]]]] = {}
     for name, instance in sorted(_claude_instances(configured).items()):
         config = _instance_config(instance)
         environment = _instance_environment(instance)
-        enabled = instance.get("enabled") is not False and config.get("enabled") is not False
+        enabled = name in project_enabled or (
+            instance.get("enabled") is not False and config.get("enabled") is not False
+        )
         grouped.setdefault(_home_path(config, environment) or name, []).append((name, enabled, environment))
     return _summary("read", [_home_row(home, members, root) for home, members in grouped.items()])
 

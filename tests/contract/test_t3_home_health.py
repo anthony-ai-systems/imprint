@@ -230,6 +230,30 @@ def test_a_disabled_instance_is_listed_and_not_counted(world):
     assert section["homes_missing_hooks"] == 1
 
 
+def test_a_project_can_turn_a_disabled_instance_back_on(world):
+    bare = world / MARKER / "bare"
+    _write_settings(bare, {})
+    userdata = world / "t3" / "userdata"
+    userdata.mkdir(parents=True)
+    (userdata / "settings.json").write_text(json.dumps({
+        "providerInstances": {
+            "claudeAgent": _instance(world / MARKER / "off", enabled=False),
+            "claudeAgent_project": _instance(bare, enabled=False),
+        },
+        "projectSettingsOverrides": {
+            "project-a": {"providerInstances": {"claudeAgent_project": {"enabled": True}}},
+            "project-b": {"providerInstances": {"claudeAgent": {"enabled": False}}},
+            "project-c": "not an object",
+            "project-d": {"providerInstances": "not an object"},
+        },
+    }), encoding="utf-8")
+    section = _homes(world)
+    rows = _by_instance(section)
+    assert rows["claudeAgent_project"]["enabled"] is True
+    assert rows["claudeAgent"]["enabled"] is False
+    assert section["homes_missing_hooks"] == 1
+
+
 def test_instances_on_one_home_are_one_row_even_through_a_symlink(world):
     home = world / MARKER / "home"
     _hooked(home)

@@ -92,12 +92,18 @@ CLAUDE_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
 
 
 def _t3_scratch_thread(config: dict, native_session: str | None) -> bool:
-    """Whether T3's records place this session's thread in its scratch folder."""
+    """Whether T3's records place this session's thread in its scratch folder.
+
+    This turns a service off for a turn, so a check that fails leaves it on.
+    """
     if config.get("t3_capture_origin") is not True:
         return False
-    from .capture.t3_origin import t3_host_origin
-    origin = t3_host_origin(config, native_session)
-    return origin is not None and origin.in_scratch()
+    try:
+        from .capture.t3_origin import t3_host_origin
+        origin = t3_host_origin(config, native_session)
+        return origin is not None and origin.in_scratch()
+    except Exception:
+        return False
 
 
 def _turn_selector(config: dict, prompt: str, native_session: str | None) -> tuple[str, dict[str, object]]:
@@ -245,8 +251,8 @@ def _hook_input_invalid() -> int:
 def _rejection_detail(root: Path, path_value: str, error: ValidationError) -> dict[str, str]:
     """Say why a transcript was turned away, without ever naming its path.
 
-    The hash is keyed, so it tells one file failing 64 times from 64 files, and a
-    guessed path cannot be checked against the log.
+    The hash is keyed, so it tells one file failing again from many files failing
+    once, and a guessed path cannot be checked against the log.
     """
     reference = hmac.new(
         _session_key(root), f"transcript-path:{path_value}".encode("utf-8", "replace"), hashlib.sha256,

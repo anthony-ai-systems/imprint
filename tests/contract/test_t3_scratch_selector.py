@@ -461,6 +461,20 @@ def test_a_store_path_that_cannot_resolve_places_nothing(monkeypatch):
     assert _in_scratch(("/synthetic/project",), DATABASE) is True
 
 
+@ROUTES
+def test_a_check_that_fails_outright_keeps_jev(tmp_path, transport, monkeypatch, capsys, route):
+    config = _config(tmp_path)
+    _seed(config, monkeypatch, capsys)
+    _in_t3(monkeypatch, _t3_store(tmp_path, project_root=str(tmp_path / "t3" / "scratch")))
+
+    def broken(self):
+        raise KeyError("synthetic")
+
+    monkeypatch.setattr(t3_origin.T3HostOrigin, "in_scratch", broken)
+    assert route(config, monkeypatch, capsys)["selector_outcome"] != "t3_scratch_thread"
+    assert len(transport.calls) == 1
+
+
 def test_no_store_home_places_nothing():
     origin = t3_origin.T3HostOrigin(THREAD, SESSION, None)
     assert origin.in_scratch() is False
