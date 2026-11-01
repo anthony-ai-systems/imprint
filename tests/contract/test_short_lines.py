@@ -6,7 +6,11 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 import imprint.cli as cli
+from imprint.config import DEFAULTS, SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START, parse_config
+from imprint.errors import ValidationError
 from imprint.store import ImprintStore
 
 
@@ -38,6 +42,33 @@ def history(config: Path, node_id: str, capsys) -> dict:
 
 def delivered(body: dict) -> list[dict]:
     return [json.loads(line) for line in body["hookSpecificOutput"]["additionalContext"].splitlines()]
+
+
+# -- configuration -------------------------------------------------------------------
+
+@pytest.mark.parametrize("key", [SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START])
+def test_each_switch_is_off_by_default_and_dotted_at_the_top_level(key):
+    assert DEFAULTS[key] is False
+    assert "." in key
+    assert parse_config({})[key] is False
+
+
+def test_the_switches_are_separate():
+    config = parse_config({SHORT_LINES_PROMPT: True})
+    assert (config[SHORT_LINES_PROMPT], config[SHORT_LINES_SESSION_START]) == (True, False)
+    config = parse_config({SHORT_LINES_SESSION_START: True})
+    assert (config[SHORT_LINES_PROMPT], config[SHORT_LINES_SESSION_START]) == (False, True)
+
+
+@pytest.mark.parametrize("key", [SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START])
+@pytest.mark.parametrize("value", [1, 0, "true", None, []])
+def test_a_switch_must_be_a_boolean(key, value):
+    with pytest.raises(ValidationError, match="must be a boolean"):
+        parse_config({key: value})
+
+
+def test_no_key_was_added_to_the_closed_selector_object():
+    assert "short_lines" not in json.dumps(DEFAULTS["selector"])
 
 
 # -- imprint history -----------------------------------------------------------------
