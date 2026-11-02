@@ -387,6 +387,10 @@ def respond(picks, *, budget=4096, local=None, retried=frozenset(), reserved=Non
     )
 
 
+# Enough plain picks behind a long one that its whole line has no room beside them.
+CROWD = [pick(index) for index in range(100, 140)]
+
+
 def lines(response: dict) -> list[dict]:
     return [json.loads(line) for line in response["payload"].splitlines()]
 
@@ -414,7 +418,7 @@ def test_a_plain_pick_has_no_selector_block_at_all():
 @pytest.mark.parametrize("text", [RULE, f"{BACKGROUND}{RULE} {BACKGROUND}"])
 def test_a_standing_rule_keeps_its_mark_and_nothing_else(text):
     item, score = pick(1, text=text)
-    first, second = lines(respond([(item, score), pick(2)], reserved={item.record_id: [RULE]}))
+    first, second, *_ = lines(respond([(item, score), pick(2), *CROWD], reserved={item.record_id: [RULE]}))
     assert first["selector"] == {"reserved": True}
     assert first["text"].startswith(RULE)
     assert "selector" not in second
@@ -442,9 +446,74 @@ def test_a_rule_at_the_cut_limit_is_latched_too():
 
 def test_a_rule_whose_text_was_cut_is_retried():
     item, score = pick(1, text=BACKGROUND * 2)
-    response = respond([(item, score)])
+    response = respond([(item, score), *CROWD])
     assert response["retry_ids"] == [item.record_id]
     assert lines(response)[0]["text_complete"] is False
+
+
+LONG_RULE = (
+    "Never email the client directly. The billing contact is the one exception, and invoices go straight to them. "
+    f"{BACKGROUND[:320]}Thanks for pulling this together."
+)
+
+
+def test_a_long_pick_goes_whole_when_the_budget_has_room_for_it():
+    item, score = pick(1, text=LONG_RULE)
+    response = respond([(item, score)])
+    (line,) = lines(response)
+    assert line == json.loads(_render(item, selector={"mode": "jev", "rank": 1, "score": score}))
+    assert "The billing contact is the one exception" in line["text"]
+    assert response["retry_ids"] == []
+    assert "delivered_short" not in response["selector_stages"]
+
+
+def test_a_long_pick_goes_whole_beside_the_short_lines_of_the_rest():
+    item, score = pick(1, text=LONG_RULE)
+    whole, *rest = lines(respond([(item, score), pick(2), pick(3)]))
+    assert whole["text"] == item.text
+    assert [("ontology" in line, "detail" in line) for line in rest] == [(False, True), (False, False)]
+
+
+def test_the_picks_after_a_long_one_keep_their_room():
+    item, score = pick(1, text=LONG_RULE)
+    rest = [pick(2), pick(3)]
+    whole = _render(item, selector={"mode": "jev", "rank": 1, "score": score})
+    beside = len(render_short(rest[0][0], lookup=True)) + len(render_short(rest[1][0]))
+    fits = respond([(item, score), *rest], budget=len(whole) + beside)
+    assert lines(fits)[0]["text"] == item.text
+    assert fits["selector_stages"]["delivered"] == 3
+    short = respond([(item, score), *rest], budget=len(whole) + beside - 1)
+    assert lines(short)[0]["text_complete"] is False
+    assert short["selector_stages"]["delivered"] == 3
+    assert short["retry_ids"] == [item.record_id]
+
+
+def test_a_long_pick_gives_up_its_whole_line_before_a_later_pick_loses_its_own():
+    item, score = pick(1, text=LONG_RULE)
+    response = respond([(item, score), *CROWD])
+    assert lines(response)[0]["text_complete"] is False
+    room = 4096 - len(render_short(item, lookup=True))
+    assert response["selector_stages"]["delivered"] == 1 + room // len(render_short(CROWD[0][0]))
+
+
+def test_a_long_standing_rule_with_room_goes_whole_with_its_mark():
+    item, score = pick(1, text=LONG_RULE)
+    (line,) = lines(respond([(item, score)], reserved={item.record_id: ["Never email the client directly."]}))
+    assert line["text"] == item.text
+    assert line["selector"] == {"mode": "jev", "rank": 1, "score": score, "reserved": True}
+
+
+def test_a_pick_short_enough_for_a_short_line_stays_on_one_with_room_to_spare():
+    assert not any("ontology" in line for line in lines(respond([pick(1, text="x" * COMPACT_TEXT_BYTES)])))
+
+
+def test_a_long_pick_is_cut_once_a_turn(monkeypatch):
+    reads = []
+    cut = engine._compact_text
+    monkeypatch.setattr(engine, "_compact_text", lambda text, rules=(): (reads.append(text) or cut(text, rules)))
+    picks = [pick(index, text=f"Rule {index}. {BACKGROUND * 2}") for index in range(1, 11)]
+    respond(picks)
+    assert len(reads) <= len(picks) + 1
 
 
 def test_a_cut_rule_that_can_never_fit_whole_is_latched_from_its_short_line():
@@ -569,19 +638,25 @@ def test_a_rule_delivered_whole_on_a_short_line_is_not_sent_again(tmp_path, tran
     assert len(transport.statements) == 1
 
 
+def tight_budget(long: RetrievalRecord) -> int:
+    """Room for a long pick's whole line alone, so a plain pick beside it has it cut."""
+    return len(_render(long, selector={"mode": "jev", "rank": 1, "score": 0.9})) + 40
+
+
 def test_a_rule_cut_on_a_short_line_arrives_whole_once_on_a_later_turn(tmp_path, transport, records):
     long = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}")
     records.extend([long, record(2, text="Never ship on a Friday.")])
-    first = select(tmp_path, "first turn")
+    budget = tight_budget(long)
+    first = select(tmp_path, "first turn", budget_bytes=budget)
     assert first.response["retry_ids"] == [long.record_id]
     commit(tmp_path, first)
-    second = select(tmp_path, "second turn")
+    second = select(tmp_path, "second turn", budget_bytes=budget)
     assert len(transport.statements[1]) == 1
     (line,) = [json.loads(item) for item in second.response["payload"].splitlines()]
     assert (line["record_id"], line["text"]) == (long.record_id, long.text)
     assert second.response["retry_ids"] == []
     commit(tmp_path, second)
-    assert select(tmp_path, "third turn").outcome == "no_picks"
+    assert select(tmp_path, "third turn", budget_bytes=budget).outcome == "no_picks"
     assert len(transport.statements) == 2
 
 
@@ -589,11 +664,12 @@ def test_a_fallback_keeps_out_what_went_whole_and_what_it_could_only_repeat_cut(
     long = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}")
     plain = record(2, text="Never ship on a Friday.")
     records.extend([long, plain])
-    first = select(tmp_path, "first turn")
+    budget = tight_budget(long)
+    first = select(tmp_path, "first turn", budget_bytes=budget)
     assert first.response["retry_ids"] == [long.record_id]
     commit(tmp_path, first)
     transport.error = TimeoutError("synthetic timeout")
-    fallback = select(tmp_path, "second turn")
+    fallback = select(tmp_path, "second turn", budget_bytes=budget)
     assert fallback.fallback_reason == "timeout"
     assert fallback.exclude_ids == frozenset({long.record_id, plain.record_id})
 

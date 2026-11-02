@@ -269,8 +269,13 @@ switches off delivery is unchanged.
   with or without `--prompt`, and analytical retrieval always give whole lines.
 - A short line has `authority`, `record_id` and `text`. `text` is always the record's
   own words, and text over 400 bytes is cut. Text that was cut adds `text_basis` and
-  `"text_complete": false`, and a line without them has all of its text. Picks go
-  short even when they would all fit whole.
+  `"text_complete": false`, and a line without them has all of its text. Picks whose
+  text fits a short line go short even when they would all fit whole.
+- A pick whose text would be cut is delivered on a whole line instead when that line
+  fits beside the short lines of the picks after it, with its `selector` block whole.
+  A cut can lose an exception, and there is no reason to lose one on a turn with room.
+  It never costs a later pick its line, so what fits on a crowded prompt is unchanged.
+  Local records and the fallback are not weighed this way: a long one goes short.
 - A captured record is cut by the compact line's rules above, which read an operator's
   message and drop what it quotes or pastes. A short line also carries documents and
   imports, where a quote can be the rule itself, so any other record is cut as it

@@ -128,6 +128,8 @@ def _rank_key(record: RetrievalRecord, query: str, selected_domain: str | None, 
 
 COMPACT_TEXT_BYTES = 400
 SHORT_LINE_DETAIL = "imprint history <record_id>"
+# What ``render_short(lookup=True)`` adds to a line.
+SHORT_LINE_LOOKUP_BYTES = len(f',"detail":"{SHORT_LINE_DETAIL}"')
 
 
 def _section_limits(total: int) -> dict[str, int]:

@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .engine import RetrievalEngine, _render, render_compact, render_short, whole_text_fits
+from .engine import SHORT_LINE_LOOKUP_BYTES, RetrievalEngine, _render, render_compact, render_short, whole_text_fits
 from .models import (
     BUSINESS_DECLARED_PARTITION,
     BUSINESS_OBSERVED_PARTITION,
@@ -241,15 +241,17 @@ def _jev_response(
     are marked on their lines, and a compact one says its rule. ``withheld`` counts
     stale records kept from this turn.
 
-    ``short_lines`` puts every pick on a short line, which frees the room the rules
-    above exist to share. Only a cut can then leave a pick owed: one whose text went
-    out whole has said what it was picked to say, and the rest is a lookup away, so it
-    latches. One whose text was cut goes in ``retry_ids``, and arrives whole when it is
-    in ``retried`` and there is room. A local record latches from its short line, cut
-    or not: nothing picks it, so a place in ``retry_ids`` would only send it cut on
-    every turn. A short line's selector block keeps only the reserved mark: nothing
-    reads the rest, the order of the lines is the rank, and the decision log has the
-    scores.
+    ``short_lines`` puts picks on short lines, which frees the room the rules above
+    exist to share. A short line cuts long text, so a pick it would cut goes whole
+    when its whole line fits beside the short lines of the picks after it: cutting it
+    would save room nothing needs. Only a cut can then leave a pick owed: one whose
+    text went out whole has said what it was picked to say, and the rest is a lookup
+    away, so it latches. One whose text was cut goes in ``retry_ids``, and arrives
+    whole when it is in ``retried`` and there is room. A local record latches from its
+    short line, cut or not: nothing picks it, so a place in ``retry_ids`` would only
+    send it cut on every turn. A short line's selector block keeps only the reserved
+    mark: nothing reads the rest, the order of the lines is the rank, and the decision
+    log has the scores.
 
     Picks that cannot be delivered at all report ``oversized_picks``, or
     ``crowded_picks`` when one would have fit without the local records, because
@@ -277,20 +279,32 @@ def _jev_response(
     ]
     whole_lines = [_render(record, selector=selection) for (record, _), selection in zip(picks, selections)]
     all_fit = total + sum(len(line) for line in whole_lines) <= budget
+    marks = [{"reserved": True} if "reserved" in selection else None for selection in selections]
+    # Each pick is cut here once: cutting reads all of a long record, and a turn can
+    # hold 20 of them. Only the one line that says the lookup is rendered again.
+    short_forms = [
+        render_short(record, selector=mark, rules=reserved.get(record.record_id, ())) if short_lines else b""
+        for (record, _), mark in zip(picks, marks)
+    ]
+    later = sum(len(line) for line in short_forms)
     delivered_picks = compact_picks = short_picks = delivered_rules = 0
     crowded = False
     # A local line that went out has already said how to look a record up.
     lookup_said = local is not None and bool(local.selected_ids)
-    for (record, _), selection, whole in zip(picks, selections, whole_lines):
+    for (record, _), selection, whole, mark, short_form in zip(picks, selections, whole_lines, marks, short_forms):
         rules = reserved.get(record.record_id, ())
         too_large = len(whole) > budget // _FULL_RENDER_SHARE and record.record_id not in retried
         no_room = total + len(whole) > budget
-        owed = record.record_id in retried and not whole_text_fits(record)
-        short = short_lines and (no_room or not owed)
+        later -= len(short_form)
+        # A pick owed a whole line may take the room outright, as it does on whole lines.
+        held_back = later + (SHORT_LINE_LOOKUP_BYTES if later and not lookup_said else 0)
+        room = budget - total - (0 if record.record_id in retried else held_back)
+        short = short_lines and (whole_text_fits(record) or len(whole) > room)
         compact = not short_lines and ((not all_fit and too_large) or no_room)
-        if short:
-            mark = {"reserved": True} if "reserved" in selection else None
-            line = render_short(record, selector=mark, rules=rules, lookup=not lookup_said)
+        if short and lookup_said:
+            line = short_form
+        elif short:
+            line = render_short(record, selector=mark, rules=rules, lookup=True)
         else:
             line = render_compact(record, selector=selection, rules=rules) if compact else whole
         if total + len(line) > budget:
