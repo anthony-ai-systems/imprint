@@ -294,6 +294,42 @@ def test_a_captured_message_still_loses_what_it_quotes():
     )
 
 
+REPEATED = "Use it for every release and every client. " * 12
+VERDICT = "No, never use the vendor template for release notes."
+OVERRULED = f'They wrote: "always prefer the vendor template. {REPEATED}" {VERDICT}'
+
+
+def test_a_long_sentence_keeps_the_verdict_a_quotation_would_push_out():
+    line = json.loads(render_short(record(text=OVERRULED)))
+    assert line["text"].endswith(f"\n{VERDICT}") and line["text"].startswith("They wrote:")
+    assert (line["text_basis"], line["text_complete"]) == ("feedback_sentences", False)
+    assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+def test_a_long_standing_rule_keeps_the_verdict_too():
+    line = json.loads(render_short(record(text=OVERRULED), rules=[OVERRULED]))
+    assert line["text"].endswith(f"\n{VERDICT}")
+    assert (line["text_basis"], line["text_complete"]) == ("rule_sentences", False)
+    assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+def test_the_ending_comes_from_the_sentence_and_not_from_what_was_pasted_after_it():
+    text = f"{OVERRULED}\n> Always use the vendor template, the handbook says."
+    line = json.loads(render_short(record(text=text)))
+    assert line["text"].endswith(f"\n{VERDICT}") and "> Always" not in line["text"]
+
+
+def test_a_compact_line_still_cuts_a_long_sentence_from_its_start():
+    line = json.loads(render_compact(record(text=OVERRULED)))
+    assert line["text"].startswith("They wrote:") and VERDICT not in line["text"]
+
+
+def test_a_sentence_with_no_ending_of_its_own_is_cut_from_its_start():
+    text = f"Never use {'the vendor template ' * 40}again."
+    short, compact = json.loads(render_short(record(text=text))), json.loads(render_compact(record(text=text)))
+    assert short["text"] == compact["text"]
+
+
 def test_a_record_of_nothing_but_leading_blanks_is_never_an_empty_line():
     assert json.loads(render_short(imported(f"{' ' * 500}Refunds end after thirty days. {BACKGROUND}")))["text"].strip()
 
@@ -385,7 +421,7 @@ def test_a_cut_record_too_large_for_this_budget_is_still_listed():
 def test_a_section_that_is_full_stops_paying_to_cut_long_records(monkeypatch):
     reads = []
     cut = engine._compact_text
-    monkeypatch.setattr(engine, "_compact_text", lambda text, rules=(): (reads.append(text) or cut(text, rules)))
+    monkeypatch.setattr(engine, "_compact_text", lambda text, rules=(), **how: (reads.append(text) or cut(text, rules, **how)))
     records = [record(index, text=f"Rule number {index}. {BACKGROUND}") for index in range(1600)]
     result = run_engine(records, selected_domain=None)
     assert len(result.selected_ids) < 20
@@ -547,7 +583,7 @@ def test_a_pick_short_enough_for_a_short_line_stays_on_one_with_room_to_spare():
 def test_a_long_pick_is_cut_once_a_turn(monkeypatch):
     reads = []
     cut = engine._compact_text
-    monkeypatch.setattr(engine, "_compact_text", lambda text, rules=(): (reads.append(text) or cut(text, rules)))
+    monkeypatch.setattr(engine, "_compact_text", lambda text, rules=(), **how: (reads.append(text) or cut(text, rules, **how)))
     picks = [pick(index, text=f"Rule {index}. {BACKGROUND * 2}") for index in range(1, 11)]
     respond(picks)
     assert len(reads) <= len(picks) + 1

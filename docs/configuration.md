@@ -284,6 +284,9 @@ switches off delivery is unchanged.
   message and drop what it quotes or pastes. A short line also carries documents and
   imports, where a quote can be the rule itself, so any other record is cut as it
   stands: its start and its last sentence, with `text_basis` `stored_text`.
+- A sentence too long to fit keeps its head and its ending, because one sentence can
+  hold a whole quotation and the verdict after it. Compact lines still cut it from
+  the start.
 - A reserved rule keeps the record's last sentence after its rule, and `text_basis`
   stays `rule_sentences`. A later sentence can overrule the rule, and the reserved
   mark would otherwise vouch for what it overruled. The last sentence takes at most

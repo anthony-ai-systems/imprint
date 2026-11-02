@@ -182,12 +182,35 @@ def _cut(text: str, limit: int = COMPACT_TEXT_BYTES) -> str:
     return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
-def _join_sentences(sentences: Sequence[str]) -> str:
+_QUOTE_RESIDUE = "\"'\u201d\u2019) "
+
+
+def _head_and_end(sentence: str, limit: int) -> str:
+    """Cut text to the limit and keep how it ended, which a plain cut would lose.
+
+    One sentence can hold a whole quotation, and a verdict that follows it is then
+    the part a plain cut drops. The ending is read from this text alone, so nothing
+    a caller already set aside can come back through it, and it starts past any
+    closing quote left from the sentence split.
+    """
+    if _size(sentence) <= limit:
+        return sentence
+    closing = stored_closing_sentence(sentence)
+    if closing is None:
+        return _cut(sentence, limit)
+    closing = closing.lstrip(_QUOTE_RESIDUE)
+    if _size(closing) > limit // 2:
+        return _cut(sentence, limit)
+    return f"{_cut(sentence, limit - _size(closing) - 1)}\n{closing}"
+
+
+def _join_sentences(sentences: Sequence[str], *, keep_end: bool = False) -> str:
     """Join sentences in order within the limit, nearest the end first.
 
     The end is where a message overrules what came before it, so the last sentence
     is always there and earlier ones fill backward from it. A last sentence too
-    long for half the limit leaves that half to the others and is cut to fit.
+    long for half the limit leaves that half to the others and is cut to fit, from
+    its start unless ``keep_end`` asks for its head and its ending.
     """
     room = COMPACT_TEXT_BYTES - min(_size(sentences[-1]), COMPACT_TEXT_BYTES // 2)
     kept: list[str] = []
@@ -197,7 +220,8 @@ def _join_sentences(sentences: Sequence[str]) -> str:
             kept.append(sentence)
             room -= cost
     used = sum(_size(sentence) + 1 for sentence in kept)
-    return "\n".join((*reversed(kept), _cut(sentences[-1], COMPACT_TEXT_BYTES - used)))
+    fit = _head_and_end if keep_end else _cut
+    return "\n".join((*reversed(kept), fit(sentences[-1], COMPACT_TEXT_BYTES - used)))
 
 
 def _opening_with_close(text: str) -> str:
@@ -214,7 +238,7 @@ def _opening_with_close(text: str) -> str:
     return f"{_cut(opening, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
 
 
-def _compact_text(text: str, rules: Sequence[str] = ()) -> tuple[str, str]:
+def _compact_text(text: str, rules: Sequence[str] = (), *, keep_end: bool = False) -> tuple[str, str]:
     """Return what a compact line says, and what that text is."""
     if _size(text) <= COMPACT_TEXT_BYTES:
         return text, "whole"
@@ -225,7 +249,7 @@ def _compact_text(text: str, rules: Sequence[str] = ()) -> tuple[str, str]:
         closing = closing_sentence(text)
         if closing is not None and closing != sentences[-1]:
             sentences.append(closing)
-        return _join_sentences(sentences), "feedback_sentences"
+        return _join_sentences(sentences, keep_end=keep_end), "feedback_sentences"
     return _opening_with_close(text), "opening"
 
 
@@ -270,7 +294,7 @@ def _rule_with_close(rules: Sequence[str], closing: str | None) -> str:
     """
     said = "\n".join(rules)
     if closing is None or closing in said:
-        return _cut(said)
+        return _head_and_end(said, COMPACT_TEXT_BYTES)
     close = _cut(closing, COMPACT_TEXT_BYTES // 2)
     return f"{_cut(said, COMPACT_TEXT_BYTES - _size(close) - 1)}\n{close}"
 
@@ -299,7 +323,7 @@ def _short_text(record: RetrievalRecord, rules: Sequence[str]) -> tuple[str, str
         ending = closing_sentence if captured else stored_closing_sentence
         return _rule_with_close(rules, ending(record.text)), "rule_sentences"
     if captured:
-        return _compact_text(record.text)
+        return _compact_text(record.text, keep_end=True)
     return _stored_opening(record.text), "stored_text"
 
 

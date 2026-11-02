@@ -10,7 +10,8 @@
   fit session start instead of 4, and real text should hold about 14 and 10 to 11. A
   pick a short line would cut goes whole when the budget has room for it. Under Jev, a
   rule whose whole text went out is not sent again, and one whose text was cut can
-  still arrive whole. Elsewhere a receipt holds for one snapshot, as it does on whole
+  still arrive whole. A sentence too long to fit keeps its head and its ending, so a
+  verdict after a quotation is not lost. Elsewhere a receipt holds for one snapshot, as it does on whole
   lines. `imprint retrieve` and analytical retrieval keep whole lines, and with both
   switches off delivery is unchanged. Leave the session start switch off until session
   start can filter by client and apply `selector.jev.stale_before`. Neither key needs
