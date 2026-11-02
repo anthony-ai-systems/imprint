@@ -25,6 +25,7 @@ from imprint.config import DEFAULTS, SHORT_LINES_PROMPT, SHORT_LINES_SESSION_STA
 from imprint.errors import ImprintError
 from imprint.hook_routes import OUTCOMES, route_entry, route_log_path
 from imprint.retrieve import jev
+from imprint.retrieve.engine import _render as render
 from imprint.retrieve.models import RetrievalRecord
 from imprint.retrieve.receipts import DeliveryReceipts
 
@@ -147,6 +148,20 @@ def one_turn(tmp_path, monkeypatch, capsys, action, event, *, mode="jev", **jev_
     return line
 
 
+LINES = pytest.mark.parametrize(
+    "settings", [{}, {SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True}], ids=["whole_lines", "short_lines"],
+)
+WIDE = record(4, "A rule with a long trail.", evidence_ids=tuple(f"urn:synthetic:evidence:{n}" for n in range(2000)))
+
+
+def facts(tmp_path, *fields) -> list[tuple]:
+    return [tuple(line[field] for field in fields) for line in route_lines(tmp_path)]
+
+
+def prompted(number: int, event: dict = IN_DOMAIN) -> dict:
+    return {**event, "prompt": f"synthetic prompt number {number}"}
+
+
 # -- session start -----------------------------------------------------------------
 
 @pytest.mark.parametrize("mode", ["deterministic", "jev", "shadow"])
@@ -231,13 +246,90 @@ def test_a_replayed_turn_is_already_delivered_and_did_not_ask(tmp_path, transpor
     assert transport.calls == 1
 
 
-def test_everything_already_in_the_session_did_not_ask_jev(tmp_path, transport, monkeypatch, capsys):
+
+
+# -- the session already has it ----------------------------------------------------
+
+LOCAL = record(3, "A local rule Jev is never sent.", "domain", domain_id="research", ontology_type="Rule",
+               ontology_partition="business_declared", judgment_statement=None)
+
+
+@LINES
+def test_everything_already_in_the_session_did_not_ask_jev(tmp_path, transport, monkeypatch, capsys, settings):
+    config = write_config(tmp_path, "jev", settings)
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    output = hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert output["selector_outcome"] == "no_picks"
+    line = route_lines(tmp_path)[-1]
+    assert (line["outcome"], line["detail"], line["answered"], line["bytes"]) == ("already_delivered", None, False, 0)
+    assert transport.calls == 0
+
+
+@LINES
+def test_a_session_that_has_everything_says_so_turn_after_turn(tmp_path, transport, monkeypatch, capsys, settings):
+    config = write_config(tmp_path, "jev", settings)
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    for number in (1, 2, 2):
+        hook(config, SUBMIT, prompted(number, NO_DOMAIN), monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "answered")[1:] == [("already_delivered", False)] * 3
+    assert transport.calls == 0
+
+
+def test_the_decision_log_counts_what_the_session_already_had(tmp_path, transport, monkeypatch, capsys):
     config = write_config(tmp_path, "jev")
     hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
     hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
-    line = route_lines(tmp_path)[-1]
-    assert (line["outcome"], line["detail"], line["answered"]) == ("nothing_relevant", "no_picks", False)
+    (entry,) = (json.loads(line) for line in jev.decision_log_path(operator_root(tmp_path)).read_text().splitlines())
+    assert entry["stages"]["session_held"] == 1
+
+
+def test_a_pick_finally_delivered_whole_is_then_already_in_the_session(tmp_path, transport, monkeypatch, capsys):
+    long = record(5, "A long synthetic rule about the source. " * 110)
+    use_records(monkeypatch, [long, record(6, "A short synthetic rule.")])
+    room = len(render(long, selector={"mode": "jev", "rank": 1, "score": 0.9})) + 40
+    config = write_config(tmp_path, "jev", {SHORT_LINES_PROMPT: True}, budget_bytes=room)
+    for number in range(3):
+        hook(config, SUBMIT, prompted(number, NO_DOMAIN), monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "answered") == [
+        ("delivered", True), ("delivered", True), ("already_delivered", False),
+    ]
+
+
+def test_a_local_record_still_to_go_is_delivered_not_already_delivered(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [RECORDS[0], LOCAL])
+    config = write_config(tmp_path, "jev")
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail")[-1] == ("delivered", "no_picks")
     assert transport.calls == 0
+
+
+def test_a_shadow_session_that_has_everything_says_so(tmp_path, transport, monkeypatch, capsys):
+    config = write_config(tmp_path, "shadow")
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "method", "answered")[-1] == ("already_delivered", "shadow", False)
+    assert transport.calls == 0
+
+
+def test_nothing_to_send_because_the_session_has_it_is_not_nothing_relevant(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [record(3, "A general local rule.", ontology_type="Rule",
+                                     ontology_partition="business_declared", judgment_statement=None)])
+    config = write_config(tmp_path, "jev")
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    output = hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert output["fallback_reason"] == "no_candidates"
+    assert facts(tmp_path, "outcome", "method")[-1] == ("already_delivered", "deterministic_fallback")
+
+
+def test_a_fallback_that_excluded_what_the_session_has_is_already_delivered(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [LOCAL])
+    config = write_config(tmp_path, "jev")
+    hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    monkeypatch.setattr(retrieval, "_snapshot_id", lambda store: "synthetic-later-snapshot")
+    for _ in range(2):
+        hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "bytes")[1:] == [("already_delivered", 0)] * 2
 
 
 # -- empty is not dead -------------------------------------------------------------
@@ -265,20 +357,6 @@ def test_an_empty_pool_with_no_key_is_still_a_failure(tmp_path, transport, monke
 
 
 # -- a turn that repeats one -------------------------------------------------------
-
-LINES = pytest.mark.parametrize(
-    "settings", [{}, {SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True}], ids=["whole_lines", "short_lines"],
-)
-WIDE = record(4, "A rule with a long trail.", evidence_ids=tuple(f"urn:synthetic:evidence:{n}" for n in range(2000)))
-
-
-def facts(tmp_path, *fields) -> list[tuple]:
-    return [tuple(line[field] for field in fields) for line in route_lines(tmp_path)]
-
-
-def prompted(number: int, event: dict = IN_DOMAIN) -> dict:
-    return {**event, "prompt": f"synthetic prompt number {number}"}
-
 
 @LINES
 @pytest.mark.parametrize("mode, detail", [("jev", "no_candidates"), ("deterministic", None)])

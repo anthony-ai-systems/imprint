@@ -1225,7 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
                     selector_fields = decision.fields()
                     context = decision.context
                     exclude_ids = decision.exclude_ids
-                    turn.answered = decision.answered
+                    turn.answered, turn.held = decision.answered, decision.held
                     if decision.response is not None:
                         selected = decision.response
                         response = {
