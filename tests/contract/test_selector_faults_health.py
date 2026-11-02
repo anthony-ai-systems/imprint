@@ -184,11 +184,12 @@ def test_a_turn_that_never_asked_neither_adds_to_a_run_nor_ends_it(tmp_path):
 
 
 @pytest.mark.parametrize("not_selection", [
+    {"detail": "oversized_records"},
     {"detail": "hook_action_timeout", "method": None},
     {"detail": "hook_exception", "method": "deterministic"},
     {"detail": "oversized_picks", "method": "jev"},
     {"detail": "timeout", "method": "shadow"},
-], ids=["bridge", "crash", "undelivered", "shadow"])
+], ids=["unfit", "bridge", "crash", "undelivered", "shadow"])
 def test_a_failed_turn_that_was_not_a_failed_selection_does_not_count(tmp_path, not_selection):
     assert in_a_row(tmp_path, *[line(**not_selection)] * 5) == 0
 

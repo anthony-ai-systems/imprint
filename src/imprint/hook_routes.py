@@ -42,6 +42,9 @@ EMPTY_POOL_REASON = "no_candidates"
 HOOK_INPUT_INVALID = "hook_input_invalid"
 # Jev picked records and none could be delivered.
 _UNDELIVERED_PICKS = frozenset({"crowded_picks", "oversized_picks"})
+# Records were due on this turn and none could fit. Neither says anything about Jev,
+# and neither is the same as nothing being relevant.
+UNFIT_RECORDS = "oversized_records"
 
 
 def route_log_path(root: Path) -> Path:
@@ -52,6 +55,20 @@ def _stage(delivery: Mapping[str, Any] | None, name: str) -> int:
     stages = delivery.get("selector_stages") if delivery is not None else None
     value = stages.get(name) if isinstance(stages, Mapping) else None
     return value if isinstance(value, int) else 0
+
+
+def _could_not_fit(delivery: Mapping[str, Any] | None) -> bool:
+    """Whether records were due and none went out.
+
+    Under Jev ``omitted_count`` also holds what Jev passed over, so there only the
+    records the local path left out can say this.
+    """
+    if delivery is None or delivery.get("selected_ids"):
+        return False
+    if isinstance(delivery.get("selector_stages"), Mapping):
+        return _stage(delivery, "local_unfit") > 0
+    omitted = delivery.get("omitted_count")
+    return isinstance(omitted, int) and omitted > 0
 
 
 def _outcome(
@@ -86,6 +103,8 @@ def _outcome(
         return "delivered", reason or selector_outcome
     if selector_outcome in _UNDELIVERED_PICKS:
         return "failed", selector_outcome
+    if _could_not_fit(delivery):
+        return "failed", UNFIT_RECORDS
     if held or _stage(delivery, "session_held"):
         return "already_delivered", None
     return "nothing_relevant", reason or selector_outcome or body.get("reason")
@@ -191,7 +210,10 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
             continue
         if entry.get("answered") is True:
             failures = 0
-        elif entry["outcome"] == "failed" and entry.get("method") == "deterministic_fallback":
+        elif (
+            entry["outcome"] == "failed" and entry.get("method") == "deterministic_fallback"
+            and entry.get("detail") != UNFIT_RECORDS
+        ):
             failures += 1
     return {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
 
@@ -203,6 +225,7 @@ __all__ = [
     "ROUTE_DEFER_ENV",
     "ROUTE_FIELD",
     "ROUTE_WINDOW_SECONDS",
+    "UNFIT_RECORDS",
     "failed_entry",
     "record_route",
     "route_entry",

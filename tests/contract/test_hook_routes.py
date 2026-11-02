@@ -540,6 +540,92 @@ def test_picks_that_cannot_fit_are_failed_not_empty(tmp_path, transport, monkeyp
     assert (line["bytes"], line["answered"]) == (0, True)
 
 
+# -- records that cannot fit -------------------------------------------------------
+
+TIGHT = {"context_budget_bytes": 4096}
+BIG_TEXT = "A long synthetic rule about the source. " * 150
+BIG_GENERAL = record(7, BIG_TEXT)
+BIG_DOMAIN = record(7, BIG_TEXT, "domain", domain_id="research")
+BIG_LOCAL = record(7, BIG_TEXT, "domain", domain_id="research", ontology_type="Rule",
+                   ontology_partition="business_declared", judgment_statement=None)
+
+
+def test_a_domain_record_too_big_for_the_budget_is_failed_not_empty(tmp_path, monkeypatch, capsys):
+    use_records(monkeypatch, [BIG_DOMAIN])
+    config = write_config(tmp_path, "deterministic", TIGHT)
+    for number in range(2):
+        hook(config, SUBMIT, prompted(number), monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail", "bytes") == [("failed", "oversized_records", 0)] * 2
+
+
+@pytest.mark.parametrize("mode", ["deterministic", "jev", "shadow"])
+def test_a_session_start_where_nothing_fits_is_failed_not_empty(tmp_path, monkeypatch, capsys, mode):
+    use_records(monkeypatch, [BIG_GENERAL])
+    config = write_config(tmp_path, mode, TIGHT)
+    for _ in range(2):
+        hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail") == [("failed", "oversized_records")] * 2
+
+
+def test_a_shadow_turn_where_nothing_fits_is_failed_not_empty(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [BIG_DOMAIN])
+    line = one_turn(tmp_path, monkeypatch, capsys, SUBMIT, IN_DOMAIN, mode="shadow")
+    assert (line["outcome"], line["detail"], line["method"]) == ("delivered", "picked", "shadow")
+    (tmp_path / "tight").mkdir()
+    hook(write_config(tmp_path / "tight", "shadow", TIGHT), SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path / "tight", "outcome", "detail", "method") == [("failed", "oversized_records", "shadow")]
+
+
+def test_no_picks_beside_a_local_record_too_big_is_failed_not_empty(tmp_path, transport, monkeypatch, capsys):
+    transport.score = 0.05
+    use_records(monkeypatch, [RECORDS[0], BIG_LOCAL])
+    config = write_config(tmp_path, "jev", TIGHT)
+    for _ in range(2):
+        hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail", "method", "answered") == [
+        ("failed", "oversized_records", "jev", True), ("failed", "oversized_records", "jev", False),
+    ]
+    assert transport.calls == 1
+
+
+def test_a_session_holding_all_but_a_record_too_big_is_failed_not_already_delivered(
+    tmp_path, transport, monkeypatch, capsys,
+):
+    use_records(monkeypatch, [RECORDS[0], BIG_LOCAL])
+    config = write_config(tmp_path, "jev", TIGHT)
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail")[-1] == ("failed", "oversized_records")
+    assert transport.calls == 0
+
+
+def test_a_record_that_fits_beside_one_that_cannot_is_delivered(tmp_path, monkeypatch, capsys):
+    use_records(monkeypatch, [RECORDS[1], BIG_DOMAIN])
+    config = write_config(tmp_path, "deterministic", TIGHT)
+    for _ in range(2):
+        hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome") == [("delivered",), ("already_delivered",)]
+
+
+def test_a_record_that_cannot_fit_says_nothing_about_jev(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [BIG_LOCAL])
+    config = write_config(tmp_path, "jev", TIGHT)
+    for number in range(4):
+        hook(config, SUBMIT, prompted(number), monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail", "method") == [
+        ("failed", "oversized_records", "deterministic_fallback"),
+    ] * 4
+    assert routes.route_summary(operator_root(tmp_path))["selector_failures_in_a_row"] == 0
+    assert transport.calls == 0
+
+
+def test_the_decision_log_counts_local_records_that_did_not_fit(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [RECORDS[0], BIG_LOCAL])
+    hook(write_config(tmp_path, "jev", TIGHT), SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    (entry,) = (json.loads(line) for line in jev.decision_log_path(operator_root(tmp_path)).read_text().splitlines())
+    assert entry["stages"]["local_unfit"] == 1
+
+
 # -- shadow and scratch ------------------------------------------------------------
 
 def test_a_shadow_turn_reports_the_deterministic_delivery(tmp_path, transport, monkeypatch, capsys):
@@ -627,9 +713,25 @@ def test_every_hook_output_comes_to_one_outcome(output, outcome, detail):
     ({"selected_ids": [], "selector_outcome": "no_picks"}, "nothing_relevant", "no_picks"),
     ({"selected_ids": [], "selector_outcome": "oversized_picks"}, "failed", "oversized_picks"),
     ({"selected_ids": [], "selector_outcome": "crowded_picks"}, "failed", "crowded_picks"),
+    ({"selected_ids": [], "omitted_count": 1}, "failed", "oversized_records"),
+    ({"selected_ids": [], "selector_stages": {"session_held": 1}}, "already_delivered", None),
 ])
 def test_a_latch_is_only_as_good_as_what_its_receipt_delivered(delivery, outcome, detail):
     entry = route_entry("user_prompt_submit", body("already_delivered"), mode="jev", delivery=delivery)
+    assert (entry["outcome"], entry["detail"]) == (outcome, detail)
+
+
+@pytest.mark.parametrize("delivery, outcome, detail", [
+    ({"selected_ids": [], "omitted_count": 0}, "nothing_relevant", None),
+    ({"selected_ids": [], "omitted_count": 1}, "failed", "oversized_records"),
+    ({"selected_ids": ["urn:synthetic:judgment:1"], "omitted_count": 1}, "nothing_relevant", None),
+    # Under Jev that count also holds what Jev passed over.
+    ({"selected_ids": [], "omitted_count": 1, "selector_stages": {"picked": 0}}, "nothing_relevant", None),
+    ({"selected_ids": [], "omitted_count": 1, "selector_stages": {"local_unfit": 1}}, "failed", "oversized_records"),
+    ({"selected_ids": [], "omitted_count": "1"}, "nothing_relevant", None),
+])
+def test_records_that_could_not_fit_are_not_nothing_relevant(delivery, outcome, detail):
+    entry = route_entry("user_prompt_submit", body(), mode="jev", delivery=delivery)
     assert (entry["outcome"], entry["detail"]) == (outcome, detail)
 
 

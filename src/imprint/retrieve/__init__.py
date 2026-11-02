@@ -394,6 +394,7 @@ def _jev_response(
             **({"stale_withheld": withheld} if withheld else {}),
             **({"delivered_short": short_picks} if short_picks else {}),
             **({"session_held": held} if held else {}),
+            **({"local_unfit": local.omitted_count} if local is not None and local.omitted_count else {}),
         },
     }
 
