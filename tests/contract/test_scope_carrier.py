@@ -14,6 +14,7 @@ from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.cli import main
 from imprint.compiler import compile_spools, write_envelope
 from imprint.errors import ValidationError
+from imprint.ingest import IngestCandidate, IngestService, import_legacy_principles
 from imprint.purge import hard_purge
 from imprint.retrieve import RetrievalEngine, StoreRetrievalSource, retrieve_payload
 from imprint.retrieve.engine import eligible
@@ -865,3 +866,76 @@ def test_ontology_scope_flags_need_a_kind_and_a_retrievable_type(tmp_path, capsy
     assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, domain),
                  "--valid-from", VALID_FROM, "--scope-kind", "system"]) == 2
     assert "not retrievable" in json.loads(capsys.readouterr().out)["error"]
+
+
+def _specimen(tenant_scope: str, *, flagged: bool = False, locator: str = "1") -> IngestCandidate:
+    return IngestCandidate(
+        source_kind="session_transcript", source_locator=f"synthetic://transcript#L{locator}",
+        content=f"[preference] Keep the second line.\nWHY: synthetic {locator}",
+        metadata={"session_id": "synthetic", "project_dir": "/synthetic/project", "tenant_scope": tenant_scope},
+        extensions={"taste.v1": {"kind": "preference", "scope": tenant_scope, "scope_ambiguous": flagged}},
+    )
+
+
+@pytest.mark.parametrize("tenant_scope, flagged, kind, resolved_by", [
+    ("global", False, "unresolved", "ingest_unflagged"),
+    ("entity:example-entity", False, "unresolved", "ingest_unflagged"),
+    ("global", True, "held", "ingest_ambiguous"),
+    ("entity:example-entity", True, "held", "ingest_ambiguous"),
+])
+def test_a_kept_specimen_stamps_from_the_distillers_fields(tmp_path, capture_envelope, tenant_scope, flagged, kind, resolved_by):
+    store = new_store(tmp_path)
+    service = IngestService(store, capture_envelope["operator_id"])
+    item_id = service.scan([_specimen(tenant_scope, flagged=flagged)])[0]["item_id"]
+    service.keep(item_id, why="A real preference.", stamp_scope=True)
+    kept = store.current_nodes(["IngestedItem"])[0]
+    row = row_of(store, kept["node_id"])
+    assert (row["scope_kind"], row["client_id"], row["resolved_by"]) == (kind, None, resolved_by)
+    assert kept["payload"]["metadata"]["tenant_scope"] == tenant_scope
+    assert kept["payload"]["metadata"]["project_dir"] == "/synthetic/project"
+
+
+def test_a_keep_writes_no_row_until_stamping_exists(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    service = IngestService(store, capture_envelope["operator_id"])
+    item_id = service.scan([_specimen("global", flagged=True)])[0]["item_id"]
+    service.keep(item_id, why="A real preference.")
+    assert rows_of(store) == []
+
+
+def test_a_kill_writes_no_row_even_with_stamping(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    service = IngestService(store, capture_envelope["operator_id"])
+    item_id = service.scan([_specimen("global")])[0]["item_id"]
+    service.kill(item_id, why="Not useful.")
+    assert rows_of(store) == []
+
+
+def test_a_held_kept_specimen_is_released_by_scope_set(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    service = IngestService(store, capture_envelope["operator_id"])
+    item_id = service.scan([_specimen("entity:example-entity", flagged=True)])[0]["item_id"]
+    service.keep(item_id, why="A real preference.", stamp_scope=True)
+    node_id = store.current_nodes(["IngestedItem"])[0]["node_id"]
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
+    assert row_of(store, node_id)["scope_kind"] == "client"
+
+
+def test_a_legacy_import_stamps_unresolved_unless_told_otherwise(tmp_path):
+    store = new_store(tmp_path)
+    operator_id = new_urn("operator")
+    plain, explicit = import_legacy_principles(
+        store, [{"text": "An old principle."}], operator_id=operator_id, source_version="1",
+        source_locator="synthetic://legacy/1",
+    ) + import_legacy_principles(
+        store, [{"text": "Another old principle."}], operator_id=operator_id, source_version="1",
+        source_locator="synthetic://legacy/2",
+        scope={"scope_kind": "client", "client_id": "a-client", "resolved_by": "explicit"},
+    )
+    assert (row_of(store, plain)["scope_kind"], row_of(store, plain)["resolved_by"]) == ("unresolved", "legacy_import")
+    assert (row_of(store, explicit)["scope_kind"], row_of(store, explicit)["client_id"]) == ("client", "a-client")
+    with pytest.raises(ValidationError, match="only at ratification"):
+        import_legacy_principles(
+            store, [{"text": "A third."}], operator_id=operator_id, source_version="1",
+            source_locator="synthetic://legacy/3", scope={"scope_kind": "central", "resolved_by": "x"},
+        )

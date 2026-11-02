@@ -15,7 +15,11 @@ from typing import Any, Iterable
 from imprint.errors import ConflictError, ValidationError
 from imprint.ontology.schema import canonical_bytes, make_urn, payload_sha256
 from imprint.store import ImprintStore
+from imprint.store.scope import require_fits_node, stamp_row, validate_stamp, write_scope_row
 from imprint.store.service import utc_now, version_provenance
+
+# The distiller's mark on a specimen whose entity match it could not settle.
+TASTE_EXTENSION = "taste.v1"
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,18 @@ class IngestCandidate:
             "metadata": self.metadata,
             "extensions": self.extensions or {},
         }
+
+
+def kept_scope(payload: dict[str, Any]) -> dict[str, Any]:
+    """The stamp a kept specimen takes. ``global`` never means central.
+
+    A flag means a client may be named and is not settled, so the record waits for
+    the operator. Matching an unflagged slug to a client needs the owner registry.
+    """
+    taste = payload.get("extensions", {}).get(TASTE_EXTENSION)
+    if isinstance(taste, dict) and taste.get("scope_ambiguous") is True:
+        return validate_stamp({"scope_kind": "held", "resolved_by": "ingest_ambiguous"})
+    return validate_stamp({"scope_kind": "unresolved", "resolved_by": "ingest_unflagged"})
 
 
 class IngestService:
@@ -125,13 +141,17 @@ class IngestService:
         """Record a KILL. A reason is optional but the ruling is permanent evidence."""
         return self._rule(item_id, "KILL", why=why)
 
-    def keep(self, item_id: str, *, why: str) -> str:
-        """KEEP requires WHY and creates exactly one imported-floor node."""
+    def keep(self, item_id: str, *, why: str, stamp_scope: bool = False) -> str:
+        """KEEP requires WHY and creates exactly one imported-floor node.
+
+        ``stamp_scope`` writes the kept node's scope row. It stays off until the
+        stamping setting exists, so a keep writes no row today.
+        """
         if not isinstance(why, str) or not why.strip():
             raise ValidationError("KEEP requires a non-empty WHY")
-        return self._rule(item_id, "KEEP", why=why)
+        return self._rule(item_id, "KEEP", why=why, stamp_scope=stamp_scope)
 
-    def _rule(self, item_id: str, verdict: str, *, why: str | None) -> str:
+    def _rule(self, item_id: str, verdict: str, *, why: str | None, stamp_scope: bool = False) -> str:
         now = utc_now()
         event_id = make_urn("event")
         ruling_id = make_urn("ruling")
@@ -201,6 +221,10 @@ class IngestService:
                     (source_id, item["source_kind"], item["source_locator"],
                      item["source_sha256"], event_id),
                 )
+                if stamp_scope:
+                    stamp = kept_scope(node_payload)
+                    require_fits_node(stamp, "IngestedItem", node_payload)
+                    write_scope_row(conn, stamp_row(kept_node_id, stamp, event_id=event_id, now=now))
             conn.execute(
                 "UPDATE ingest_items SET status=?,kept_node_id=? WHERE item_id=?",
                 (wanted, kept_node_id, item_id),
