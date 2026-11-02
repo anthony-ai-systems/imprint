@@ -94,6 +94,14 @@ class HealthReport:
         return asdict(self)
 
 
+def _route_evidence(values: HealthInputs) -> str:
+    """Every fallback writes a route line, so a log with none beside them took none,
+    and its run of failures is not evidence that there were none."""
+    lines = sum(count for counts in values.hook_route_outcomes_24h.values() for count in counts.values())
+    blind = values.selector_mode == "jev" and not lines and values.selector_fallbacks_24h >= SELECTOR_FAILURE_LIMIT
+    return "unavailable" if blind else "operator_logs_hook_routes_tail"
+
+
 def evaluate_health(values: HealthInputs) -> HealthReport:
     reasons: list[str] = []
     unacknowledged_spool_count = (
@@ -207,7 +215,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "hook_route_outcomes_24h": {route: dict(counts) for route, counts in values.hook_route_outcomes_24h.items()},
-        "hook_route_evidence": "operator_logs_hook_routes_tail",
+        "hook_route_evidence": _route_evidence(values),
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
         "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
         "t3_record_evidence": "operator_logs_capture_skips_tail",
