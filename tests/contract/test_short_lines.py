@@ -947,6 +947,29 @@ def test_explicit_retrieval_keeps_whole_lines_with_both_switches_on(tmp_path, re
     assert not any(map(is_short, map(json.loads, cli_retrieve(config, capsys, "--refresh")["payload"].splitlines())))
 
 
+def test_outside_jev_a_short_line_is_latched_per_snapshot_as_a_whole_line_is(
+    tmp_path, records, snapshots, monkeypatch, capsys,
+):
+    records.append(record(1, text=RULE, section="domain", domain_id="research"))
+    config = write_config(tmp_path, domains=RESEARCH, **{SHORT_LINES_PROMPT: True})[0]
+    event = {"session_id": "s", "prompt": "go", "domain_id": "research"}
+    assert len(delivered(hook(config, "user-prompt-submit", event, monkeypatch, capsys))) == 1
+    assert hook(config, "user-prompt-submit", event, monkeypatch, capsys)["status"] == "already_delivered"
+    snapshots["turn"] = 1
+    assert len(delivered(hook(config, "user-prompt-submit", event, monkeypatch, capsys))) == 1
+
+
+def test_session_start_does_not_read_stale_before(tmp_path, records, monkeypatch, capsys):
+    words = "Sounds fine, thanks for the update."
+    records.append(record(1, text=words, capture_mechanism="claude_code_stop_hook", valid_from="2026-01-01T00:00:00Z"))
+    assert not jev.StaleCheck.since("2026-06-01T00:00:00Z").keeps(records[0])
+    config = write_config(
+        tmp_path, selector=selector_config("deterministic", stale_before="2026-06-01T00:00:00Z"),
+        **{SHORT_LINES_SESSION_START: True},
+    )[0]
+    assert [line["text"] for line in delivered(hook(config, "session-start", {"session_id": "s"}, monkeypatch, capsys))] == [words]
+
+
 def test_explicit_retrieval_of_a_prompt_keeps_whole_lines_under_jev(tmp_path, records, transport, capsys):
     records.append(record(1, text=RULE))
     config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True})
@@ -963,10 +986,13 @@ def test_explicit_retrieval_of_a_prompt_keeps_whole_lines_under_jev(tmp_path, re
 # a full urn:imprint:verdict:<uuid> id and 160 bytes of text. A short line holding
 # them is 266 bytes. Twelve at session start needs 12 lines and the lookup in 3,072
 # bytes, or 252 bytes a line, and the three required keys and an id cost 106 of that.
+#
+# Plain text of exactly 160 bytes is the best case. Fifteen beside the default two
+# reserved rules leaves 9 bytes of the whole payload, so the tests below it say what
+# escaped text, longer text and imported rules cost.
 
 CAPTURED = ("captured", "captured_judgment")
 RATIFIED = ("ratified", "ratified_knowledge")
-EXTRACTED = ("extracted", "ratified_knowledge")
 IMPORTED = ("extracted", "imported_floor")
 RULE_BYTES = 160
 
@@ -979,16 +1005,23 @@ def rule_text(index: int, size: int = RULE_BYTES) -> str:
     return (f"Rule {index:03d}: keep the failed source in the summary and say plainly what was not checked. " * 3)[:size]
 
 
-def realistic(count: int, *, section: str = "general", authority=CAPTURED, size: int = RULE_BYTES, start: int = 0):
+def prose_text(index: int, size: int = RULE_BYTES) -> str:
+    """Rule text as people write it: JSON escapes its quotes and its line break."""
+    return (f'Rule {index:03d}: don\'t say "done" until the "failed" source is named.\n'
+            'Then say plainly what was not checked, and keep the summary to the point of it. ' * 3)[:size]
+
+
+def realistic(count: int, *, section: str = "general", authority=CAPTURED, size: int = RULE_BYTES, start: int = 0,
+              words=rule_text):
     return [
         RetrievalRecord(
-            record_id=urn("verdict", index), text=rule_text(index, size), section=section,
+            record_id=urn("verdict", index), text=words(index, size), section=section,
             provenance_status=authority[0], authority_tier=authority[1],
             evidence_ids=(urn("evidence", index),), case_ids=(urn("case", index),),
             case_summaries=("Explicit operator feedback witnessed by explicit hook input",),
             source_receipt_ids=(urn("evidence", index),), provenance_complete=True,
             imported_selected=authority == IMPORTED, ontology_type="Verdict",
-            ontology_path=("judgment", "Verdict"), judgment_statement=rule_text(index, size),
+            ontology_path=("judgment", "Verdict"), judgment_statement=words(index, size),
         )
         for index in range(start, start + count)
     ]
@@ -1015,10 +1048,34 @@ def test_fifteen_realistic_rules_fit_a_prompt():
     assert response["selected_bytes"] <= 4096
 
 
+MIXED = (CAPTURED, RATIFIED, IMPORTED)
+
+
 def test_fifteen_fit_with_mixed_authorities():
-    kinds = (CAPTURED, RATIFIED, EXTRACTED, IMPORTED)
-    items = [item for index, kind in enumerate(kinds) for item in realistic(5, authority=kind, start=index * 5)]
+    items = [realistic(1, authority=MIXED[index % len(MIXED)], start=index)[0] for index in range(20)]
     assert respond(picked(items))["selector_stages"]["delivered"] == 15
+
+
+@pytest.mark.parametrize("authority", MIXED)
+def test_every_authority_measured_here_is_one_retrieval_can_deliver(authority):
+    assert engine.eligible(realistic(1, authority=authority)[0], None)
+
+
+def test_the_fifteen_beside_two_reserved_rules_have_nine_bytes_to_spare():
+    items = realistic(20)
+    reserved = {item.record_id: ["Rule."] for item in items[:2]}
+    assert respond(picked(items), reserved=reserved)["selected_bytes"] == 4096 - 9
+
+
+@pytest.mark.parametrize("label, options, on_a_prompt, at_session_start", [
+    ("text JSON has to escape", {"words": prose_text}, 14, 11),
+    ("170 bytes", {"size": 170}, 14, 10),
+    ("200 bytes", {"size": 200}, 13, 9),
+])
+def test_what_real_text_costs(tmp_path, records, label, options, on_a_prompt, at_session_start):
+    assert respond(picked(realistic(20, **options)))["selector_stages"]["delivered"] == on_a_prompt, label
+    records.extend(realistic(60, **options))
+    assert len(session_start(tmp_path, short_lines=True)["selected_ids"]) == at_session_start, label
 
 
 @pytest.mark.parametrize("marked, delivered_rules", [(2, 15), (5, 14)])
@@ -1160,3 +1217,47 @@ def test_an_unknown_record_still_fails(tmp_path, monkeypatch, capsys):
     seed(config, monkeypatch, capsys)
     assert cli.main(["--config", str(config), "history", "urn:imprint:verdict:unknown"]) != 0
     capsys.readouterr()
+
+
+# -- what the docs promise -----------------------------------------------------------
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+def page(name: str) -> str:
+    return " ".join((REPOSITORY / name).read_text(encoding="utf-8").split())
+
+
+def short_lines_section() -> str:
+    text = page("docs/configuration.md")
+    start = text.index("## Short lines")
+    return text[start:text.index("## Environment overrides", start)]
+
+
+def changelog_entry() -> str:
+    text = page("CHANGELOG.md")
+    start = text.index("Add short delivered lines")
+    return text[start:text.index("Add `whole_line` to `imprint history`", start)]
+
+
+def test_the_docs_limit_the_promise_not_to_resend_to_jev_mode():
+    section = short_lines_section()
+    assert "In `jev` mode, a rule whose whole text went out on a short line" in section
+    assert "In `deterministic` and `shadow` mode, and on a T3 scratch turn" in section
+    assert "for one store snapshot" in section
+    assert "Under Jev, a rule whose whole text went out" in changelog_entry()
+
+
+def test_the_docs_warn_that_session_start_ignores_stale_before():
+    text = page("docs/configuration.md")
+    start = text.index("`org.imprint.short_lines.session_start`: `false`")
+    switch = text[start:text.index("The release artifact includes", start)]
+    assert "does not read `selector.jev.stale_before`" in switch
+    assert "`selector.jev.stale_before`" in changelog_entry()
+
+
+def test_the_docs_call_the_best_case_the_best_case():
+    section = short_lines_section()
+    assert "that is the best case" in section
+    assert "Expect about 14 on a prompt and 10 to 11 at session start" in section
+    assert "about 14 and 10 to 11" in changelog_entry()

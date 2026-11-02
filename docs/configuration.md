@@ -49,9 +49,10 @@ object and preserves unknown namespaced extensions.
 - `org.imprint.short_lines.prompt`: `false` (default) or `true`. Delivers what the
   UserPromptSubmit hook sends on short lines; see Short lines below.
 - `org.imprint.short_lines.session_start`: `false` (default) or `true`. The same
-  for SessionStart. Leave it off until session start can filter by client: it
-  sends records from every client, and short lines let it send about three times
-  as many of them.
+  for SessionStart. Leave it off until session start can filter by client and by
+  age: it sends records from every client, it does not read
+  `selector.jev.stale_before`, and short lines let it send about three times as
+  many of both.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -270,9 +271,10 @@ switches off delivery is unchanged.
 - A short line has `authority`, `record_id` and `text`, and `partition` on anything
   but a judgment, at up to 35 bytes. Authority alone cannot keep a declared claim from
   an observed result, or a chosen future from a rule, so that label stays. `text` is
-  always the record's own words, and text over 400 bytes is cut. Text that was cut adds `text_basis` and
-  `"text_complete": false`, and a line without them has all of its text. Picks whose
-  text fits a short line go short even when they would all fit whole.
+  always the record's own words, and text over 400 bytes is cut. Text that was cut
+  adds `text_basis` and `"text_complete": false`, and a line without them has all of
+  its text. Picks whose text fits a short line go short even when they would all fit
+  whole.
 - A pick whose text would be cut is delivered on a whole line instead when that line
   fits beside the short lines of the picks after it, with its `selector` block whole.
   A cut can lose an exception, and there is no reason to lose one on a turn with room.
@@ -299,29 +301,38 @@ switches off delivery is unchanged.
   and for a record retrieval cannot read, whose `versions` and `dispositions` say
   why. Only the record asked for is read that way, so one bad record does not stop
   the lookup of another.
-- A rule whose whole text went out on a short line counts as delivered, so it is
-  not sent again. One whose text was cut is listed in `retry_ids`, and when it is
-  picked again it arrives on a whole line, as long as there is room, and is then
-  done. Session start and the fallback list every record they cut, because Jev's
-  budget can be larger than theirs. A pick whose whole line can never fit Jev's
-  budget counts as delivered from its short line, which can be its second time out
-  cut. So does a local record, cut or not, because nothing picks it and it would
-  otherwise go out cut on every turn.
-- Only a pick can send a cut record whole, so nothing else sends one again. The
-  deterministic fallback keeps out records still owed a whole line as well as those
-  delivered, and a turn Jev owns keeps them out of its local records. A cut record
-  therefore goes out once in an outage, however often the store moves, and its
+- In `jev` mode, a rule whose whole text went out on a short line counts as
+  delivered, so no turn Jev owns, and no fallback from one, sends it again. One whose
+  text was cut is listed in `retry_ids`, and when it is picked again it arrives on a
+  whole line, as long as there is room, and is then done. Session start and the
+  fallback list every record they cut, because Jev's budget can be larger than theirs.
+  A pick whose whole line can never fit Jev's budget counts as delivered from its
+  short line, which can be its second time out cut. So does a local record, cut or
+  not, because nothing picks it and it would otherwise go out cut on every turn.
+- Only a pick can send a cut record whole, so in `jev` mode nothing else sends one
+  again. The deterministic fallback keeps out records still owed a whole line as well
+  as those delivered, and a turn Jev owns keeps them out of its local records. A cut
+  record therefore goes out once in an outage, however often the store moves, and its
   place goes to a record not yet sent. On whole lines the fallback can still deliver
   a compact pick, because there it has the whole line to send.
+- In `deterministic` and `shadow` mode, and on a T3 scratch turn, which takes the
+  deterministic answer, nothing reads the session's delivered records or `retry_ids`.
+  A receipt holds for one store snapshot, as it does on whole lines, so a new snapshot
+  sends the matched domain again, and a record cut there stays cut.
 - Once a section has refused a line, the rest of its records over 400 bytes are
   passed over without being cut, because cutting reads all of a long record and
   session start meets every eligible one. Shorter records can still fill the room.
 
-With a 56-byte record id, 160 bytes of text and a budget of 4,096 bytes, 15 rules
-fit a prompt and 11 fit session start. Session start reaches 12 only with text of
-146 bytes or less: 12 lines and the lookup have 252 bytes a line, and the line's
-keys and id take 106 of them. A prompt of nothing but `imported_floor` rules holds 14,
-and so does one with 5 reserved rules. Text cut to 400 bytes costs more than these.
+With a 56-byte record id, 160 bytes of plain text and a budget of 4,096 bytes, 15
+rules fit a prompt and 11 fit session start, and that is the best case: 15 beside two
+reserved rules leaves 9 bytes of the payload. Expect about 14 on a prompt and 10 to 11
+at session start until live receipts give the real figure. JSON escapes quotes and
+line breaks, so 160 bytes of ordinary prose holds 14 and 11. Text of 170 bytes holds
+14 and 10, and 200 bytes holds 13 and 9. A prompt of nothing but `imported_floor`
+rules holds 14, and so does one with 5 reserved rules. Text cut to 400 bytes costs
+more than these. Session start reaches 12 only with plain text of 146 bytes or less:
+12 lines and the lookup have 252 bytes a line, and the line's keys and id take 106 of
+them.
 
 Both keys are dotted, so an older build keeps them and reads nothing into them, and
 rolling back needs no change to the config.

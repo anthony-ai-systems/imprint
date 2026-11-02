@@ -5,13 +5,16 @@
 - Add short delivered lines, off by default behind two switches,
   `org.imprint.short_lines.prompt` and `org.imprint.short_lines.session_start`. A
   short line keeps `authority`, `record_id`, the record's words and, on anything but
-  a judgment, `partition`, and the first in a payload says how to look up the rest. At 4,096
-  bytes with 160 bytes of text, 15 rules fit a prompt instead of 5, and 11 fit session
-  start instead of 4. A rule whose whole text went out is not sent again, and one
-  whose text was cut can still arrive whole. `imprint retrieve` and analytical
-  retrieval keep whole lines, and with both switches off delivery is unchanged. Leave
-  the session start switch off until session start can filter by client. Neither key
-  needs removing before a rollback.
+  a judgment, `partition`, and the first in a payload says how to look up the rest. At
+  4,096 bytes with 160 bytes of plain text, 15 rules fit a prompt instead of 5, and 11
+  fit session start instead of 4, and real text should hold about 14 and 10 to 11. A
+  pick a short line would cut goes whole when the budget has room for it. Under Jev, a
+  rule whose whole text went out is not sent again, and one whose text was cut can
+  still arrive whole. Elsewhere a receipt holds for one snapshot, as it does on whole
+  lines. `imprint retrieve` and analytical retrieval keep whole lines, and with both
+  switches off delivery is unchanged. Leave the session start switch off until session
+  start can filter by client and apply `selector.jev.stale_before`. Neither key needs
+  removing before a rollback.
 - Add `whole_line` to `imprint history`: the record's whole retrieval line, read as
   delivery reads it. History had no ontology labels and did not say which evidence
   is a source receipt.
