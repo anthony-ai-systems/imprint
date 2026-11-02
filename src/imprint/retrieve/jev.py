@@ -44,6 +44,7 @@ from imprint.capture.detector import (
     stored_words,
 )
 from imprint.config import SELECTOR_STATE_LIMIT, effective_selector_mode
+from imprint.log_files import append_capped, newest_lines
 from imprint.permissions import secure_directory, secure_file
 
 from .engine import _parse_time
@@ -699,25 +700,7 @@ def decision_log_path(root: Path) -> Path:
 def log_decision(root: Path, entry: Mapping[str, object]) -> None:
     """Append one line, rotating once at the size cap. Never raises."""
     try:
-        path = decision_log_path(root)
-        line = (json.dumps(entry, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
-        if not path.parent.is_dir():
-            secure_directory(path.parent)
-        try:
-            size = path.stat(follow_symlinks=False).st_size
-        except FileNotFoundError:
-            size = -1
-        if size >= 0 and size + len(line) > DECISION_LOG_MAX_BYTES:
-            os.replace(path, path.with_name(DECISION_LOG_NAME + ".1"))
-            size = -1
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        descriptor = os.open(path, flags, 0o600)
-        try:
-            os.write(descriptor, line)
-        finally:
-            os.close(descriptor)
-        if size < 0:
-            secure_file(path)
+        append_capped(decision_log_path(root), entry, DECISION_LOG_MAX_BYTES)
     except Exception:
         pass
 
@@ -773,27 +756,6 @@ def record_transfer(root: Path, *, success: bool) -> None:
         pass
 
 
-def _tail_lines(path: Path, limit: int) -> tuple[list[bytes], int]:
-    """Complete lines from the last ``limit`` bytes of one log file, and the
-    number of bytes read. A missing or irregular file has none."""
-    if limit <= 0:
-        return [], 0
-    try:
-        status = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(status.st_mode):
-            return [], 0
-        with path.open("rb") as handle:
-            offset = max(0, status.st_size - limit)
-            handle.seek(offset)
-            data = handle.read(limit)
-    except OSError:
-        return [], 0
-    lines = data.split(b"\n")
-    if offset:
-        lines = lines[1:]  # the first line of a tail read may be partial
-    return lines, len(data)
-
-
 def decision_log_summary(root: Path, *, now: datetime | None = None) -> dict[str, object]:
     """Content-free counts from the newest ``DECISION_LOG_TAIL_BYTES`` of the
     decision log, continuing into the rotated file when the current one is
@@ -802,12 +764,9 @@ def decision_log_summary(root: Path, *, now: datetime | None = None) -> dict[str
     summary: dict[str, object] = {
         "last_success_ts": None, "last_transfer_ts": None, "fallbacks_24h": 0,
     }
-    path = decision_log_path(root)
-    lines, used = _tail_lines(path, DECISION_LOG_TAIL_BYTES)
-    rotated, _ = _tail_lines(path.with_name(DECISION_LOG_NAME + ".1"), DECISION_LOG_TAIL_BYTES - used)
     cutoff = current - timedelta(hours=24)
     fallbacks = 0
-    for raw in rotated + lines:
+    for raw in newest_lines(decision_log_path(root), DECISION_LOG_TAIL_BYTES):
         try:
             entry = json.loads(raw)
         except (ValueError, RecursionError):
