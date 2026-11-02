@@ -44,17 +44,19 @@ def _require_text(value: Any, field: str, *, nullable: bool = True) -> None:
 
 def _require_shape(kind: Any, client_id: Any, delivery: Any, rank: Any) -> None:
     """The table's CHECKs in Python, so a bad value is refused by name."""
-    if kind not in SCOPE_KINDS:
+    if not isinstance(kind, str) or kind not in SCOPE_KINDS:
         raise ValidationError("unknown scope kind")
     if (kind == "client") != (client_id is not None):
         raise ValidationError("a client id goes on a client scope and on no other kind")
     if delivery is not None:
-        if delivery not in DELIVERY_TAGS:
+        if not isinstance(delivery, str) or delivery not in DELIVERY_TAGS:
             raise ValidationError("unknown delivery tag")
         if not (kind in {"client", "central"} or (kind == "system" and delivery == "specific")):
             raise ValidationError("this scope kind cannot carry that delivery tag")
-    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int)):
-        raise ValidationError("delivery rank must be an integer")
+    if rank is not None and (
+        isinstance(rank, bool) or not isinstance(rank, int) or not -(2**63) <= rank < 2**63
+    ):
+        raise ValidationError("delivery rank must be a 64-bit integer")
 
 
 def validate_stamp(stamp: Any) -> dict[str, Any]:
@@ -75,7 +77,11 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
     if value["speaker"] is not None and value["endorser"] is None:
         raise ValidationError("a speaker needs an endorser")
     candidates = value["candidate_client_ids"] = value["candidate_client_ids"] or []
-    if not isinstance(candidates, list) or candidates != sorted(set(candidates)):
+    if (
+        not isinstance(candidates, list)
+        or not all(isinstance(candidate, str) for candidate in candidates)
+        or candidates != sorted(set(candidates))
+    ):
         raise ValidationError("candidate_client_ids must be a sorted list")
     for candidate in candidates:
         _require_text(candidate, "candidate_client_ids", nullable=False)

@@ -101,6 +101,18 @@ def configured(tmp_path: Path, operator_id: str) -> tuple[Path, ImprintStore]:
 # The extension and the row in apply_capture --------------------------------
 
 
+# A wrong type must fail like any other bad value, not stop the compile behind it.
+MISTYPED_STAMPS = [
+    {"scope_kind": ["client"]},
+    {"scope_kind": {"a": 1}},
+    {"delivery": ["general"]},
+    {"delivery_rank": 2**63},
+    {"delivery_rank": -(2**63) - 1},
+    {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["a-client", 1]},
+    {"scope_kind": "held", "client_id": None, "candidate_client_ids": [["a-client"]]},
+]
+
+
 def test_an_old_spool_compiles_with_no_quarantine_and_stays_legacy(tmp_path, capture_envelope):
     store = new_store(tmp_path)
     write_envelope(tmp_path, capture_envelope)
@@ -181,6 +193,7 @@ def test_the_capture_pipeline_passes_extensions_through(tmp_path, capture_envelo
     {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["b-client", "a-client"]},
     {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["a-client", "a-client"]},
     {"client_id": "  "},
+    *MISTYPED_STAMPS,
 ], ids=repr)
 def test_a_bad_stamp_is_refused_and_writes_nothing(tmp_path, capture_envelope, payload):
     store = new_store(tmp_path)
@@ -189,6 +202,13 @@ def test_a_bad_stamp_is_refused_and_writes_nothing(tmp_path, capture_envelope, p
     assert store.current_nodes() == [] and rows_of(store) == []
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM consumed_inputs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("rank", [2**63 - 1, -(2**63)])
+def test_the_widest_rank_the_table_holds_is_a_good_stamp(tmp_path, capture_envelope, rank):
+    store = new_store(tmp_path)
+    store.apply_capture(stamped(capture_envelope, delivery_rank=rank))
+    assert rows_of(store)[0]["delivery_rank"] == rank
 
 
 def test_central_is_refused_on_capture_by_name(tmp_path, capture_envelope):
@@ -205,14 +225,15 @@ def test_a_stamp_of_an_unknown_version_is_refused(tmp_path, capture_envelope):
         store.apply_capture(envelope)
 
 
-def test_a_refused_stamp_quarantines_its_own_spool_and_nothing_else(tmp_path, capture_envelope):
+@pytest.mark.parametrize("payload", [{"scope_kind": "central", "client_id": None}, *MISTYPED_STAMPS], ids=repr)
+def test_a_refused_stamp_quarantines_its_own_spool_and_nothing_else(tmp_path, capture_envelope, payload):
     store = new_store(tmp_path)
     other = build_capture_envelope(
         operator_id=capture_envelope["operator_id"], session_id=new_urn("session"), node_id="workstation-a",
         case_description="Another draft", raw_operator_text="Keep the second line.", call_type="accept",
         capture_mechanism="explicit_cli", captured_by="imprint-test",
     )
-    write_envelope(tmp_path, stamped(capture_envelope, scope_kind="central", client_id=None))
+    write_envelope(tmp_path, stamped(capture_envelope, **payload))
     write_envelope(tmp_path, other)
     counts = compile_spools(tmp_path, store, compiler_authorized=True)
     assert counts == {"captured": 1, "duplicate": 0, "quarantined": 1}
@@ -314,6 +335,9 @@ def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_env
     ({"scope_kind": "held", "delivery": "general"}, "delivery tag"),
     ({"scope_kind": "client", "client_id": "a-client", "delivery": "broad"}, "unknown delivery"),
     ({"scope_kind": "client", "client_id": "a-client", "delivery_rank": True}, "rank"),
+    ({"scope_kind": "client", "client_id": "a-client", "delivery_rank": 2**63}, "rank"),
+    ({"scope_kind": ["client"], "client_id": "a-client"}, "unknown scope kind"),
+    ({"scope_kind": "client", "client_id": "a-client", "delivery": ["general"]}, "unknown delivery"),
     ({"scope_kind": "client", "client_id": "a-client", "speaker": "someone"}, "must name"),
     ({"scope_kind": "client", "client_id": "a-client", "overrides": ["urn:imprint:rule:nope"]}, "current central"),
 ], ids=repr)
@@ -412,6 +436,9 @@ def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
     assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system",
                  "--delivery", "specific", "--clear", "delivery", "--by", ACTOR]) == 2
     assert "both set and clear" in json.loads(capsys.readouterr().out)["error"]
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system",
+                 "--rank", str(2**63), "--by", ACTOR]) == 2
+    assert "rank" in json.loads(capsys.readouterr().out)["error"]
     assert rows_of(store) == []
 
 
@@ -1055,7 +1082,10 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": "{"}]), "overrides"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "resolved_by": ""}]), "resolved_by"),
     (lambda doc: _reset_rows(doc, [{"node_id": doc["imprint:recordScope"][0]["node_id"]}]), "invalid row"),
-], ids=range(11))
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": ["client"]}]), "unknown scope kind"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery": ["general"]}]), "unknown delivery"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery_rank": 2**63}]), "rank"),
+], ids=range(14))
 def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
     _, document = _exported(tmp_path, capture_envelope)
     with pytest.raises(ValidationError, match=message):
