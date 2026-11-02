@@ -309,7 +309,8 @@ switches off delivery is unchanged.
   `Proposal` does not. Nothing limits the command by client yet. Only the record asked
   for is read that way, so one bad record does not stop the lookup of another. A row
   whose stored JSON cannot be parsed stops every lookup, and each then answers
-  `unknown record`.
+  `unknown record`. A store that cannot be read at all says so with its own error, not
+  `unknown record`, so a live record never looks gone.
 - `imprint history <record_id>` is meant for the operator, because one call returns
   the whole capture behind a record. Nothing enforces that yet, and a compact line's
   `detail` still points at it. Its `whole_line` is the line `imprint details` returns,

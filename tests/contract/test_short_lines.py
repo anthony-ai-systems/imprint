@@ -1500,3 +1500,26 @@ def test_the_docs_call_the_best_case_the_best_case():
     assert "that is the best case" in section
     assert "Expect about 14 on a prompt and 10 to 11 at session start" in section
     assert "about 14 and 10 to 11" in changelog_entry()
+
+
+def test_details_on_a_corrupt_store_says_so(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    (verdict,) = ImprintStore(root / "imprint.db").current_nodes(["Verdict"])
+    (root / "imprint.db").write_bytes(b"not a database" * 100)
+    code, out = details(config, verdict["node_id"], capsys)
+    assert (code, json.loads(out)["error"]) == (2, "existing store is corrupt or unreadable")
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX modes that bind the caller")
+@pytest.mark.parametrize("mode", [0o000, 0o500])
+def test_details_on_a_denied_root_says_so(mode, tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    (verdict,) = ImprintStore(root / "imprint.db").current_nodes(["Verdict"])
+    root.chmod(mode)
+    try:
+        code, out = details(config, verdict["node_id"], capsys)
+    finally:
+        root.chmod(0o700)
+    assert code == 2 and json.loads(out)["error"] != "unknown record"

@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import signal
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -669,10 +670,15 @@ def main(argv: list[str] | None = None) -> int:
             # A lookup is a read: it creates nothing and never waits on the write lock.
             from .retrieve import whole_line
             line = None
-            if store.path.exists():
-                with store.connect():  # a store that cannot be read says so itself
-                    pass
-                line = whole_line(store, args.record_id, complete_only=True)
+            try:
+                store.path.lstat()  # unlike exists(), this reports a denied path on every Python
+            except FileNotFoundError:
+                pass  # no store yet, so no record
+            else:
+                try:
+                    line = whole_line(store, args.record_id, complete_only=True)
+                except sqlite3.Error as exc:  # a store that cannot be read says so itself
+                    raise ValidationError("existing store is corrupt or unreadable") from exc
             if line is None:
                 raise ValidationError("unknown record")
             _write_json(line)

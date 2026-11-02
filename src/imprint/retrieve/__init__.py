@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ..errors import ImprintError
 from .engine import SHORT_LINE_LOOKUP_BYTES, RetrievalEngine, _render, render_compact, render_short, whole_text_fits
 from .models import (
     BUSINESS_DECLARED_PARTITION,
@@ -173,6 +175,10 @@ def whole_line(store, record_id: str, *, complete_only: bool = False) -> dict[st
         if not records or (complete_only and not records[0].provenance_complete):
             return None
         return json.loads(_render(records[0]))
+    except (ImprintError, OSError, sqlite3.Error):
+        if complete_only:
+            raise  # a store that cannot be read is not an unknown record
+        return None
     except Exception:
         return None
 
