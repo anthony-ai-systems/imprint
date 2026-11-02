@@ -13,6 +13,7 @@ from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.cli import main
 from imprint.compiler import compile_spools, write_envelope
 from imprint.errors import ValidationError
+from imprint.purge import hard_purge
 from imprint.store import ImprintStore
 from imprint.store.scope import SCOPE_EXTENSION, write_scope_row
 
@@ -405,3 +406,55 @@ def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
                  "--delivery", "specific", "--clear", "delivery", "--by", ACTOR]) == 2
     assert "both set and clear" in json.loads(capsys.readouterr().out)["error"]
     assert rows_of(store) == []
+
+
+# Purge ---------------------------------------------------------------------
+
+
+def test_a_held_capture_reads_its_candidates_back_and_purges_clean(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    envelope = stamped(
+        capture_envelope, scope_kind="held", client_id=None, resolved_by="conflict",
+        candidate_client_ids=["a-client", "b-client"],
+    )
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    row = row_of(store, verdict_id)
+    assert (row["scope_kind"], row["client_id"], row["resolved_by"]) == ("held", None, "conflict")
+
+    assert main(["--config", str(config), "history", verdict_id]) == 0
+    history = json.loads(capsys.readouterr().out)["history"]
+    payload = history["versions"][0]["event_payload"]["extensions"][SCOPE_EXTENSION]["payload"]
+    assert payload["candidate_client_ids"] == ["a-client", "b-client"]
+    assert history["scope"]["scope_kind"] == "held"
+
+    root = store.path.parent
+    result = hard_purge(store, root, verdict_id, confirmation=verdict_id, sentinel="b-client")
+    assert result["status"] == "purged"
+    assert rows_of(store) == []
+    assert b"b-client" not in store.path.read_bytes()
+
+
+def test_a_purge_takes_the_row_with_the_node(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope, project_id="a-distinctive-project")
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    result = hard_purge(store, tmp_path, verdict_id, confirmation=verdict_id, sentinel="a-distinctive-project")
+    assert result["status"] == "purged"
+    assert rows_of(store) == []
+
+
+def test_a_purge_with_a_central_id_in_an_override_list_leaves_no_residue(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    keeper = central(store, envelope, "A central rule that stays.")
+    doomed = central(store, envelope, "A central rule that goes.")
+    store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": [doomed, keeper]})
+    result = hard_purge(store, tmp_path, doomed, confirmation=doomed)
+    assert result["status"] == "purged", result
+    assert json.loads(row_of(store, verdict_id)["overrides_json"]) == [keeper]
+    assert row_of(store, doomed) is None
+    assert doomed.encode() not in store.path.read_bytes()
