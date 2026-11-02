@@ -15,6 +15,9 @@ from imprint.cli import main
 from imprint.compiler import compile_spools, write_envelope
 from imprint.errors import ValidationError
 from imprint.purge import hard_purge
+from imprint.retrieve import RetrievalEngine, StoreRetrievalSource, retrieve_payload
+from imprint.retrieve.engine import eligible
+from imprint.retrieve.models import RecordScope
 from imprint.store import ImprintStore
 from imprint.store.scope import SCOPE_EXTENSION, write_scope_row
 
@@ -669,3 +672,128 @@ def test_a_derived_node_cannot_put_a_client_on_a_domain_id(tmp_path, capture_env
     with pytest.raises(ValidationError, match="domain_id"):
         rule(store, capture_envelope, payload={"domain_id": "research"},
              scope={"scope_kind": "client", "client_id": "a-client", "resolved_by": "explicit"})
+
+
+# The read side -------------------------------------------------------------
+
+
+def test_the_row_joins_onto_its_record_and_only_its_record(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope, project_id="a-project", delivery="general", delivery_rank=5,
+                       speaker="a-team-member", endorser="the-operator")
+    store.apply_capture(envelope)
+    plain = rule(store, envelope, "A rule with no row.")
+    target = central(store, envelope)
+    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"overrides": [target]})
+    records = {item.record_id: item for item in StoreRetrievalSource(store).retrieval_candidates("x")}
+    assert records[envelope["verdict"]["verdict_id"]].scope == RecordScope(
+        scope_kind="client", resolved_by="explicit", client_id="example-client", project_id="a-project",
+        delivery="general", delivery_rank=5, speaker="a-team-member", endorser="the-operator",
+        overrides=(target,),
+    )
+    assert records[plain].scope is None
+    assert records[target].scope.scope_kind == "central"
+    assert len({records[plain], records[target]}) == 2
+
+
+def test_rows_change_no_delivered_byte(tmp_path, capture_envelope):
+    """A stamp moves the snapshot id. It moves nothing a thread is handed."""
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    verdict_id = capture_envelope["verdict"]["verdict_id"]
+    node_id = rule(store, capture_envelope)
+    store.ratify_node(node_id, ratifier=ACTOR)
+
+    def delivered() -> dict:
+        return retrieve_payload(store, root=tmp_path, session_id="s", prompt="source", refresh=True)
+
+    before = delivered()
+    store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"scope_kind": "held"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={
+        "scope_kind": "client", "client_id": "a-client", "delivery": "specific", "delivery_rank": 1,
+    })
+    after = delivered()
+    assert after["snapshot_id"] != before["snapshot_id"]
+    assert {**after, "snapshot_id": None} == {**before, "snapshot_id": None}
+
+
+def test_the_snapshot_id_holds_on_an_empty_table_and_moves_at_the_first_stamp(tmp_path, capture_envelope):
+    from imprint.retrieve import _snapshot_id
+
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    empty = _snapshot_id(store)
+    assert set(store.snapshot()) == {"store_schema_version", "ontology_schema_version", "nodes", "edges"}
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM record_scope").fetchone()[0] == 0
+    store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "system"})
+    stamped_id = _snapshot_id(store)
+    assert stamped_id != empty
+    assert [row["scope_kind"] for row in store.snapshot()["record_scope"]] == ["system"]
+    store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "held"})
+    assert _snapshot_id(store) != stamped_id
+
+
+def _older_store(tmp_path: Path, envelope: dict) -> ImprintStore:
+    """A store as a build from before the table left it."""
+    store = new_store(tmp_path)
+    store.apply_capture(envelope)
+    with store.connect() as conn:
+        conn.execute("DROP TABLE record_scope")
+    return store
+
+
+def _table_exists(store: ImprintStore) -> bool:
+    with store.connect() as conn:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='record_scope'",
+        ).fetchone() is not None
+
+
+def test_a_missing_table_reads_as_empty_in_the_store(tmp_path, capture_envelope):
+    store = _older_store(tmp_path, capture_envelope)
+    assert set(store.snapshot()) == {"store_schema_version", "ontology_schema_version", "nodes", "edges"}
+    assert "scope" not in store.node_history(capture_envelope["verdict"]["verdict_id"])
+    assert not _table_exists(store)
+
+
+def test_a_missing_table_reads_as_empty_for_retrieval_callers(tmp_path, capture_envelope):
+    """The bridge and ``capture_context.py`` reach the store this way, with no initialize."""
+    store = _older_store(tmp_path, capture_envelope)
+    records = list(StoreRetrievalSource(store).retrieval_candidates("x"))
+    assert records and all(item.scope is None for item in records)
+    assert all(eligible(item, None) for item in records)
+    result = RetrievalEngine(StoreRetrievalSource(store)).retrieve(snapshot_id="x", query="source")
+    assert result.selected_ids
+    assert not _table_exists(store)
+
+
+def test_a_missing_table_reads_as_empty_for_health(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    with store.connect() as conn:
+        conn.execute("DROP TABLE record_scope")
+    main(["--config", str(config), "health"])
+    assert json.loads(capsys.readouterr().out)["status"] in {"healthy", "degraded"}
+    assert not _table_exists(store)
+
+
+def test_a_missing_table_reads_as_empty_for_a_transition_and_a_purge(tmp_path, capture_envelope):
+    store = _older_store(tmp_path, capture_envelope)
+    old, new = rule(store, capture_envelope, "Old."), rule(store, capture_envelope, "New.")
+    _supersede(store, capture_envelope, new, old)
+    result = hard_purge(store, tmp_path, new, confirmation=new)
+    assert result["status"] == "purged"
+
+
+def test_the_first_initialize_adds_the_table_to_an_older_store(tmp_path, capture_envelope):
+    store = _older_store(tmp_path, capture_envelope)
+    store.initialize()
+    assert _table_exists(store)
+    assert rows_of(store) == []
+
+
+def test_store_and_record_versions_stay_put():
+    from imprint.constants import RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION
+
+    assert (STORE_SCHEMA_VERSION, RECORD_SCHEMA_VERSION) == ("3.0.0", "3.0.0")
