@@ -431,6 +431,19 @@ def closing_sentence(text: str) -> str | None:
     return None
 
 
+def stored_closing_sentence(text: str) -> str | None:
+    """Return the last sentence of text no operator typed, read as it stands.
+
+    ``closing_sentence`` reads around quotes and pastes, which are someone else's
+    words in an operator's message. In a document they can be the point of it.
+    """
+    for start, end in reversed(_sentence_spans(text)):
+        sentence = text[start:end].strip()
+        if any(character.isalnum() for character in sentence):
+            return sentence
+    return None
+
+
 def _normalize(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 

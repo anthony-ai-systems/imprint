@@ -374,10 +374,14 @@ class ImprintStore:
         incompatible.
         """
         wal = Path(str(resolved) + "-wal")
-        if not force and wal.exists() and wal.stat().st_size > 0:
-            with wal.open("rb") as handle:
-                if handle.read(4) not in self._WAL_MAGIC:
-                    return "unreplayable"
+        if not force:
+            try:
+                with wal.open("rb") as handle:
+                    head = handle.read(4)
+            except FileNotFoundError:
+                head = b""
+            if head and head not in self._WAL_MAGIC:
+                return "unreplayable"
         conn = sqlite3.connect(f"{resolved.as_uri()}?mode=rw", uri=True, timeout=0)
         try:
             try:

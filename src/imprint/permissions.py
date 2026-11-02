@@ -106,7 +106,11 @@ def secure_file(path: Path) -> Path:
     fails closed.
     """
     target = Path(path)
-    if target.is_symlink() or (target.exists() and not target.is_file()):
+    try:
+        mode = target.lstat().st_mode
+    except FileNotFoundError:
+        return target
+    if not stat.S_ISREG(mode):
         raise OSError(f"private file is not a regular file: {target}")
     if os.name == "nt":
         _secure_windows_paths([target])

@@ -123,7 +123,8 @@ class StoreRetrievalSource:
     def __init__(self, store: ImprintStore):
         self.store = store
 
-    def retrieval_candidates(self, snapshot_id: str) -> Sequence[RetrievalRecord]:
+    def retrieval_candidates(self, snapshot_id: str, *, only: str | None = None) -> Sequence[RetrievalRecord]:
+        """Project every current record, or just ``only``, the one a lookup asks for."""
         del snapshot_id  # snapshot identity is enforced by the caller/receipt.
         nodes = self.store.current_nodes()
         edges = self.store.current_edges()
@@ -147,7 +148,7 @@ class StoreRetrievalSource:
 
         records: list[RetrievalRecord] = []
         for node in nodes:
-            if node["node_type"] not in _SEMANTIC_TYPES:
+            if node["node_type"] not in _SEMANTIC_TYPES or (only is not None and node["node_id"] != only):
                 continue
             payload = node["payload"]
             evidence = tuple(sorted(set(node["evidence"])))

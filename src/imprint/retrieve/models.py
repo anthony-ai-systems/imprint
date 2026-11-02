@@ -82,6 +82,9 @@ class RetrievalConfig:
     allow_higher_budget: bool = False
     tokenizer_version: str = "lexical-v1"
     authority_mode: AuthorityMode = "authoritative"
+    # Deliver authoritative retrieval on short lines. Analytical output stays whole,
+    # because the labels on a whole line are what keep its partitions apart.
+    short_lines: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,3 +100,5 @@ class RetrievalResult:
     authority_mode: AuthorityMode = "authoritative"
     requested_partitions: tuple[str, ...] = ()
     selected_by_partition: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Delivered with their text cut. A route that picks one settles if it arrives whole.
+    retry_ids: tuple[str, ...] = ()

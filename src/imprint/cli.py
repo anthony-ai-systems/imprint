@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import signal
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -18,7 +19,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
-from .config import SELECTOR_STATE_LIMIT, load_config, resolved_operator_root
+from .config import (
+    SELECTOR_STATE_LIMIT,
+    SHORT_LINES_PROMPT,
+    SHORT_LINES_SESSION_START,
+    load_config,
+    resolved_operator_root,
+)
 from .errors import ImprintError, ValidationError
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
@@ -530,8 +537,10 @@ def build_parser() -> argparse.ArgumentParser:
     consent_revoke.add_argument("--reason", required=True)
     consent_revoke.add_argument("--revoked-at")
 
-    history = subs.add_parser("history", help="show immutable versions and dispositions")
+    history = subs.add_parser("history", help="show immutable versions, dispositions and the whole retrieval line")
     history.add_argument("node_id")
+    details = subs.add_parser("details", help="show one record's whole retrieval line")
+    details.add_argument("record_id")
 
     verdict = subs.add_parser("verdict", help="append later WHY or reinforcement evidence")
     verdict_subs = verdict.add_subparsers(dest="verdict_action", required=True)
@@ -656,6 +665,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "version":
             from . import __version__
             print(__version__)
+            return 0
+        if args.command == "details":
+            # A lookup is a read: it creates nothing and never waits on the write lock.
+            from .retrieve import whole_line
+            line = None
+            try:
+                store.path.lstat()  # unlike exists(), this reports a denied path on every Python
+            except FileNotFoundError:
+                pass  # no store yet, so no record
+            else:
+                try:
+                    line = whole_line(store, args.record_id, complete_only=True)
+                except (sqlite3.Error, json.JSONDecodeError) as exc:  # a store that cannot be read says so itself
+                    raise ValidationError("existing store is corrupt or unreadable") from exc
+            if line is None:
+                raise ValidationError("unknown record")
+            _write_json(line)
             return 0
         if args.command == "ratify":
             # Ratification writes authority: name the store explicitly, and never mint an identity.
@@ -933,8 +959,10 @@ def main(argv: list[str] | None = None) -> int:
             _write_json({"status": "consent_revoked", "event_id": event_id, "grant_id": args.grant_id})
             return 0
         if args.command == "history":
+            from .retrieve import whole_line
             store.initialize()
-            _write_json({"status": "ok", "history": store.node_history(args.node_id)})
+            history = store.node_history(args.node_id)
+            _write_json({"status": "ok", "history": {**history, "whole_line": whole_line(store, args.node_id)}})
             return 0
         if args.command == "verdict":
             store.initialize()
@@ -1130,6 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
                 result = retrieve_payload(
                     store, root=root, session_id=session, prompt="",
                     budget=int(config["context_budget_bytes"]), refresh=refresh,
+                    short_lines=config[SHORT_LINES_SESSION_START],
                 )
                 response = {
                     "hook_schema_version": "1.0.0",
@@ -1170,6 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
                         explicit_domain=domain, budget=int(config["context_budget_bytes"]),
                         selector=config["selector"], mode=selector_mode,
                         deadline=started + HOOK_SELECTOR_BUDGET_SECONDS,
+                        short_lines=config[SHORT_LINES_PROMPT],
                     )
                     selector_fields = decision.fields()
                     context = decision.context
@@ -1211,6 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt=prompt, explicit_domain=domain,
                     budget=int(config["context_budget_bytes"]), domain_only=True,
                     context=context, exclude_ids=exclude_ids,
+                    short_lines=config[SHORT_LINES_PROMPT],
                 )
                 response = {
                     "hook_schema_version": "1.0.0",

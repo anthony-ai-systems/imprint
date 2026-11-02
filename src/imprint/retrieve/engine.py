@@ -6,11 +6,18 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from imprint.capture.detector import closing_sentence, feedback_sentences, operator_words, stored_words
+from imprint.capture.detector import (
+    closing_sentence,
+    feedback_sentences,
+    operator_words,
+    stored_closing_sentence,
+    stored_words,
+)
 
 from .models import (
     CHOSEN_FUTURE_PARTITION,
     DEFAULT_FUTURE_PARTITION,
+    JUDGMENT_PARTITION,
     ONTOLOGY_PARTITIONS,
     AuthorityMode,
     RetrievalConfig,
@@ -121,6 +128,9 @@ def _rank_key(record: RetrievalRecord, query: str, selected_domain: str | None, 
 
 
 COMPACT_TEXT_BYTES = 400
+SHORT_LINE_DETAIL = "imprint details <record_id>"
+# What ``render_short(lookup=True)`` adds to a line.
+SHORT_LINE_LOOKUP_BYTES = len(f',"detail":"{SHORT_LINE_DETAIL}"')
 
 
 def _section_limits(total: int) -> dict[str, int]:
@@ -172,12 +182,35 @@ def _cut(text: str, limit: int = COMPACT_TEXT_BYTES) -> str:
     return text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
 
 
-def _join_sentences(sentences: Sequence[str]) -> str:
+_QUOTE_RESIDUE = "\"'\u201d\u2019) "
+
+
+def _head_and_end(sentence: str, limit: int) -> str:
+    """Cut text to the limit and keep how it ended, which a plain cut would lose.
+
+    One sentence can hold a whole quotation, and a verdict that follows it is then
+    the part a plain cut drops. The ending is read from this text alone, so nothing
+    a caller already set aside can come back through it, and it starts past any
+    closing quote left from the sentence split.
+    """
+    if _size(sentence) <= limit:
+        return sentence
+    closing = stored_closing_sentence(sentence)
+    if closing is None:
+        return _cut(sentence, limit)
+    closing = closing.lstrip(_QUOTE_RESIDUE)
+    if _size(closing) > limit // 2:
+        return _cut(sentence, limit)
+    return f"{_cut(sentence, limit - _size(closing) - 1)}\n{closing}"
+
+
+def _join_sentences(sentences: Sequence[str], *, keep_end: bool = False) -> str:
     """Join sentences in order within the limit, nearest the end first.
 
     The end is where a message overrules what came before it, so the last sentence
     is always there and earlier ones fill backward from it. A last sentence too
-    long for half the limit leaves that half to the others and is cut to fit.
+    long for half the limit leaves that half to the others and is cut to fit, from
+    its start unless ``keep_end`` asks for its head and its ending.
     """
     room = COMPACT_TEXT_BYTES - min(_size(sentences[-1]), COMPACT_TEXT_BYTES // 2)
     kept: list[str] = []
@@ -187,7 +220,8 @@ def _join_sentences(sentences: Sequence[str]) -> str:
             kept.append(sentence)
             room -= cost
     used = sum(_size(sentence) + 1 for sentence in kept)
-    return "\n".join((*reversed(kept), _cut(sentences[-1], COMPACT_TEXT_BYTES - used)))
+    fit = _head_and_end if keep_end else _cut
+    return "\n".join((*reversed(kept), fit(sentences[-1], COMPACT_TEXT_BYTES - used)))
 
 
 def _opening_with_close(text: str) -> str:
@@ -204,7 +238,7 @@ def _opening_with_close(text: str) -> str:
     return f"{_cut(opening, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
 
 
-def _compact_text(text: str, rules: Sequence[str] = ()) -> tuple[str, str]:
+def _compact_text(text: str, rules: Sequence[str] = (), *, keep_end: bool = False) -> tuple[str, str]:
     """Return what a compact line says, and what that text is."""
     if _size(text) <= COMPACT_TEXT_BYTES:
         return text, "whole"
@@ -215,7 +249,7 @@ def _compact_text(text: str, rules: Sequence[str] = ()) -> tuple[str, str]:
         closing = closing_sentence(text)
         if closing is not None and closing != sentences[-1]:
             sentences.append(closing)
-        return _join_sentences(sentences), "feedback_sentences"
+        return _join_sentences(sentences, keep_end=keep_end), "feedback_sentences"
     return _opening_with_close(text), "opening"
 
 
@@ -244,6 +278,79 @@ def render_compact(
         "text_basis": basis,
         "text_complete": text == record.text,
     }, selector)
+
+
+def whole_text_fits(record: RetrievalRecord) -> bool:
+    """Whether a compact or short line can say all of a record's text."""
+    return _size(record.text) <= COMPACT_TEXT_BYTES
+
+
+def _rule_with_close(rules: Sequence[str], closing: str | None) -> str:
+    """Return a standing rule's sentences and how its record ended.
+
+    The end is where a message overrules what came before it, and a reserved mark
+    says the line stands, so a rule never goes out without it. The closing takes at
+    most half the limit, so the rule always has the rest.
+    """
+    said = "\n".join(rules)
+    if closing is None or closing in said:
+        return _head_and_end(said, COMPACT_TEXT_BYTES)
+    close = _cut(closing, COMPACT_TEXT_BYTES // 2)
+    return f"{_cut(said, COMPACT_TEXT_BYTES - _size(close) - 1)}\n{close}"
+
+
+def _stored_opening(text: str) -> str:
+    """Return the start of stored text as it stands, and how it ended if it stops short."""
+    stored = text.strip()
+    head = _cut(stored)
+    closing = stored_closing_sentence(stored)
+    if closing is None or closing in head or _size(closing) > COMPACT_TEXT_BYTES // 2:
+        return head
+    return f"{_cut(stored, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
+
+
+def _short_text(record: RetrievalRecord, rules: Sequence[str]) -> tuple[str, str]:
+    """Return what a short line says, and what that text is.
+
+    The compact rules read an operator's message, where a quote is someone else's
+    words. A short line also carries documents and imports, where a quote can be the
+    rule itself, so only a captured record is read that way.
+    """
+    if whole_text_fits(record):
+        return record.text, "whole"
+    captured = record.provenance_status == "captured"
+    if rules:
+        ending = closing_sentence if captured else stored_closing_sentence
+        return _rule_with_close(rules, ending(record.text)), "rule_sentences"
+    if captured:
+        return _compact_text(record.text, keep_end=True)
+    return _stored_opening(record.text), "stored_text"
+
+
+def render_short(
+    record: RetrievalRecord, *, selector: dict[str, object] | None = None, rules: Sequence[str] = (),
+    lookup: bool = False,
+) -> bytes:
+    """Render a record's words with only what a reader needs to trust and find it.
+
+    This shapes one delivery only. The text is always the record's own words:
+    ``_short_text`` says how a long one is cut. ``authority`` says how far to trust it
+    and ``record_id`` is what ``imprint details`` takes to return the rest, so neither
+    is ever left off. ``partition`` appears on anything but a judgment, because a
+    declared claim and an observed result can read alike under the same authority.
+    ``text_basis`` and ``text_complete`` appear only on text that was cut, so their
+    absence means the text is all there. ``lookup`` adds ``detail``, the form of that
+    command, which one line of a payload can say for all of them.
+    """
+    text, basis = _short_text(record, rules)
+    value: dict[str, object] = {"authority": _authority(record), "record_id": record.record_id, "text": text}
+    if record.ontology_partition != JUDGMENT_PARTITION:
+        value["partition"] = record.ontology_partition
+    if lookup:
+        value["detail"] = SHORT_LINE_DETAIL
+    if not whole_text_fits(record):
+        value.update(text_basis=basis, text_complete=False)
+    return _line(value, selector)
 
 
 class RetrievalEngine:
@@ -351,14 +458,28 @@ class RetrievalEngine:
         limits = _section_limits(self.config.total_budget_bytes)
         carry = 0
         selected: list[tuple[str, bytes]] = []
+        retry_ids: list[str] = []
         section_bytes: dict[str, int] = {"core": 0, "general": 0, "domain": 0}
+        short = self.config.short_lines and mode == "authoritative"
         for section in ("core", "general", "domain"):
             available = limits[section] + carry
+            full = False
             for item in by_section[section]:
-                rendered = _render(item)
+                cut = short and not whole_text_fits(item)
+                if cut and full:
+                    # Cutting reads all of a long record and this scan meets every
+                    # eligible one, so a section that has refused a line stops paying.
+                    continue
+                rendered = render_short(item, lookup=not selected) if short else _render(item)
                 if len(rendered) <= available - section_bytes[section]:
                     selected.append((item.record_id, rendered))
                     section_bytes[section] += len(rendered)
+                    if cut:
+                        # Every cut record, because this budget is not the one a
+                        # later pick spends: that route settles what can arrive whole.
+                        retry_ids.append(item.record_id)
+                else:
+                    full = True
             carry = available - section_bytes[section]
 
         payload = b"".join(value for _, value in selected)
@@ -383,4 +504,5 @@ class RetrievalEngine:
             authority_mode=mode,
             requested_partitions=partitions,
             selected_by_partition=selected_by_partition,
+            retry_ids=tuple(retry_ids),
         )
