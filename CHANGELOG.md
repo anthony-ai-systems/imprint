@@ -7,7 +7,8 @@
   short line keeps `authority`, `record_id`, the record's words and, on anything but
   a judgment, `partition`, and the first in a payload says how to look up the rest:
   `imprint details <record_id>`, a new command that returns one record's whole line
-  and nothing else. `imprint history` stays operator-only. At 4,096 bytes with 160
+  and nothing else. `imprint history` is meant for the operator, nothing enforces
+  that yet, and a compact line's `detail` still points at it. At 4,096 bytes with 160
   bytes of plain text, 15 rules fit a prompt instead of 5, and 11 fit session start
   instead of 4, and real text should hold about 14 and 10 to 11. A
   pick a short line would cut goes whole when the budget has room for it. Under Jev, a

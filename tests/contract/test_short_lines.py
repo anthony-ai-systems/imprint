@@ -7,6 +7,7 @@ import json
 import os
 import random
 import shlex
+import sqlite3
 import subprocess
 import sys
 import uuid
@@ -1172,10 +1173,12 @@ def test_history_returns_the_line_a_whole_delivery_carries(tmp_path, monkeypatch
     assert found["ontology"]["path"] == ["judgment", "Verdict"]
 
 
-def proposal(store: ImprintStore) -> str:
+def proposal(
+    store: ImprintStore, node_type: str = "Principle", status: str = "inferred", tier: str = "inferred_candidate",
+) -> str:
     return store.append_derived_node(
-        node_type="Principle", payload={"statement": "Report failures explicitly."},
-        provenance_status="inferred", authority_tier="inferred_candidate",
+        node_type=node_type, payload={"statement": "Report failures explicitly."},
+        provenance_status=status, authority_tier=tier,
         evidence_ids=[item["node_id"] for item in store.current_nodes(["Evidence"])],
         operator_id=store.current_nodes(["Evidence"])[0]["operator_id"],
         valid_from="2026-07-14T18:00:00Z", proposed_by="contract-test",
@@ -1270,7 +1273,9 @@ UNKNOWN_RECORD = json.dumps({"error": "unknown record", "error_type": "Validatio
 
 def details(config: Path, record_id: str, capsys) -> tuple[int, str]:
     code = cli.main(["--config", str(config), "details", record_id])
-    return code, capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return code, captured.out
 
 
 def run(config: Path, capsys, *words: str) -> None:
@@ -1352,13 +1357,18 @@ def test_every_id_without_a_line_answers_the_same(tmp_path, monkeypatch, capsys)
     config, root = write_config(tmp_path)
     seed(config, monkeypatch, capsys)
     store = ImprintStore(root / "imprint.db")
+    evidence = store.current_nodes(["Evidence"])[0]["node_id"]
     replacement, tombstoned, superseded = (capture(root, f"{WORDS} {n}")["verdict"]["verdict_id"] for n in range(3))
+    evidence_closed, case_closed = capture(root, f"{WORDS} 3"), capture(root, f"{WORDS} 4")
+    outlived = evidence_closed["verdict"]["verdict_id"], case_closed["verdict"]["verdict_id"]
     rejected = proposal(store)
     bad = unreadable(store)
-    for node_id in (tombstoned, superseded, rejected):
+    for node_id in (tombstoned, superseded, rejected, *outlived):
         assert details(config, node_id, capsys)[0] == 0
-    evidence = store.current_nodes(["Evidence"])[0]["node_id"]
     run(config, capsys, "delete", "tombstone", "--scope", tombstoned, "--reason", "synthetic")
+    run(config, capsys, "delete", "tombstone", "--scope", evidence_closed["provenance"]["evidence_ids"][0],
+        "--reason", "synthetic")
+    run(config, capsys, "delete", "tombstone", "--scope", case_closed["case"]["case_id"], "--reason", "synthetic")
     run(config, capsys, "review", "reject", rejected, "--by", "operator", "--reason", "too broad")
     run(config, capsys, "transition", "supersede", replacement, superseded,
         "--reason", "synthetic", "--evidence", evidence, "--by", "operator")
@@ -1371,22 +1381,58 @@ def test_every_id_without_a_line_answers_the_same(tmp_path, monkeypatch, capsys)
         "rejected": rejected,
         "superseded": superseded,
         "unreadable": bad,
+        "evidence closed": outlived[0],
+        "case closed": outlived[1],
     }
     assert {kind: details(config, node_id, capsys) for kind, node_id in ids.items()} == dict.fromkeys(
         ids, (2, UNKNOWN_RECORD),
     )
     assert details(config, replacement, capsys)[0] == 0
+    for node_id in outlived:
+        assert history(config, node_id, capsys)["whole_line"]["record_id"] == node_id
 
 
 @pytest.mark.parametrize("deferred", [False, True])
-def test_a_proposal_answers_with_authority_inferred(deferred, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("node_type, status, tier, authority", [
+    ("Principle", "inferred", "inferred_candidate", "inferred"),
+    ("Principle", "extracted", "observed_candidate", "extracted"),
+    ("Principle", "extracted", "imported_floor", "imported_floor"),
+    ("Proposal", "inferred", "inferred_candidate", None),
+])
+def test_a_record_awaiting_review_answers_and_a_proposal_node_does_not(
+    node_type, status, tier, authority, deferred, tmp_path, monkeypatch, capsys,
+):
     config, root = write_config(tmp_path)
     seed(config, monkeypatch, capsys)
-    node_id = proposal(ImprintStore(root / "imprint.db"))
+    node_id = proposal(ImprintStore(root / "imprint.db"), node_type, status, tier)
     if deferred:
         run(config, capsys, "review", "defer", node_id, "--by", "operator", "--reason", "not yet")
     code, out = details(config, node_id, capsys)
-    assert (code, json.loads(out)["authority"]) == (0, "inferred")
+    if authority is None:
+        assert (code, out) == (2, UNKNOWN_RECORD)
+    else:
+        assert (code, json.loads(out)["authority"]) == (0, authority)
+
+
+def test_details_on_a_fresh_root_leaves_no_files(tmp_path, capsys):
+    config, _ = write_config(tmp_path)
+    before = sorted(tmp_path.rglob("*"))
+    assert details(config, "urn:imprint:verdict:unknown", capsys) == (2, UNKNOWN_RECORD)
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_details_returns_the_line_under_a_held_write_lock(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    (verdict,) = ImprintStore(root / "imprint.db").current_nodes(["Verdict"])
+    holder = sqlite3.connect(root / "imprint.db", isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        code, out = details(config, verdict["node_id"], capsys)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert (code, json.loads(out)["record_id"]) == (0, verdict["node_id"])
 
 
 def test_the_detail_on_a_short_line_runs_as_it_is_written(tmp_path, monkeypatch, capsys):

@@ -665,6 +665,18 @@ def main(argv: list[str] | None = None) -> int:
             from . import __version__
             print(__version__)
             return 0
+        if args.command == "details":
+            # A lookup is a read: it creates nothing and never waits on the write lock.
+            from .retrieve import whole_line
+            line = None
+            if store.path.exists():
+                with store.connect():  # a store that cannot be read says so itself
+                    pass
+                line = whole_line(store, args.record_id, complete_only=True)
+            if line is None:
+                raise ValidationError("unknown record")
+            _write_json(line)
+            return 0
         if args.command == "ratify":
             # Ratification writes authority: name the store explicitly, and never mint an identity.
             if args.config is None or not args.config.is_file():
@@ -945,14 +957,6 @@ def main(argv: list[str] | None = None) -> int:
             store.initialize()
             history = store.node_history(args.node_id)
             _write_json({"status": "ok", "history": {**history, "whole_line": whole_line(store, args.node_id)}})
-            return 0
-        if args.command == "details":
-            from .retrieve import whole_line
-            store.initialize()
-            line = whole_line(store, args.record_id)
-            if line is None:
-                raise ValidationError("unknown record")
-            _write_json(line)
             return 0
         if args.command == "verdict":
             store.initialize()

@@ -151,7 +151,7 @@ def reset_payload_delivery(*, root: Path, session_id: str) -> None:
     DeliveryReceipts(Path(root) / "receipts").reset_session(_session_ref(session_id))
 
 
-def whole_line(store, record_id: str) -> dict[str, object] | None:
+def whole_line(store, record_id: str, *, complete_only: bool = False) -> dict[str, object] | None:
     """Return the whole retrieval line for one record, or None if it has none.
 
     A record's versions hold no ontology labels and do not say which evidence is a
@@ -159,13 +159,20 @@ def whole_line(store, record_id: str) -> dict[str, object] | None:
     what a whole line says. Nodes retrieval never delivers, such as Evidence, have
     none, and nor does a record closed since, whose versions and dispositions say why.
 
-    Only this record is projected, so a bad neighbour cannot break the lookup. This is
-    the tool for looking at a record retrieval fails on, so that one reads as None
-    too, and its versions show why.
+    ``complete_only`` also gives None for a record delivery refuses as incomplete, such
+    as a Verdict whose Case or Evidence closed, so closed words do not stay readable
+    through its id. ``imprint history`` leaves it off.
+
+    Only this record is projected, so a neighbour retrieval cannot project does not
+    break the lookup, though a row whose stored JSON cannot be parsed breaks every one.
+    This is the tool for looking at a record retrieval fails on, so that one reads as
+    None too, and its versions show why.
     """
     try:
         records = StoreRetrievalSource(store).retrieval_candidates("", only=record_id)
-        return json.loads(_render(records[0])) if records else None
+        if not records or (complete_only and not records[0].provenance_complete):
+            return None
+        return json.loads(_render(records[0]))
     except Exception:
         return None
 
