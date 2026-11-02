@@ -1125,6 +1125,36 @@ def test_a_record_closed_since_delivery_says_so_instead_of_a_line(tmp_path, monk
     assert found["whole_line"] is None
 
 
+def unreadable(store: ImprintStore) -> str:
+    """A stored record retrieval cannot project, which the store accepts."""
+    evidence = store.current_nodes(["Evidence"])
+    return store.append_derived_node(
+        node_type="Principle", payload={"statement": "Report failures explicitly.", "recurrence_count": None},
+        provenance_status="inferred", authority_tier="inferred_candidate",
+        evidence_ids=[item["node_id"] for item in evidence], operator_id=evidence[0]["operator_id"],
+        valid_from="2026-07-14T18:00:00Z", proposed_by="contract-test",
+    )
+
+
+def test_one_unreadable_record_does_not_break_the_lookup_of_another(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    store = ImprintStore(root / "imprint.db")
+    unreadable(store)
+    (verdict,) = store.current_nodes(["Verdict"])
+    found = history(config, verdict["node_id"], capsys)
+    assert found["versions"] and found["whole_line"]["record_id"] == verdict["node_id"]
+
+
+def test_a_record_retrieval_cannot_read_still_shows_its_history(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    node_id = unreadable(ImprintStore(root / "imprint.db"))
+    found = history(config, node_id, capsys)
+    assert found["versions"][-1]["payload"]["statement"] == "Report failures explicitly."
+    assert found["whole_line"] is None
+
+
 def test_an_unknown_record_still_fails(tmp_path, monkeypatch, capsys):
     config, _ = write_config(tmp_path)
     seed(config, monkeypatch, capsys)

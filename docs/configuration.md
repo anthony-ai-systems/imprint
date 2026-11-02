@@ -295,8 +295,10 @@ switches off delivery is unchanged.
 - `imprint history <record_id>` returns what a short line leaves out. Its
   `whole_line` is the record's whole retrieval line, with `case_ids`,
   `case_summaries`, `evidence_ids`, `ontology` and `source_receipt_ids`. It is `null`
-  for a node retrieval never delivers, such as Evidence, and for a record closed
-  since, whose `versions` and `dispositions` say why.
+  for a node retrieval never delivers, such as Evidence, for a record closed since,
+  and for a record retrieval cannot read, whose `versions` and `dispositions` say
+  why. Only the record asked for is read that way, so one bad record does not stop
+  the lookup of another.
 - A rule whose whole text went out on a short line counts as delivered, so it is
   not sent again. One whose text was cut is listed in `retry_ids`, and when it is
   picked again it arrives on a whole line, as long as there is room, and is then

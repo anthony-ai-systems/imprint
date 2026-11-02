@@ -158,11 +158,16 @@ def whole_line(store, record_id: str) -> dict[str, object] | None:
     source receipt, so this reads the projection delivery reads, and a lookup says
     what a whole line says. Nodes retrieval never delivers, such as Evidence, have
     none, and nor does a record closed since, whose versions and dispositions say why.
+
+    Only this record is projected, so a bad neighbour cannot break the lookup. This is
+    the tool for looking at a record retrieval fails on, so that one reads as None
+    too, and its versions show why.
     """
-    for record in StoreRetrievalSource(store).retrieval_candidates(""):
-        if record.record_id == record_id:
-            return json.loads(_render(record))
-    return None
+    try:
+        records = StoreRetrievalSource(store).retrieval_candidates("", only=record_id)
+        return json.loads(_render(records[0])) if records else None
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
