@@ -400,6 +400,23 @@ _SCOPE_CLEARS = {
 }
 
 
+def _add_scope_flags(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--scope-kind", help="client, system, unresolved or held")
+    command.add_argument("--scope-client")
+    command.add_argument("--scope-project")
+
+
+def _flagged_scope(args: argparse.Namespace) -> dict[str, str | None] | None:
+    if args.scope_kind is None:
+        if args.scope_client is not None or args.scope_project is not None:
+            raise ValidationError("--scope-client and --scope-project need --scope-kind")
+        return None
+    return {
+        "scope_kind": args.scope_kind, "client_id": args.scope_client,
+        "project_id": args.scope_project, "resolved_by": RESOLVED_EXPLICIT,
+    }
+
+
 def _scope_changes(args: argparse.Namespace) -> dict[str, object]:
     """What ``imprint scope set`` names. Anything it does not name stays as it is."""
     changes = dict(_SCOPE_CLEARS[name] for name in args.clear)
@@ -525,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     ontology_node = ontology_subs.add_parser("add-node")
     ontology_node.add_argument("--input", type=Path, required=True)
     ontology_node.add_argument("--valid-from", required=True)
+    _add_scope_flags(ontology_node)
     ontology_relation = ontology_subs.add_parser("add-relation")
     ontology_relation.add_argument("--input", type=Path, required=True)
     ontology_relation.add_argument("--valid-from", required=True)
@@ -538,6 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
         add = command_subs.add_parser("add")
         add.add_argument("--input", type=Path, required=True)
         add.add_argument("--valid-from", required=True)
+        _add_scope_flags(add)
 
     consent = subs.add_parser("consent", help="grant, inspect, or revoke durable capture consent")
     consent_subs = consent.add_subparsers(dest="consent_action", required=True)
@@ -929,7 +948,9 @@ def main(argv: list[str] | None = None) -> int:
             if value.get("operator_id") != store.expected_operator_id:
                 raise ValidationError("ontology contract operator does not match configured identity")
             if args.ontology_action == "add-node":
-                identifier = store.append_semantic_node(value, valid_from=args.valid_from)
+                identifier = store.append_semantic_node(
+                    value, valid_from=args.valid_from, scope=_flagged_scope(args),
+                )
                 _write_json({"status": "semantic_node_added", "node_id": identifier})
             else:
                 identifier = store.append_semantic_relation(value, valid_from=args.valid_from)
@@ -943,7 +964,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValidationError(f"{args.command} add requires one {expected_type} contract")
             if value.get("operator_id") != store.expected_operator_id:
                 raise ValidationError(f"{args.command} contract operator does not match configured identity")
-            identifier = store.append_semantic_node(value, valid_from=args.valid_from)
+            identifier = store.append_semantic_node(
+                value, valid_from=args.valid_from, scope=_flagged_scope(args),
+            )
             _write_json({"status": f"{args.command}_added", "node_id": identifier})
             return 0
         if args.command == "consent":

@@ -797,3 +797,71 @@ def test_store_and_record_versions_stay_put():
     from imprint.constants import RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION
 
     assert (STORE_SCHEMA_VERSION, RECORD_SCHEMA_VERSION) == ("3.0.0", "3.0.0")
+
+
+# Table 6: the other paths that make a record -------------------------------
+
+
+def _principle_contract(operator_id: str, evidence_id: str, node_type: str = "Principle") -> dict:
+    from imprint.ratify import _contract
+
+    item = {"node_type": node_type, "statement": "A synthetic principle.", "evidence_ids": [evidence_id]}
+    if node_type == "Domain":
+        item.update(domain_id="synthetic-domain", public_label="Synthetic")
+    return _contract(item, new_urn(node_type.lower()), operator_id, "synthetic-model")
+
+
+def _write_input(tmp_path: Path, contract: dict) -> str:
+    path = tmp_path / "contract.json"
+    path.write_text(json.dumps(contract))
+    return str(path)
+
+
+def test_an_ontology_flag_stamps_the_new_node_and_stays_out_of_its_event(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
+    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
+                 "--valid-from", VALID_FROM, "--scope-kind", "client", "--scope-client", "a-client",
+                 "--scope-project", "a-project"]) == 0
+    node_id = json.loads(capsys.readouterr().out)["node_id"]
+    row = row_of(store, node_id)
+    assert (row["scope_kind"], row["client_id"], row["project_id"], row["resolved_by"]) == (
+        "client", "a-client", "a-project", "explicit")
+    with store.connect() as conn:
+        event = conn.execute("SELECT payload_json FROM events WHERE event_id=?", (row["event_id"],)).fetchone()[0]
+    assert "a-client" not in event
+
+
+def test_an_ontology_add_with_no_flag_writes_no_row(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
+    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
+                 "--valid-from", VALID_FROM]) == 0
+    capsys.readouterr()
+    assert rows_of(store) == []
+
+
+def test_central_is_refused_on_an_ontology_flag(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
+    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
+                 "--valid-from", VALID_FROM, "--scope-kind", "central"]) == 2
+    assert "only at ratification" in json.loads(capsys.readouterr().out)["error"]
+    assert contract["node_id"] not in {node["node_id"] for node in store.current_nodes()}
+
+
+def test_ontology_scope_flags_need_a_kind_and_a_retrievable_type(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    evidence_id = capture_envelope["evidence"][0]["evidence_id"]
+    contract = _principle_contract(capture_envelope["operator_id"], evidence_id)
+    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
+                 "--valid-from", VALID_FROM, "--scope-client", "a-client"]) == 2
+    assert "need --scope-kind" in json.loads(capsys.readouterr().out)["error"]
+    domain = _principle_contract(capture_envelope["operator_id"], evidence_id, "Domain")
+    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, domain),
+                 "--valid-from", VALID_FROM, "--scope-kind", "system"]) == 2
+    assert "not retrievable" in json.loads(capsys.readouterr().out)["error"]
