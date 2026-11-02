@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from copy import deepcopy
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from imprint.capture import CapturePipeline
 from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.cli import main
 from imprint.compiler import compile_spools, write_envelope
+from imprint.constants import ONTOLOGY_SCHEMA_VERSION
 from imprint.errors import ValidationError
 from imprint.ingest import IngestCandidate, IngestService, import_legacy_principles
 from imprint.portability.jsonld import _scope_digest, export_jsonld, import_jsonld, semantic_digest
@@ -69,10 +71,8 @@ def rule(store: ImprintStore, envelope: dict, text: str = "Say which source fail
     )
 
 
-def central(store: ImprintStore, envelope: dict, text: str = "Name the failed source.") -> str:
-    """No build writes a central row yet, so a test puts one on a ratified record."""
-    node_id = rule(store, envelope, text)
-    event_id = store.ratify_node(node_id, ratifier=ACTOR)
+def central_row(store: ImprintStore, node_id: str, event_id: str) -> None:
+    """No build writes a central row yet, so a test writes one directly."""
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         write_scope_row(conn, {
@@ -81,6 +81,12 @@ def central(store: ImprintStore, envelope: dict, text: str = "Name the failed so
             "overrides_json": "[]", "resolved_by": "ratified", "event_id": event_id,
             "stamped_at": VALID_FROM,
         })
+
+
+def central(store: ImprintStore, envelope: dict, text: str = "Name the failed source.") -> str:
+    """A central row on a ratified record."""
+    node_id = rule(store, envelope, text)
+    central_row(store, node_id, store.ratify_node(node_id, ratifier=ACTOR))
     return node_id
 
 
@@ -379,7 +385,12 @@ def test_scope_set_refuses_an_override_that_is_not_a_current_central_record(tmp_
     plain = rule(store, envelope, "Not central.")
     closed = central(store, envelope, "Closed central.")
     store.tombstone_node(closed, reason="Withdrawn.")
-    for override in (plain, closed, verdict_id):
+    ratified = rule(store, envelope, "Ratified, with a row that is not central.")
+    store.ratify_node(ratified, ratifier=ACTOR)
+    store.set_record_scope(ratified, actor_id=ACTOR, changes={"scope_kind": "system"})
+    unratified = rule(store, envelope, "Central row, never ratified.")
+    central_row(store, unratified, "gone")
+    for override in (plain, closed, verdict_id, ratified, unratified):
         with pytest.raises(ValidationError, match="current central"):
             store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": [override]})
 
@@ -823,6 +834,47 @@ def test_the_first_initialize_adds_the_table_to_an_older_store(tmp_path, capture
     assert rows_of(store) == []
 
 
+def _write_directly(store: ImprintStore, **fields) -> None:
+    """Past every Python check, as a direct writer would."""
+    row = {
+        "node_id": new_urn("rule"), "scope_kind": "system", "client_id": None, "project_id": None,
+        "delivery": None, "delivery_rank": None, "speaker": None, "endorser": None, "overrides_json": "[]",
+        "resolved_by": "test", "event_id": "gone", "stamped_at": VALID_FROM, **fields,
+    }
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        write_scope_row(conn, row)
+
+
+@pytest.mark.parametrize("fields", [
+    {"scope_kind": "shared"},
+    {"scope_kind": "client", "client_id": "a-client", "delivery": "broad"},
+    {"scope_kind": "client"},
+    {"scope_kind": "held", "client_id": "a-client"},
+    {"delivery": "general"},
+    {"scope_kind": "unresolved", "delivery": "specific"},
+    {"scope_kind": "held", "delivery": "specific"},
+], ids=repr)
+def test_the_table_itself_refuses_what_python_refuses(tmp_path, fields):
+    """``CREATE TABLE IF NOT EXISTS`` cannot change a CHECK later, so each one is pinned here."""
+    store = new_store(tmp_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        _write_directly(store, **fields)
+    assert rows_of(store) == []
+
+
+@pytest.mark.parametrize("fields", [
+    {"delivery": "specific"},
+    {"scope_kind": "held"},
+    {"scope_kind": "client", "client_id": "a-client", "delivery": "general"},
+    {"scope_kind": "central", "delivery": "specific"},
+], ids=repr)
+def test_the_table_takes_what_the_spec_allows(tmp_path, fields):
+    store = new_store(tmp_path)
+    _write_directly(store, **fields)
+    assert len(rows_of(store)) == 1
+
+
 def test_store_and_record_versions_stay_put():
     from imprint.constants import RECORD_SCHEMA_VERSION, STORE_SCHEMA_VERSION
 
@@ -847,13 +899,80 @@ def _write_input(tmp_path: Path, contract: dict) -> str:
     return str(path)
 
 
-def test_an_ontology_flag_stamps_the_new_node_and_stays_out_of_its_event(tmp_path, capsys, capture_envelope):
+def _consent_grant(store: ImprintStore, operator_id: str) -> str:
+    return store.append_semantic_node({
+        "record_schema_version": ONTOLOGY_SCHEMA_VERSION, "node_id": new_urn("consentgrant"),
+        "node_type": "ConsentGrant", "operator_id": operator_id,
+        "payload": {
+            "ontology_schema_version": ONTOLOGY_SCHEMA_VERSION, "operator_id": operator_id,
+            "source_class": "transcript", "purposes": ["behavioral_observation", "outcome_learning"],
+            "sensitivity": "sensitive", "allowed_operations": ["store"],
+            "retention": {"mode": "until_revoked", "days": None, "delete_on_revoke": False},
+            "effective_from": "2026-07-01T00:00:00Z", "effective_to": None,
+            "granted_by": operator_id, "granted_at": "2026-07-01T00:00:00Z",
+            "revoked_at": None, "revocation_reason": None, "extensions": {},
+        },
+        "provenance": {
+            "status": "captured", "authority_tier": "captured_judgment", "actor_class": "operator",
+            "actor_id": operator_id, "mechanism": "explicit_consent", "evidence_ids": [],
+            "model": None, "ratifier_id": None,
+        },
+    }, valid_from="2026-07-01T00:00:00Z")
+
+
+def _observed_contract(node_type: str, operator_id: str, evidence_id: str, grant_id: str) -> dict:
+    shared = {
+        "ontology_schema_version": ONTOLOGY_SCHEMA_VERSION, "operator_id": operator_id,
+        "source_class": "transcript", "observed_at": VALID_FROM, "window_start": "2026-07-14T11:00:00Z",
+        "window_end": VALID_FROM, "consent_grant_id": grant_id, "attributes": {},
+    }
+    payload = {
+        "Observation": {
+            "observation_kind": "behavior", "subject_id": operator_id,
+            "description": "Reports failed sources.", "evidence_ids": [evidence_id], "extensions": {},
+            "confidence": {
+                "score": 0.8, "assessor_id": "synthetic-observer", "method": "model_estimate",
+                "basis_evidence_ids": [evidence_id], "assessed_at": VALID_FROM,
+                "calibration_trial_id": None, "uncertainty_note": "Synthetic.",
+            },
+        },
+        "Outcome": {
+            "evidence_mode": "observed", "subject_id": new_urn("verdict"), "metric": "conversion_rate",
+            "description": "Conversion rose.", "value": 0.31, "unit": "ratio",
+            "attribution_status": "contributory", "source_refs": [evidence_id],
+        },
+    }[node_type]
+    return {
+        "record_schema_version": ONTOLOGY_SCHEMA_VERSION, "node_id": new_urn(node_type.lower()),
+        "node_type": node_type, "operator_id": operator_id, "payload": {**shared, **payload},
+        "provenance": {
+            "status": "extracted", "authority_tier": "observed_candidate", "actor_class": "software",
+            "actor_id": new_urn("software"), "mechanism": "typed_observation", "evidence_ids": [evidence_id],
+            "model": None, "ratifier_id": None,
+        },
+    }
+
+
+ROW_SIX_COMMANDS = ["ontology add-node", "observation add", "outcome add"]
+
+
+def _row_six_command(tmp_path: Path, store: ImprintStore, envelope: dict, command: str) -> list[str]:
+    """One of Table 6 row 6's three commands, on a contract it accepts."""
+    operator_id, evidence_id = envelope["operator_id"], envelope["evidence"][0]["evidence_id"]
+    if command == "ontology add-node":
+        contract = _principle_contract(operator_id, evidence_id)
+    else:
+        node_type = command.split()[0].capitalize()
+        contract = _observed_contract(node_type, operator_id, evidence_id, _consent_grant(store, operator_id))
+    return [*command.split(), "--input", _write_input(tmp_path, contract), "--valid-from", VALID_FROM]
+
+
+@pytest.mark.parametrize("command", ROW_SIX_COMMANDS)
+def test_an_ontology_flag_stamps_the_new_node_and_stays_out_of_its_event(tmp_path, capsys, capture_envelope, command):
     config, store = configured(tmp_path, capture_envelope["operator_id"])
     store.apply_capture(capture_envelope)
-    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
-    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
-                 "--valid-from", VALID_FROM, "--scope-kind", "client", "--scope-client", "a-client",
-                 "--scope-project", "a-project"]) == 0
+    assert main(["--config", str(config), *_row_six_command(tmp_path, store, capture_envelope, command),
+                 "--scope-kind", "client", "--scope-client", "a-client", "--scope-project", "a-project"]) == 0
     node_id = json.loads(capsys.readouterr().out)["node_id"]
     row = row_of(store, node_id)
     assert (row["scope_kind"], row["client_id"], row["project_id"], row["resolved_by"]) == (
@@ -873,14 +992,16 @@ def test_an_ontology_add_with_no_flag_writes_no_row(tmp_path, capsys, capture_en
     assert rows_of(store) == []
 
 
-def test_central_is_refused_on_an_ontology_flag(tmp_path, capsys, capture_envelope):
+@pytest.mark.parametrize("command", ROW_SIX_COMMANDS)
+def test_central_is_refused_on_an_ontology_flag(tmp_path, capsys, capture_envelope, command):
     config, store = configured(tmp_path, capture_envelope["operator_id"])
     store.apply_capture(capture_envelope)
-    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
-    assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
-                 "--valid-from", VALID_FROM, "--scope-kind", "central"]) == 2
+    argv = _row_six_command(tmp_path, store, capture_envelope, command)
+    before = {node["node_id"] for node in store.current_nodes()}
+    assert main(["--config", str(config), *argv, "--scope-kind", "central"]) == 2
     assert "only at ratification" in json.loads(capsys.readouterr().out)["error"]
-    assert contract["node_id"] not in {node["node_id"] for node in store.current_nodes()}
+    assert {node["node_id"] for node in store.current_nodes()} == before
+    assert rows_of(store) == []
 
 
 def test_ontology_scope_flags_need_a_kind_and_a_retrievable_type(tmp_path, capsys, capture_envelope):
