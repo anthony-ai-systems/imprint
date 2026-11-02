@@ -282,11 +282,13 @@ switches off delivery is unchanged.
   for a node retrieval never delivers, such as Evidence, and for a record closed
   since, whose `versions` and `dispositions` say why.
 - A rule whose whole text went out on a short line counts as delivered, so it is
-  not sent again. One whose text was cut is listed in `retry_ids` if its whole line
-  could fit the budget, and when it is picked again it arrives on a whole line, as
-  long as there is room, and is then done. One whose whole line can never fit counts
-  as delivered from its short line, and so does a local record, cut or not, because
-  nothing picks it and it would otherwise go out cut on every turn.
+  not sent again. One whose text was cut is listed in `retry_ids`, and when it is
+  picked again it arrives on a whole line, as long as there is room, and is then
+  done. Session start and the fallback list every record they cut, because Jev's
+  budget can be larger than theirs. A pick whose whole line can never fit Jev's
+  budget counts as delivered from its short line, which can be its second time out
+  cut. So does a local record, cut or not, because nothing picks it and it would
+  otherwise go out cut on every turn.
 - Only a pick can send a cut record whole, so nothing else sends one again. The
   deterministic fallback keeps out records still owed a whole line as well as those
   delivered, and a turn Jev owns keeps them out of its local records. A cut record

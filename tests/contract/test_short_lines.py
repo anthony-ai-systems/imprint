@@ -254,11 +254,11 @@ def test_a_record_whose_text_was_cut_is_owed_a_whole_delivery():
     assert run_engine([long], selected_domain=None).retry_ids == (long.record_id,)
 
 
-def test_a_cut_record_that_could_never_fit_whole_is_not_owed_one():
+def test_a_cut_record_too_large_for_this_budget_is_still_listed():
     long = record(1, text=BACKGROUND * 60)
     result = run_engine([long], selected_domain=None)
     assert result.selected_ids == (long.record_id,)
-    assert result.retry_ids == ()
+    assert result.retry_ids == (long.record_id,)
 
 
 def test_a_section_that_is_full_stops_paying_to_cut_long_records(monkeypatch):
@@ -679,8 +679,30 @@ def test_session_start_redelivers_the_same_bytes_after_a_compact(tmp_path, recor
     assert startup["hookSpecificOutput"]["additionalContext"]
 
 
-def jev_config(tmp_path, mode="jev", **values):
-    return write_config(tmp_path, selector=selector_config(mode), domains=RESEARCH, **values)[0]
+def jev_config(tmp_path, mode="jev", *, jev_values=None, **values):
+    return write_config(tmp_path, selector=selector_config(mode, **(jev_values or {})), domains=RESEARCH, **values)[0]
+
+
+def test_a_record_cut_at_session_start_is_judged_by_the_budget_that_picks_it(tmp_path, records, transport, monkeypatch, capsys):
+    long = record(1, text=f"Never use the vendor template. {BACKGROUND * 6}")
+    records.append(long)
+    assert 4096 < len(_render(long)) < 16384
+    config = jev_config(tmp_path, jev_values={"budget_bytes": 16384}, **{SHORT_LINES_SESSION_START: True, SHORT_LINES_PROMPT: True})
+    (cut,) = delivered(hook(config, "session-start", {"session_id": "s"}, monkeypatch, capsys))
+    assert cut["text_complete"] is False
+    body = hook(config, "user-prompt-submit", {"session_id": "s", "prompt": "go"}, monkeypatch, capsys)
+    assert [line["text"] for line in delivered(body)] == [long.text]
+
+
+def test_a_record_that_can_never_fit_whole_is_settled_by_the_route_that_picks_it(tmp_path, records, transport, monkeypatch, capsys):
+    long = record(1, text=f"Never use the vendor template. {BACKGROUND * 60}")
+    records.append(long)
+    config = jev_config(tmp_path, **{SHORT_LINES_SESSION_START: True, SHORT_LINES_PROMPT: True})
+    hook(config, "session-start", {"session_id": "s"}, monkeypatch, capsys)
+    picked = hook(config, "user-prompt-submit", {"session_id": "s", "prompt": "go"}, monkeypatch, capsys)
+    assert [line["text_complete"] for line in delivered(picked)] == [False]
+    again = hook(config, "user-prompt-submit", {"session_id": "s", "prompt": "go on"}, monkeypatch, capsys)
+    assert delivered(again) == [] and again["selector_outcome"] == "no_picks"
 
 
 def test_the_prompt_switch_covers_picks_and_their_local_records(tmp_path, records, transport, monkeypatch, capsys):

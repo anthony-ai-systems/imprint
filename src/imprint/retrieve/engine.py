@@ -395,7 +395,9 @@ class RetrievalEngine:
                 if len(rendered) <= available - section_bytes[section]:
                     selected.append((item.record_id, rendered))
                     section_bytes[section] += len(rendered)
-                    if cut and len(_render(item)) <= self.config.total_budget_bytes:
+                    if cut:
+                        # Every cut record, because this budget is not the one a
+                        # later pick spends: that route settles what can arrive whole.
                         retry_ids.append(item.record_id)
                 else:
                     full = True

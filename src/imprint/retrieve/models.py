@@ -100,5 +100,5 @@ class RetrievalResult:
     authority_mode: AuthorityMode = "authoritative"
     requested_partitions: tuple[str, ...] = ()
     selected_by_partition: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # Delivered with their text cut, and able to arrive whole on a later delivery.
+    # Delivered with their text cut. A route that picks one settles if it arrives whole.
     retry_ids: tuple[str, ...] = ()
