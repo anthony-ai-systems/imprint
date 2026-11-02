@@ -538,6 +538,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     history = subs.add_parser("history", help="show immutable versions, dispositions and the whole retrieval line")
     history.add_argument("node_id")
+    details = subs.add_parser("details", help="show one record's whole retrieval line")
+    details.add_argument("record_id")
 
     verdict = subs.add_parser("verdict", help="append later WHY or reinforcement evidence")
     verdict_subs = verdict.add_subparsers(dest="verdict_action", required=True)
@@ -943,6 +945,14 @@ def main(argv: list[str] | None = None) -> int:
             store.initialize()
             history = store.node_history(args.node_id)
             _write_json({"status": "ok", "history": {**history, "whole_line": whole_line(store, args.node_id)}})
+            return 0
+        if args.command == "details":
+            from .retrieve import whole_line
+            store.initialize()
+            line = whole_line(store, args.record_id)
+            if line is None:
+                raise ValidationError("unknown record")
+            _write_json(line)
             return 0
         if args.command == "verdict":
             store.initialize()

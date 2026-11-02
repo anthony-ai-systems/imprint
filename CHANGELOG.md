@@ -5,9 +5,11 @@
 - Add short delivered lines, off by default behind two switches,
   `org.imprint.short_lines.prompt` and `org.imprint.short_lines.session_start`. A
   short line keeps `authority`, `record_id`, the record's words and, on anything but
-  a judgment, `partition`, and the first in a payload says how to look up the rest. At
-  4,096 bytes with 160 bytes of plain text, 15 rules fit a prompt instead of 5, and 11
-  fit session start instead of 4, and real text should hold about 14 and 10 to 11. A
+  a judgment, `partition`, and the first in a payload says how to look up the rest:
+  `imprint details <record_id>`, a new command that returns one record's whole line
+  and nothing else. `imprint history` stays operator-only. At 4,096 bytes with 160
+  bytes of plain text, 15 rules fit a prompt instead of 5, and 11 fit session start
+  instead of 4, and real text should hold about 14 and 10 to 11. A
   pick a short line would cut goes whole when the budget has room for it. Under Jev, a
   rule whose whole text went out is not sent again, and one whose text was cut can
   still arrive whole. A sentence too long to fit keeps its head and its ending, so a

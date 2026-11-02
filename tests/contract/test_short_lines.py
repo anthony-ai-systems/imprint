@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import random
+import shlex
+import subprocess
+import sys
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -14,9 +18,10 @@ import pytest
 import imprint.cli as cli
 import imprint.retrieve as retrieval
 import imprint.retrieve.engine as engine
+from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.config import DEFAULTS, SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START, parse_config
 from imprint.errors import ValidationError
-from imprint.retrieve import RetrievalEngine, _jev_response, jev, retrieve_payload, select_prompt_payload
+from imprint.retrieve import RetrievalEngine, _jev_response, jev, retrieve_payload, select_prompt_payload, whole_line
 from imprint.retrieve.engine import COMPACT_TEXT_BYTES, SHORT_LINE_DETAIL, _render, render_compact, render_short
 from imprint.retrieve.jev import QUESTION_PREFIX
 from imprint.retrieve.models import RetrievalConfig, RetrievalRecord, RetrievalResult
@@ -193,7 +198,7 @@ def test_the_label_costs_a_line_at_most_35_bytes():
 
 def test_the_lookup_is_said_only_when_asked_for():
     line = json.loads(render_short(record(), lookup=True))
-    assert line["detail"] == SHORT_LINE_DETAIL == "imprint history <record_id>"
+    assert line["detail"] == SHORT_LINE_DETAIL == "imprint details <record_id>"
     assert "detail" not in json.loads(render_short(record()))
 
 
@@ -1253,6 +1258,158 @@ def test_an_unknown_record_still_fails(tmp_path, monkeypatch, capsys):
     seed(config, monkeypatch, capsys)
     assert cli.main(["--config", str(config), "history", "urn:imprint:verdict:unknown"]) != 0
     capsys.readouterr()
+
+
+# -- imprint details -----------------------------------------------------------------
+
+CASE = "Synthetic review of a quarterly draft."
+CONTEXT = "Synthetic thread text the operator was answering."
+WORDS = "No, keep the failed source in the table."
+UNKNOWN_RECORD = json.dumps({"error": "unknown record", "error_type": "ValidationError", "status": "error"}) + "\n"
+
+
+def details(config: Path, record_id: str, capsys) -> tuple[int, str]:
+    code = cli.main(["--config", str(config), "details", record_id])
+    return code, capsys.readouterr().out
+
+
+def run(config: Path, capsys, *words: str) -> None:
+    assert cli.main(["--config", str(config), *words]) == 0
+    capsys.readouterr()
+
+
+def capture(root: Path, words: str = WORDS) -> dict:
+    """Apply one capture carrying context evidence and an extension, and return its event."""
+    store = ImprintStore(root / "imprint.db")
+    envelope = build_capture_envelope(
+        operator_id=store.current_nodes(["Evidence"])[0]["operator_id"], session_id=new_urn("session"),
+        node_id="primary", case_description=CASE, raw_operator_text=words, call_type="prefer",
+        capture_mechanism="explicit_cli", captured_by="synthetic-capture",
+        contextual_evidence=[{"kind": "context", "content": CONTEXT, "source_locator": "synthetic:thread"}],
+        extensions={"org.example.scope": {"schema_version": "1.0.0", "payload": {"client": "example-client"}}},
+    )
+    store.apply_capture(envelope)
+    with store.connect() as conn:
+        (payload,) = conn.execute(
+            "SELECT payload_json FROM events WHERE event_id=?", (envelope["input_event_id"],),
+        ).fetchone()
+    return json.loads(payload)
+
+
+def strings(value: object) -> set[str]:
+    """Every string a JSON value holds, keys aside."""
+    if isinstance(value, str):
+        return {value}
+    items = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    return {text for item in items for text in strings(item)}
+
+
+def test_details_prints_a_records_whole_line_and_nothing_else(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    (line,) = delivered(hook(config, "session-start", {"session_id": "s"}, monkeypatch, capsys))
+    code, out = details(config, line["record_id"], capsys)
+    assert code == 0
+    assert len(out.splitlines()) == 1
+    assert json.loads(out) == whole_line(ImprintStore(root / "imprint.db"), line["record_id"]) == line
+
+
+def test_details_leaves_out_the_capture_behind_the_line(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    event = capture(root)
+    verdict = event["verdict"]["verdict_id"]
+    assert CONTEXT in strings(event) and event["session_id"] in strings(event)
+    code, out = details(config, verdict, capsys)
+    assert code == 0
+    line = json.loads(out)
+    assert set(line) == {
+        "authority", "case_ids", "case_summaries", "evidence_ids", "ontology", "record_id",
+        "source_receipt_ids", "text",
+    }
+    for kept_out in (
+        CONTEXT, event["session_id"], "synthetic:thread", "synthetic-capture", "example-client",
+        "org.example.scope", event["operator_id"], event["input_event_id"], event["captured_at"],
+        event["verdict"]["call"]["call_id"], "event_payload", "versions", "dispositions",
+    ):
+        assert kept_out not in out
+    assert strings(line) & strings(event) == {
+        verdict, WORDS, CASE, event["case"]["case_id"], "captured", *event["provenance"]["evidence_ids"],
+    }
+
+
+def test_details_says_the_case_text_only_in_case_summaries(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    _, out = details(config, capture(root)["verdict"]["verdict_id"], capsys)
+    line = json.loads(out)
+    assert line.pop("case_summaries") == [CASE]
+    assert out.count(CASE) == 1
+    assert CASE not in json.dumps(line, ensure_ascii=False)
+
+
+def test_every_id_without_a_line_answers_the_same(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    store = ImprintStore(root / "imprint.db")
+    replacement, tombstoned, superseded = (capture(root, f"{WORDS} {n}")["verdict"]["verdict_id"] for n in range(3))
+    rejected = proposal(store)
+    bad = unreadable(store)
+    for node_id in (tombstoned, superseded, rejected):
+        assert details(config, node_id, capsys)[0] == 0
+    evidence = store.current_nodes(["Evidence"])[0]["node_id"]
+    run(config, capsys, "delete", "tombstone", "--scope", tombstoned, "--reason", "synthetic")
+    run(config, capsys, "review", "reject", rejected, "--by", "operator", "--reason", "too broad")
+    run(config, capsys, "transition", "supersede", replacement, superseded,
+        "--reason", "synthetic", "--evidence", evidence, "--by", "operator")
+    ids = {
+        "evidence": evidence,
+        "case": store.current_nodes(["Case"])[0]["node_id"],
+        "call": store.current_nodes(["Call"])[0]["node_id"],
+        "unknown": "urn:imprint:verdict:unknown",
+        "tombstoned": tombstoned,
+        "rejected": rejected,
+        "superseded": superseded,
+        "unreadable": bad,
+    }
+    assert {kind: details(config, node_id, capsys) for kind, node_id in ids.items()} == dict.fromkeys(
+        ids, (2, UNKNOWN_RECORD),
+    )
+    assert details(config, replacement, capsys)[0] == 0
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_a_proposal_answers_with_authority_inferred(deferred, tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    node_id = proposal(ImprintStore(root / "imprint.db"))
+    if deferred:
+        run(config, capsys, "review", "defer", node_id, "--by", "operator", "--reason", "not yet")
+    code, out = details(config, node_id, capsys)
+    assert (code, json.loads(out)["authority"]) == (0, "inferred")
+
+
+def test_the_detail_on_a_short_line_runs_as_it_is_written(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path, **{SHORT_LINES_SESSION_START: True})
+    words = f"{BACKGROUND}No, report the failed source because omissions change it."
+    seed(config, monkeypatch, capsys, words)
+    (line,) = delivered(hook(config, "session-start", {"session_id": "s"}, monkeypatch, capsys))
+    assert line["text_complete"] is False
+    program, *arguments = shlex.split(line["detail"].replace("<record_id>", line["record_id"]))
+    assert program == "imprint"
+    done = subprocess.run(
+        [sys.executable, "-m", "imprint.cli", *arguments], text=True, capture_output=True, check=False,
+        env={**os.environ, "IMPRINT_CONFIG": str(config)},
+    )
+    assert (done.returncode, done.stderr) == (0, "")
+    found = json.loads(done.stdout)
+    assert found == whole_line(ImprintStore(root / "imprint.db"), line["record_id"])
+    assert found["text"] == words
+
+
+def test_a_compact_line_keeps_its_own_detail():
+    item = record()
+    assert json.loads(render_compact(item))["detail"] == f"imprint history {item.record_id}"
 
 
 # -- what the docs promise -----------------------------------------------------------

@@ -292,18 +292,25 @@ switches off delivery is unchanged.
   mark would otherwise vouch for what it overruled. The last sentence takes at most
   half of the 400 bytes, so the rule always has the rest. A compact line says the rule
   alone.
-- The first short line of a payload also has `"detail": "imprint history
+- The first short line of a payload also has `"detail": "imprint details
   <record_id>"`, which holds for every line in it.
 - `selector` appears only on a reserved rule, as `{"reserved": true}`. Nothing reads
   the rest of the block: the order of the lines is the rank, and the decision log
   has each pick's score.
-- `imprint history <record_id>` returns what a short line leaves out. Its
-  `whole_line` is the record's whole retrieval line, with `case_ids`,
-  `case_summaries`, `evidence_ids`, `ontology` and `source_receipt_ids`. It is `null`
-  for a node retrieval never delivers, such as Evidence, for a record closed since,
-  and for a record retrieval cannot read, whose `versions` and `dispositions` say
-  why. Only the record asked for is read that way, so one bad record does not stop
-  the lookup of another.
+- `imprint details <record_id>` returns what a short line leaves out: one record's
+  whole retrieval line and nothing else, with `case_ids`, `case_summaries`,
+  `evidence_ids`, `ontology` and `source_receipt_ids`. An id with no such line fails
+  with `unknown record` and exit code 2, whatever the reason, so a caller cannot tell
+  a node retrieval never delivers, such as Evidence, a Case or a Call, from a record
+  closed since, a record retrieval cannot read or an id the store does not know. A
+  proposal does answer, with `authority` `inferred`, and nothing limits the command
+  by client yet. Only the record asked for is read that way, so one bad record does
+  not stop the lookup of another.
+- `imprint history <record_id>` stays operator-only, because one call returns the
+  whole capture behind a record. A compact line's `detail` still names it. Its
+  `whole_line` is the line `imprint details` returns, or `null` for a node retrieval
+  never delivers, a record closed since or a record retrieval cannot read, whose
+  `versions` and `dispositions` say why.
 - In `jev` mode, a rule whose whole text went out on a short line counts as
   delivered, so no turn Jev owns, and no fallback from one, sends it again. One whose
   text was cut is listed in `retry_ids`, and when it is picked again it arrives on a

@@ -111,8 +111,9 @@ Every rendered retrieval record carries an `ontology` object with its semantic
 `docs/configuration.md`. A compact line from the optional selector keeps
 `authority`, its evidence, case, and receipt references, and a `detail` command
 for reading the record locally. A short line, off by default, keeps `authority`,
-`record_id` and, on anything but a judgment, `partition`, and `imprint history
-<record_id>` returns the rest. Analytical retrieval is never compact or short. The
+`record_id` and, on anything but a judgment, `partition`, and `imprint details
+<record_id>` returns the rest, as that one record's whole line. `imprint history`
+stays operator-only. Analytical retrieval is never compact or short. The
 stable partitions are `judgment`, `self_model`,
 `chosen_future`, `default_future`, `direction_comparison`,
 `business_declared`, and `business_observed`. Declared business theory and

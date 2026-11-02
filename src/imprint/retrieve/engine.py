@@ -128,7 +128,7 @@ def _rank_key(record: RetrievalRecord, query: str, selected_domain: str | None, 
 
 
 COMPACT_TEXT_BYTES = 400
-SHORT_LINE_DETAIL = "imprint history <record_id>"
+SHORT_LINE_DETAIL = "imprint details <record_id>"
 # What ``render_short(lookup=True)`` adds to a line.
 SHORT_LINE_LOOKUP_BYTES = len(f',"detail":"{SHORT_LINE_DETAIL}"')
 
@@ -335,7 +335,7 @@ def render_short(
 
     This shapes one delivery only. The text is always the record's own words:
     ``_short_text`` says how a long one is cut. ``authority`` says how far to trust it
-    and ``record_id`` is what ``imprint history`` takes to return the rest, so neither
+    and ``record_id`` is what ``imprint details`` takes to return the rest, so neither
     is ever left off. ``partition`` appears on anything but a judgment, because a
     declared claim and an observed result can read alike under the same authority.
     ``text_basis`` and ``text_complete`` appear only on text that was cut, so their
