@@ -346,6 +346,7 @@ def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_env
     ({"scope_kind": "client", "client_id": "a-client", "delivery": ["general"]}, "unknown delivery"),
     ({"scope_kind": "client", "client_id": "a-client", "speaker": "someone"}, "must name"),
     ({"scope_kind": "client", "client_id": "a-client", "overrides": ["urn:imprint:rule:nope"]}, "current central"),
+    ({"scope_kind": "client", "client_id": "a-client", "overrides": "x"}, "must be a list"),
 ], ids=repr)
 def test_scope_set_refusals_change_nothing(tmp_path, capture_envelope, changes, message):
     store = new_store(tmp_path)
@@ -1057,7 +1058,7 @@ def test_a_kill_writes_no_row_even_with_stamping(tmp_path, capture_envelope):
     store = new_store(tmp_path)
     service = IngestService(store, capture_envelope["operator_id"])
     item_id = service.scan([_specimen("global")])[0]["item_id"]
-    service.kill(item_id, why="Not useful.")
+    service._rule(item_id, "KILL", why="Not useful.", stamp_scope=True)
     assert rows_of(store) == []
 
 
@@ -1174,6 +1175,8 @@ def test_central_is_refused_on_import_on_a_record_that_is_not_ratified(tmp_path,
     row = {**document["imprint:recordScope"][0], "scope_kind": "central", "client_id": None}
     imported = _fresh(tmp_path)
     with pytest.raises(ValidationError, match="requires a ratified record"):
+        import_jsonld(imported, _reset_rows(document, [row]), dry_run=True)
+    with pytest.raises(ValidationError, match="requires a ratified record"):
         import_jsonld(imported, _reset_rows(document, [row]))
     assert not imported.path.exists() or rows_of(imported) == []
 
@@ -1201,12 +1204,13 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": "shared"}]), "unknown scope kind"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": None}]), "client id"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": "{"}]), "overrides"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": '{"a":1}'}]), "overrides"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "resolved_by": ""}]), "resolved_by"),
     (lambda doc: _reset_rows(doc, [{"node_id": doc["imprint:recordScope"][0]["node_id"]}]), "invalid row"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": ["client"]}]), "unknown scope kind"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery": ["general"]}]), "unknown delivery"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery_rank": 2**63}]), "rank"),
-], ids=range(14))
+], ids=range(15))
 def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
     _, document = _exported(tmp_path, capture_envelope)
     with pytest.raises(ValidationError, match=message):
