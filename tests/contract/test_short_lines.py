@@ -1523,3 +1523,15 @@ def test_details_on_a_denied_root_says_so(mode, tmp_path, monkeypatch, capsys):
     finally:
         root.chmod(0o700)
     assert code == 2 and json.loads(out)["error"] != "unknown record"
+
+
+def test_details_on_a_row_that_will_not_parse_says_so(tmp_path, monkeypatch, capsys):
+    config, root = write_config(tmp_path)
+    seed(config, monkeypatch, capsys)
+    store = ImprintStore(root / "imprint.db")
+    (verdict,) = store.current_nodes(["Verdict"])
+    (call,) = store.current_nodes(["Call"])
+    with store.connect() as connection:
+        connection.execute("UPDATE node_versions SET payload_json='not json' WHERE node_id=?", (call["node_id"],))
+    code, out = details(config, verdict["node_id"], capsys)
+    assert (code, json.loads(out)["error"]) == (2, "existing store is corrupt or unreadable")

@@ -677,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 try:
                     line = whole_line(store, args.record_id, complete_only=True)
-                except sqlite3.Error as exc:  # a store that cannot be read says so itself
+                except (sqlite3.Error, json.JSONDecodeError) as exc:  # a store that cannot be read says so itself
                     raise ValidationError("existing store is corrupt or unreadable") from exc
             if line is None:
                 raise ValidationError("unknown record")

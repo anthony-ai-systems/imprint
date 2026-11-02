@@ -166,16 +166,17 @@ def whole_line(store, record_id: str, *, complete_only: bool = False) -> dict[st
     through its id. ``imprint history`` leaves it off.
 
     Only this record is projected, so a neighbour retrieval cannot project does not
-    break the lookup, though a row whose stored JSON cannot be parsed breaks every one.
-    This is the tool for looking at a record retrieval fails on, so that one reads as
-    None too, and its versions show why.
+    break the lookup, though a row whose stored JSON cannot be parsed breaks every one,
+    and ``complete_only`` says so rather than make a live record look gone. This is the
+    tool for looking at a record retrieval fails on, so that one reads as None too, and
+    its versions show why.
     """
     try:
         records = StoreRetrievalSource(store).retrieval_candidates("", only=record_id)
         if not records or (complete_only and not records[0].provenance_complete):
             return None
         return json.loads(_render(records[0]))
-    except (ImprintError, OSError, sqlite3.Error):
+    except (ImprintError, OSError, sqlite3.Error, json.JSONDecodeError):
         if complete_only:
             raise  # a store that cannot be read is not an unknown record
         return None

@@ -299,18 +299,17 @@ switches off delivery is unchanged.
   has each pick's score.
 - `imprint details <record_id>` returns what a short line leaves out: one record's
   whole retrieval line and nothing else, with `case_ids`, `case_summaries`,
-  `evidence_ids`, `ontology` and `source_receipt_ids`. It needs write access to the
-  data root, because opening the store tightens file modes. An id with no such line
+  `evidence_ids`, `ontology` and `source_receipt_ids`. The data root must admit
+  SQLite's side files, because the store opens in WAL mode. An id with no such line
   fails with `unknown record` and exit code 2, whatever the reason, so a caller cannot
   tell a node retrieval never delivers, such as Evidence, a Case or a Call, from a
   record closed since, a Verdict whose Case or Evidence closed, a record retrieval
   cannot read or an id the store does not know. A record awaiting review does answer,
   with `authority` `inferred`, `extracted` or `imported_floor`, and a node of type
   `Proposal` does not. Nothing limits the command by client yet. Only the record asked
-  for is read that way, so one bad record does not stop the lookup of another. A row
-  whose stored JSON cannot be parsed stops every lookup, and each then answers
-  `unknown record`. A store that cannot be read at all says so with its own error, not
-  `unknown record`, so a live record never looks gone.
+  for is read that way, so one bad record does not stop the lookup of another. A store that cannot be read says so with
+  its own error, not `unknown record`, so a live record never looks gone. That includes
+  a row whose stored JSON cannot be parsed, which stops every lookup.
 - `imprint history <record_id>` is meant for the operator, because one call returns
   the whole capture behind a record. Nothing enforces that yet, and a compact line's
   `detail` still points at it. Its `whole_line` is the line `imprint details` returns,
