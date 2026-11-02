@@ -136,4 +136,23 @@ CREATE TABLE IF NOT EXISTS purge_receipts (
   scope_class TEXT NOT NULL,
   counts_json TEXT NOT NULL
 );
+-- No foreign keys: a key on nodes or events would fail an older build's purge
+-- after a rollback. CREATE TABLE IF NOT EXISTS cannot change a CHECK later.
+CREATE TABLE IF NOT EXISTS record_scope (
+  node_id TEXT PRIMARY KEY,
+  scope_kind TEXT NOT NULL CHECK(scope_kind IN ('client','central','system','unresolved','held')),
+  client_id TEXT,
+  project_id TEXT,
+  delivery TEXT CHECK(delivery IN ('general','specific')),
+  delivery_rank INTEGER,
+  speaker TEXT,
+  endorser TEXT,
+  overrides_json TEXT NOT NULL DEFAULT '[]',
+  resolved_by TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  stamped_at TEXT NOT NULL,
+  CHECK((scope_kind = 'client') = (client_id IS NOT NULL)),
+  CHECK(delivery IS NULL OR scope_kind IN ('client','central')
+        OR (scope_kind = 'system' AND delivery = 'specific'))
+);
 """

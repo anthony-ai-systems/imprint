@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from imprint.constants import ONTOLOGY_SCHEMA_VERSION, PRODUCT_VERSION, STORE_SCHEMA_VERSION
 from imprint.errors import ConflictError, ValidationError
@@ -20,6 +20,18 @@ from imprint.ontology.references import validate_payload_references
 from imprint.ontology.schema import canonical_bytes, make_urn, payload_sha256, require_urn
 from imprint.permissions import secure_directory, secure_file
 from .schema import SCHEMA_SQL
+from .scope import (
+    RESOLVED_EXPLICIT,
+    capture_stamp,
+    merge_change,
+    read_scope_row,
+    read_scope_rows,
+    require_fits_node,
+    scope_view,
+    stamp_row,
+    validate_stamp,
+    write_scope_row,
+)
 
 
 DERIVED_NODE_TYPES = frozenset({
@@ -454,6 +466,7 @@ class ImprintStore:
                     if prior[0] == event_hash:
                         return "duplicate"
                     raise ConflictError("same input_event_id has different bytes")
+                stamp = capture_stamp(envelope["extensions"])
                 conn.execute(
                     "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
                     (event_id, "captured", envelope["operator_id"], now, envelope["captured_at"],
@@ -482,6 +495,9 @@ class ImprintStore:
                     self._insert_edge(conn, "chose_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
                 for alt_id in verdict.get("rejected_alternative_ids", []):
                     self._insert_edge(conn, "rejected_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
+                if stamp is not None:
+                    # The row goes on the Verdict: its Case, Call and Evidence are not retrievable.
+                    write_scope_row(conn, stamp_row(verdict["verdict_id"], stamp, event_id=event_id, now=now))
                 conn.execute(
                     "INSERT INTO consumed_inputs VALUES(?,?,?,?)", (event_id, event_hash, now, source_path)
                 )
@@ -1790,9 +1806,16 @@ class ImprintStore:
         return result
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        snapshot: dict[str, Any] = {
             "store_schema_version": STORE_SCHEMA_VERSION,
             "ontology_schema_version": ONTOLOGY_SCHEMA_VERSION,
             "nodes": self.current_nodes(),
             "edges": self.current_edges(),
         }
+        # Only when there are rows, so the snapshot id holds until the first
+        # stamp. After that a re-scope moves it, which invalidates caches.
+        with self.connect() as conn:
+            rows = read_scope_rows(conn)
+        if rows:
+            snapshot["record_scope"] = rows
+        return snapshot
