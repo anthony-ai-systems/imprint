@@ -21,11 +21,12 @@ import imprint.cli as cli
 import imprint.hook_routes as routes
 import imprint.retrieve as retrieval
 from imprint.capture.t3_origin import T3_SCRATCH_THREAD_REASON
-from imprint.config import DEFAULTS
+from imprint.config import DEFAULTS, SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START
 from imprint.errors import ImprintError
 from imprint.hook_routes import OUTCOMES, route_entry, route_log_path
 from imprint.retrieve import jev
 from imprint.retrieve.models import RetrievalRecord
+from imprint.retrieve.receipts import DeliveryReceipts
 
 ROOT = Path(__file__).parents[2]
 KEY_ENV = "JEV_TEST_KEY"
@@ -111,13 +112,13 @@ def selector(mode: str = "jev", **jev_values) -> dict:
     return value
 
 
-def write_config(tmp_path: Path, mode: str = "deterministic", **jev_values) -> Path:
+def write_config(tmp_path: Path, mode: str = "deterministic", settings: dict | None = None, **jev_values) -> Path:
     path = tmp_path / "config.json"
     path.write_text(json.dumps({
         "config_version": "3.0.0", "data_root": str(tmp_path / "data"), "operator_slug": "test",
         "node_id": "primary", "compiler": True,
         "domains": [{"domain_id": "research", "public_label": "Research"}],
-        "selector": selector(mode, **jev_values),
+        "selector": selector(mode, **jev_values), **(settings or {}),
     }))
     return path
 
@@ -263,6 +264,113 @@ def test_an_empty_pool_with_no_key_is_still_a_failure(tmp_path, transport, monke
     assert (line["outcome"], line["detail"]) == ("failed", "missing_key")
 
 
+# -- a turn that repeats one -------------------------------------------------------
+
+LINES = pytest.mark.parametrize(
+    "settings", [{}, {SHORT_LINES_PROMPT: True, SHORT_LINES_SESSION_START: True}], ids=["whole_lines", "short_lines"],
+)
+WIDE = record(4, "A rule with a long trail.", evidence_ids=tuple(f"urn:synthetic:evidence:{n}" for n in range(2000)))
+
+
+def facts(tmp_path, *fields) -> list[tuple]:
+    return [tuple(line[field] for field in fields) for line in route_lines(tmp_path)]
+
+
+def prompted(number: int, event: dict = IN_DOMAIN) -> dict:
+    return {**event, "prompt": f"synthetic prompt number {number}"}
+
+
+@LINES
+@pytest.mark.parametrize("mode, detail", [("jev", "no_candidates"), ("deterministic", None)])
+def test_a_domain_with_no_records_stays_nothing_relevant_turn_after_turn(
+    tmp_path, transport, monkeypatch, capsys, mode, detail, settings,
+):
+    use_records(monkeypatch, [])
+    config = write_config(tmp_path, mode, settings)
+    bodies = [hook(config, SUBMIT, prompted(number), monkeypatch, capsys) for number in range(3)]
+    assert [item["status"] for item in bodies] == ["delivered", "already_delivered", "already_delivered"]
+    assert facts(tmp_path, "outcome", "detail", "bytes") == [("nothing_relevant", detail, 0)] * 3
+    assert transport.calls == 0
+
+
+@LINES
+def test_a_domain_that_only_has_records_elsewhere_stays_nothing_relevant(tmp_path, monkeypatch, capsys, settings):
+    use_records(monkeypatch, RECORDS[:1])
+    config = write_config(tmp_path, "deterministic", settings)
+    for number in range(2):
+        hook(config, SUBMIT, prompted(number), monkeypatch, capsys)
+    assert facts(tmp_path, "outcome") == [("nothing_relevant",)] * 2
+
+
+@LINES
+@pytest.mark.parametrize("mode", ["deterministic", "jev", "shadow"])
+def test_a_second_session_start_on_an_empty_store_is_still_nothing_relevant(tmp_path, monkeypatch, capsys, mode, settings):
+    use_records(monkeypatch, [])
+    config = write_config(tmp_path, mode, settings)
+    bodies = [hook(config, START, {"session_id": "s"}, monkeypatch, capsys) for _ in range(2)]
+    assert bodies[1]["status"] == "already_delivered"
+    assert facts(tmp_path, "outcome") == [("nothing_relevant",)] * 2
+
+
+@LINES
+def test_no_picks_asked_twice_is_no_picks_twice(tmp_path, transport, monkeypatch, capsys, settings):
+    transport.score = 0.05
+    config = write_config(tmp_path, "jev", settings)
+    bodies = [hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys) for _ in range(2)]
+    assert bodies[1]["selector_outcome"] == "already_delivered"
+    assert facts(tmp_path, "outcome", "detail", "answered") == [
+        ("nothing_relevant", "no_picks", True), ("nothing_relevant", "no_picks", False),
+    ]
+    assert transport.calls == 1
+
+
+def test_picks_that_cannot_fit_stay_failed_on_a_repeat(tmp_path, transport, monkeypatch, capsys):
+    use_records(monkeypatch, [WIDE])
+    config = write_config(tmp_path, "jev")
+    for _ in range(2):
+        hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail", "bytes", "method", "answered") == [
+        ("failed", "oversized_picks", 0, "jev", True), ("failed", "oversized_picks", 0, "jev", False),
+    ]
+    assert transport.calls == 1
+
+
+def test_a_repeat_of_real_picks_is_already_delivered(tmp_path, transport, monkeypatch, capsys):
+    config = write_config(tmp_path, "jev")
+    for _ in range(3):
+        hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome") == [("delivered",), ("already_delivered",), ("already_delivered",)]
+
+
+def test_a_receipt_that_cannot_be_read_leaves_the_turn_already_delivered(tmp_path, monkeypatch, capsys):
+    use_records(monkeypatch, [])
+    config = write_config(tmp_path)
+    hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)
+    (receipt,) = (operator_root(tmp_path) / "receipts").rglob("*-domain-research.json")
+    receipt.write_text("not a receipt")
+    assert hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys)["status"] == "already_delivered"
+    assert facts(tmp_path, "outcome")[-1] == ("already_delivered",)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe")
+def test_a_pipe_at_a_receipt_path_cannot_hold_a_turn_open(tmp_path):
+    receipts = DeliveryReceipts(tmp_path)
+    _, final = receipts._paths("synthetic-session", "snapshot", None)
+    os.mkfifo(final)
+    found = []
+    reader = threading.Thread(
+        target=lambda: found.append(receipts.committed_response("synthetic-session", "snapshot", None)), daemon=True,
+    )
+    reader.start()
+    reader.join(5)
+    assert found == [None]
+
+
+def test_reading_a_receipt_never_raises(tmp_path):
+    assert DeliveryReceipts(tmp_path).committed_response("not a safe session", "snapshot", None) is None
+    assert retrieval.committed_delivery(root=tmp_path / "absent", session_id="s", snapshot_id="snapshot") is None
+
+
 # -- failed selection --------------------------------------------------------------
 
 FAILURES = {
@@ -325,8 +433,7 @@ def test_a_selector_that_cannot_load_is_failed(tmp_path, transport, monkeypatch,
 
 
 def test_picks_that_cannot_fit_are_failed_not_empty(tmp_path, transport, monkeypatch, capsys):
-    wide = record(4, "A rule with a long trail.", evidence_ids=tuple(f"urn:synthetic:evidence:{n}" for n in range(2000)))
-    use_records(monkeypatch, [wide])
+    use_records(monkeypatch, [WIDE])
     line = one_turn(tmp_path, monkeypatch, capsys, SUBMIT, NO_DOMAIN)
     assert (line["outcome"], line["detail"], line["method"]) == ("failed", "oversized_picks", "jev")
     assert (line["bytes"], line["answered"]) == (0, True)
@@ -409,6 +516,20 @@ def test_every_hook_output_comes_to_one_outcome(output, outcome, detail):
     entry = route_entry("user_prompt_submit", output, mode="jev")
     assert (entry["outcome"], entry["detail"]) == (outcome, detail)
     assert entry["outcome"] in OUTCOMES
+
+
+@pytest.mark.parametrize("delivery, outcome, detail", [
+    (None, "already_delivered", None),
+    ({"selected_ids": ["urn:synthetic:judgment:1"]}, "already_delivered", None),
+    ({"selected_ids": ["urn:synthetic:judgment:1"], "selector_outcome": "oversized_picks"}, "already_delivered", None),
+    ({"selected_ids": []}, "nothing_relevant", None),
+    ({"selected_ids": [], "selector_outcome": "no_picks"}, "nothing_relevant", "no_picks"),
+    ({"selected_ids": [], "selector_outcome": "oversized_picks"}, "failed", "oversized_picks"),
+    ({"selected_ids": [], "selector_outcome": "crowded_picks"}, "failed", "crowded_picks"),
+])
+def test_a_latch_is_only_as_good_as_what_its_receipt_delivered(delivery, outcome, detail):
+    entry = route_entry("user_prompt_submit", body("already_delivered"), mode="jev", delivery=delivery)
+    assert (entry["outcome"], entry["detail"]) == (outcome, detail)
 
 
 def test_each_fallback_reason_is_failed_but_the_empty_pool():

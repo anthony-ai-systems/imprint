@@ -86,6 +86,20 @@ def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
         )
 
 
+def _delivery_behind(result: dict, *, root: Path, session_id: str, domain_id: str | None) -> dict | None:
+    """The retrieval a hook turn's output came from, for its route line only.
+
+    A turn that hit its latch has an empty result, so that is the committed receipt.
+    """
+    if result.get("status") != "already_delivered":
+        return result
+    from .retrieve import committed_delivery
+
+    return committed_delivery(
+        root=root, session_id=session_id, snapshot_id=str(result["snapshot_id"]), domain_id=domain_id,
+    )
+
+
 # SessionStart re-fires with these sources after the context window was wiped;
 # the memory payload must be refreshed rather than suppressed by the latch.
 _REFRESHING_SESSION_SOURCES = frozenset({"resume", "compact"})
@@ -1174,6 +1188,7 @@ def main(argv: list[str] | None = None) -> int:
                         "additionalContext": result.get("payload", ""),
                     },
                 }
+                turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=None)
                 if not refresh and result.get("status") == "delivered":
                     _emit_retrieval_json(
                         turn.settle(response), root=root, session_id=session,
@@ -1224,6 +1239,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "additionalContext": selected.get("payload", ""),
                             },
                         }
+                        turn.delivery = _delivery_behind(
+                            selected, root=root, session_id=session, domain_id=decision.scope,
+                        )
                         if selected.get("status") == "delivered":
                             _emit_retrieval_json(
                                 turn.settle(response), root=root, session_id=session,
@@ -1261,6 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
                         "additionalContext": result.get("payload", ""),
                     },
                 }
+                turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=domain)
                 if result.get("status") == "delivered":
                     _emit_retrieval_json(
                         turn.settle(response), root=root, session_id=session,

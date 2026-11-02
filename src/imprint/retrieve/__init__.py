@@ -148,6 +148,15 @@ def commit_payload_delivery(
     )
 
 
+def committed_delivery(
+    *, root: Path, session_id: str, snapshot_id: str, domain_id: str | None = None,
+) -> dict[str, object] | None:
+    """What a latch's committed delivery held, or None if it cannot say. Never raises."""
+    return DeliveryReceipts(Path(root) / "receipts").committed_response(
+        _session_ref(session_id), snapshot_id, domain_id,
+    )
+
+
 def reset_payload_delivery(*, root: Path, session_id: str) -> None:
     """Forget a session's delivery latches after its host context was wiped."""
     DeliveryReceipts(Path(root) / "receipts").reset_session(_session_ref(session_id))
@@ -204,6 +213,8 @@ class SelectorDecision:
     # Jev replied on this turn. Only a reply says it is alive: a turn with nothing
     # to send, or one replayed from a receipt, never asked.
     answered: bool = False
+    # The receipt scope of a turn that hit its latch, whose response cannot name it.
+    scope: str | None = None
 
     def fields(self) -> dict[str, object]:
         """Content-free diagnostics for hook and CLI output."""
@@ -481,7 +492,7 @@ def select_prompt_payload(
                 if delivered.exists():
                     return SelectorDecision(
                         "jev", "already_delivered",
-                        response=_already_delivered(context.snapshot_id), context=context,
+                        response=_already_delivered(context.snapshot_id), context=context, scope=scope,
                     )
                 if pending.exists():
                     cached = receipts._decode_prepared(pending)
@@ -560,7 +571,7 @@ def select_prompt_payload(
             record(result, stages, "already_delivered")
             return SelectorDecision(
                 "jev", "already_delivered",
-                response=_already_delivered(context.snapshot_id), context=context, answered=answered,
+                response=_already_delivered(context.snapshot_id), context=context, answered=answered, scope=scope,
             )
         assert cached is not None
         record(result, stages, outcome)
@@ -579,6 +590,7 @@ __all__ = [
     "BUSINESS_OBSERVED_PARTITION",
     "CHOSEN_FUTURE_PARTITION",
     "commit_payload_delivery",
+    "committed_delivery",
     "DEFAULT_FUTURE_PARTITION",
     "AuthorityMode",
     "DeliveryReceipts",

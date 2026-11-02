@@ -48,13 +48,18 @@ def route_log_path(root: Path) -> Path:
     return Path(root) / "logs" / ROUTE_LOG_NAME
 
 
-def _outcome(body: Mapping[str, Any], payload: str) -> tuple[str, object]:
+def _outcome(body: Mapping[str, Any], payload: str, delivery: Mapping[str, Any] | None) -> tuple[str, object]:
     """The one outcome of a hook's output, and the closed code that explains it.
 
     The order is the ruling. A scratch chat never reached Jev and a failed selection
     lost Jev's turn, whatever the deterministic path then delivered, so both come
     before delivery, and the line's ``bytes`` says what went out anyway. Any reason
     but an empty pool is a failure, so one added later cannot pass as an empty turn.
+
+    ``delivery`` is the retrieval behind the output, which on a repeated turn is the
+    committed receipt, or None if that cannot be read. The output cannot tell a latch
+    that delivered from one that did not, because an empty turn commits one too. A
+    repeat of an empty turn comes to what that turn came to.
     """
     selector_outcome = body.get("selector_outcome")
     reason = body.get("fallback_reason")
@@ -65,7 +70,9 @@ def _outcome(body: Mapping[str, Any], payload: str) -> tuple[str, object]:
     if body.get("reason") == HOOK_INPUT_INVALID:
         return "failed", HOOK_INPUT_INVALID
     if body.get("status") == "already_delivered":
-        return "already_delivered", None
+        if delivery is None or delivery.get("selected_ids"):
+            return "already_delivered", None
+        selector_outcome = delivery.get("selector_outcome", selector_outcome)
     if payload:
         return "delivered", reason or selector_outcome
     if selector_outcome in _UNDELIVERED_PICKS:
@@ -77,12 +84,15 @@ def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def route_entry(route: str, body: Mapping[str, Any], *, mode: str, answered: bool = False) -> dict[str, object]:
+def route_entry(
+    route: str, body: Mapping[str, Any], *, mode: str, answered: bool = False,
+    delivery: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
     """The line for one hook output. ``answered`` means Jev replied on this turn."""
     context = body.get("hookSpecificOutput")
     payload = context.get("additionalContext") if isinstance(context, Mapping) else ""
     payload = payload if isinstance(payload, str) else ""
-    outcome, detail = _outcome(body, payload)
+    outcome, detail = _outcome(body, payload, delivery)
     return {
         "answered": answered,
         "bytes": len(payload.encode("utf-8", "replace")),
@@ -121,11 +131,14 @@ class HookTurn:
         self._deferred = os.environ.get(ROUTE_DEFER_ENV) == "1"
         self._entry: dict[str, object] | None = None
         self.answered = False
+        self.delivery: Mapping[str, Any] | None = None
 
     def settle(self, body: dict[str, Any]) -> dict[str, Any]:
         """Note where the turn came to, and return the output to emit."""
         try:
-            entry = route_entry(ROUTES[self._action], body, mode=self._mode, answered=self.answered)
+            entry = route_entry(
+                ROUTES[self._action], body, mode=self._mode, answered=self.answered, delivery=self.delivery,
+            )
         except Exception:
             return body
         if self._deferred:
