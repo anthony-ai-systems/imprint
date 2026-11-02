@@ -540,6 +540,17 @@ class ImprintStore:
              envelope["captured_at"], None, now, None, event_id, None),
         )
 
+    @staticmethod
+    def _node_stamp(
+        scope: Mapping[str, Any] | None, node_type: str, payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate an optional stamp for one node, before anything is written."""
+        if scope is None:
+            return None
+        stamp = validate_stamp(scope)
+        require_fits_node(stamp, node_type, payload)
+        return stamp
+
     def current_nodes(self, types: Iterable[str] | None = None) -> list[dict[str, Any]]:
         params: list[Any] = []
         where = "WHERE nv.system_to IS NULL"
@@ -715,7 +726,7 @@ class ImprintStore:
             conn.execute("BEGIN IMMEDIATE")
             evidence_ids = self._require_evidence(conn, evidence_ids)
             endpoints = conn.execute("""
-              SELECT n.node_id,n.node_type,n.operator_id,nv.version_id,nv.event_id
+              SELECT n.node_id,n.node_type,n.operator_id,nv.version_id,nv.event_id,nv.payload_json
               FROM nodes n JOIN node_versions nv USING(node_id)
               WHERE n.node_id IN (?,?) AND nv.system_to IS NULL
             """, (source_id, target_id)).fetchall()
@@ -729,6 +740,13 @@ class ImprintStore:
                 raise ValidationError("transition endpoints must belong to the same operator")
             if self.expected_operator_id is not None and operator_id != self.expected_operator_id:
                 raise ValidationError("transition operator does not match configured identity")
+            inherited = None
+            if relation == "supersedes":
+                inherited = self._inherited_scope(
+                    read_scope_row(conn, source_id), read_scope_row(conn, target_id),
+                    node_type=by_id[source_id]["node_type"],
+                    payload=json.loads(by_id[source_id]["payload_json"]),
+                )
             payload = {
                 "relation": relation, "source_id": source_id, "target_id": target_id,
                 "reason": reason.strip(), "evidence_ids": evidence_ids, "actor_id": actor_id,
@@ -760,7 +778,33 @@ class ImprintStore:
                     SELECT edge_id FROM edges WHERE (source_id=? OR target_id=?) AND edge_id<>?
                   ) AND system_to IS NULL
                 """, (now, target_id, target_id, edge_id))
+            if inherited is not None:
+                write_scope_row(conn, {
+                    **inherited, "node_id": source_id, "event_id": event_id, "stamped_at": now,
+                })
         return edge_id
+
+    @staticmethod
+    def _inherited_scope(
+        source: Mapping[str, Any] | None, target: Mapping[str, Any] | None, *,
+        node_type: str, payload: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """The row a successor takes from the record it closes, if it has none.
+
+        Supersession closes a record for every thread, so a client rule that means
+        to win over a central one uses ``overrides``. A central row is written only
+        at ratification, so it is never handed on either.
+        """
+        if target is None:
+            return None
+        if target["scope_kind"] == "central":
+            if source is None or source["scope_kind"] == "client":
+                raise ValidationError("a record with no scope or a client scope cannot supersede a central record")
+            return None
+        if source is not None:
+            return None
+        require_fits_node(target, node_type, payload)
+        return target
 
     def append_derived_node(
         self,
@@ -775,6 +819,7 @@ class ImprintStore:
         proposed_by: str,
         model: str | None = None,
         prompt_recipe: str | None = None,
+        scope: Mapping[str, Any] | None = None,
     ) -> str:
         """Append an extracted or inferred object after deterministic validation."""
         if self.expected_operator_id is not None and operator_id != self.expected_operator_id:
@@ -798,6 +843,9 @@ class ImprintStore:
             raise ValidationError("valid_from must be an RFC3339 timestamp") from exc
         if parsed_valid_from.tzinfo is None:
             raise ValidationError("valid_from must include timezone")
+        # This path has no payload contract, so the stamp is what keeps a
+        # domain_id off a client record.
+        stamp = self._node_stamp(scope, node_type, payload)
         node_id = make_urn(node_type.lower())
         event_id = make_urn("event")
         now = utc_now()
@@ -834,10 +882,18 @@ class ImprintStore:
                  )).decode(), json.dumps(evidence_ids), valid_from, None,
                  now, None, event_id, None),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return node_id
 
-    def append_semantic_node(self, contract: dict[str, Any], *, valid_from: str) -> str:
-        """Persist one fully typed semantic contract through the canonical writer."""
+    def append_semantic_node(
+        self, contract: dict[str, Any], *, valid_from: str, scope: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Persist one fully typed semantic contract through the canonical writer.
+
+        ``scope`` never reaches the creation event, because import compares that
+        event with the version it created.
+        """
         value = validate_node_contract(contract)
         try:
             parsed_valid_from = datetime.fromisoformat(valid_from.replace("Z", "+00:00"))
@@ -853,6 +909,7 @@ class ImprintStore:
         if node_type == "DirectionScore":
             raise ValidationError("DirectionScore is an analytical comparison and cannot be persisted")
         payload = value["payload"]
+        stamp = self._node_stamp(scope, node_type, payload)
         provenance = value["provenance"]
         evidence_ids = provenance["evidence_ids"]
         event_id = make_urn("event")
@@ -936,6 +993,8 @@ class ImprintStore:
                  )).decode(), json.dumps(evidence_ids), valid_from, None,
                  now, None, event_id, None),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return node_id
 
     def append_semantic_relation(self, contract: dict[str, Any], *, valid_from: str) -> str:
@@ -1144,8 +1203,14 @@ class ImprintStore:
             )
         return "applied"
 
-    def ratify_node(self, node_id: str, *, ratifier: str, note: str = "") -> str:
-        """Promote an inferred/extracted object through an explicit append-only event."""
+    def ratify_node(
+        self, node_id: str, *, ratifier: str, note: str = "",
+        scope: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Promote an inferred/extracted object through an explicit append-only event.
+
+        ``scope`` lands in this step's transaction, and a row already on the node stands.
+        """
         if not isinstance(ratifier, str) or not ratifier.strip():
             raise ValidationError("ratifier identity is required")
         now = utc_now()
@@ -1171,6 +1236,7 @@ class ImprintStore:
                 self._require_configured_operator(current["operator_id"])
                 if ratifier != current["operator_id"]:
                     raise ValidationError("typed semantic authority may be ratified only by its operator")
+            stamp = self._node_stamp(scope, current["node_type"], json.loads(current["payload_json"]))
             next_payload_json = current["payload_json"]
             next_payload_sha256 = current["payload_sha256"]
             if current["node_type"] in {"SelfModelAssertion", "InterventionRule"}:
@@ -1209,6 +1275,8 @@ class ImprintStore:
                  )).decode(), current["evidence_json"], current["valid_from"],
                  current["valid_to"], now, None, event_id, current["version_id"]),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return event_id
 
     def correct_typed_node(
