@@ -287,6 +287,12 @@ switches off delivery is unchanged.
   long as there is room, and is then done. One whose whole line can never fit counts
   as delivered from its short line, and so does a local record, cut or not, because
   nothing picks it and it would otherwise go out cut on every turn.
+- Only a pick can send a cut record whole, so nothing else sends one again. The
+  deterministic fallback keeps out records still owed a whole line as well as those
+  delivered, and a turn Jev owns keeps them out of its local records. A cut record
+  therefore goes out once in an outage, however often the store moves, and its
+  place goes to a record not yet sent. On whole lines the fallback can still deliver
+  a compact pick, because there it has the whole line to send.
 - Once a section has refused a line, the rest of its records over 400 bytes are
   passed over without being cut, because cutting reads all of a long record and
   session start meets every eligible one. Shorter records can still fill the room.

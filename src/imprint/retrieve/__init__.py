@@ -173,7 +173,7 @@ class SelectorDecision:
     delivers exactly its deterministic behavior, reusing ``context`` so the
     store is not read twice, minus ``exclude_ids``: records Jev already
     delivered into this session, which today's once-per-session latch would
-    never repeat.
+    never repeat. On a short route they include records still owed a whole line.
     """
 
     method: str
@@ -389,8 +389,12 @@ def select_prompt_payload(
     session_ref = _session_ref(session_id)
 
     def already_sent() -> frozenset[str]:
-        # Shadow never delivers, so only jev mode has picks to keep out.
-        return frozenset() if shadow else frozenset(delivered_ids)
+        # Shadow never delivers, so only jev mode has picks to keep out. On a short
+        # route a record still owed a whole line is kept out as well: only a pick can
+        # send it whole, and anything else could only repeat its cut text.
+        if shadow:
+            return frozenset()
+        return frozenset(delivered_ids | retried_ids if short_lines else delivered_ids)
     try:
         jev = selector["jev"]
         log = bool(jev.get("log_decisions", True))
@@ -492,10 +496,11 @@ def select_prompt_payload(
         assert scope is not None
         # Records Imprint never sends (an excluded domain, an unselected type,
         # no statement) keep their deterministic delivery.
+        sent = already_sent()
         never_sent = [
             item for item in candidates
             if item.section in local_sections and item.record_id not in sendable
-            and item.record_id not in delivered_ids
+            and item.record_id not in sent
         ]
         local_records = [item for item in never_sent if stale is None or stale.keeps(item)]
         result = replace(result, withheld=result.withheld + len(never_sent) - len(local_records))

@@ -6,6 +6,7 @@ import io
 import json
 import random
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -500,15 +501,100 @@ def test_a_rule_cut_on_a_short_line_arrives_whole_once_on_a_later_turn(tmp_path,
     assert len(transport.statements) == 2
 
 
-def test_the_fallback_keeps_out_what_went_whole_and_not_what_was_cut(tmp_path, transport, records):
+def test_a_fallback_keeps_out_what_went_whole_and_what_it_could_only_repeat_cut(tmp_path, transport, records):
     long = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}")
     plain = record(2, text="Never ship on a Friday.")
     records.extend([long, plain])
-    commit(tmp_path, select(tmp_path, "first turn"))
+    first = select(tmp_path, "first turn")
+    assert first.response["retry_ids"] == [long.record_id]
+    commit(tmp_path, first)
     transport.error = TimeoutError("synthetic timeout")
     fallback = select(tmp_path, "second turn")
     assert fallback.fallback_reason == "timeout"
-    assert fallback.exclude_ids == frozenset({plain.record_id})
+    assert fallback.exclude_ids == frozenset({long.record_id, plain.record_id})
+
+
+def test_on_whole_lines_a_fallback_can_still_deliver_a_compact_pick_whole(tmp_path, transport, records):
+    records.extend(record(index, text=f"Never use template {index}. {BACKGROUND * 4}") for index in range(1, 3))
+
+    def whole_route(state):
+        return select_prompt_payload(
+            FakeStore(), root=tmp_path, session_id="synthetic-session", state=state, explicit_domain=None,
+            budget=4096, selector=selector_config(), mode="jev",
+        )
+    first = whole_route("first turn")
+    assert first.response["retry_ids"] == [item.record_id for item in records]
+    commit(tmp_path, first)
+    transport.error = TimeoutError("synthetic timeout")
+    assert whole_route("second turn").exclude_ids == frozenset()
+
+
+@pytest.fixture
+def snapshots(monkeypatch):
+    """Let a test move the store on between turns."""
+    moved = {"turn": 0}
+    monkeypatch.setattr(retrieval, "_snapshot_id", lambda store: f"synthetic-snapshot-{moved['turn']}")
+    return moved
+
+
+def test_an_outage_sends_a_cut_record_once_however_often_the_store_moves(
+    tmp_path, records, snapshots, transport, monkeypatch, capsys,
+):
+    long = [
+        record(index, text=f"Long rule {index}. {BACKGROUND}", section="domain", domain_id="research")
+        for index in range(1, 5)
+    ]
+    plain = [
+        record(index, text=f"Plain rule {index}.", section="domain", domain_id="research")
+        for index in range(5, 40)
+    ]
+    records.extend(long + plain)
+    transport.error = TimeoutError("synthetic timeout")
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True})
+    sent: Counter[str] = Counter()
+    for turn in range(10):
+        snapshots["turn"] = turn
+        event = {"session_id": "s", "prompt": f"turn {turn}", "domain_id": "research"}
+        body = hook(config, "user-prompt-submit", event, monkeypatch, capsys)
+        assert body["selector_method"] == "deterministic_fallback"
+        sent.update(line["record_id"] for line in delivered(body))
+    assert sent == Counter({item.record_id: 1 for item in records})
+
+
+def test_a_cut_record_an_outage_sent_is_settled_by_what_happens_to_it_after(
+    tmp_path, records, snapshots, transport, monkeypatch, capsys,
+):
+    pick_ = record(1, text=f"Never use the vendor template. {BACKGROUND * 2}", section="domain", domain_id="research")
+    offer = record(2, text=f"An offer with a long description. {BACKGROUND * 2}", section="domain", domain_id="research",
+                   ontology_partition="business_declared", ontology_type="Offer", judgment_statement=None)
+    records.extend([pick_, offer])
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True})
+    transport.error = TimeoutError("synthetic timeout")
+    event = {"session_id": "s", "domain_id": "research"}
+    outage = hook(config, "user-prompt-submit", {**event, "prompt": "outage"}, monkeypatch, capsys)
+    assert {line["record_id"]: line["text_complete"] for line in delivered(outage)} == {
+        pick_.record_id: False, offer.record_id: False,
+    }
+    transport.error = None
+    snapshots["turn"] = 1
+    recovered = hook(config, "user-prompt-submit", {**event, "prompt": "recovered"}, monkeypatch, capsys)
+    assert recovered["selector_method"] == "jev"
+    (line,) = delivered(recovered)
+    assert (line["record_id"], line["text"]) == (pick_.record_id, pick_.text)
+
+
+def test_a_cut_local_record_is_not_sent_again_when_jev_comes_back(tmp_path, records, snapshots, transport, monkeypatch, capsys):
+    offer = record(2, text=f"An offer with a long description. {BACKGROUND * 2}", section="domain", domain_id="research",
+                   ontology_partition="business_declared", ontology_type="Offer", judgment_statement=None)
+    records.extend([offer, record(3, text="Never ship on a Friday.")])
+    config = jev_config(tmp_path, **{SHORT_LINES_PROMPT: True})
+    transport.error = TimeoutError("synthetic timeout")
+    event = {"session_id": "s", "domain_id": "research"}
+    hook(config, "user-prompt-submit", {**event, "prompt": "outage"}, monkeypatch, capsys)
+    transport.error = None
+    snapshots["turn"] = 1
+    recovered = hook(config, "user-prompt-submit", {**event, "prompt": "recovered"}, monkeypatch, capsys)
+    assert offer.record_id not in [line["record_id"] for line in delivered(recovered)]
 
 
 def test_a_cut_local_record_is_sent_once_not_on_every_turn(tmp_path, transport, records):
