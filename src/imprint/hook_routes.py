@@ -2,8 +2,9 @@
 
 Inside a hook, an empty answer and a dead selector look alike, and the agent sees
 neither. Each turn of the two hooks that deliver memory therefore lands on exactly
-one of ``OUTCOMES``, read from what the hook itself emitted, and appends one line to
-``logs/hook-routes.jsonl``. Lines hold no prompt, statement, record id or domain.
+one of ``OUTCOMES``, read from what the hook itself emitted and, where that cannot say,
+from the retrieval behind it, and appends one line to ``logs/hook-routes.jsonl``.
+Lines hold no prompt, statement, record id or domain.
 
 A hook that runs under the bridge hands its line to the bridge, because only the
 bridge knows whether the host received the output, and it alone sees the failures
@@ -190,9 +191,10 @@ class HookTurn:
 def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     """Last-day outcome counts per route, and the run of failed selections the log ends on.
 
-    A turn Jev answered ends a run. A turn that never asked Jev says nothing about it,
-    so it neither adds to a run nor ends one. Damaged lines count as nothing, and so do
-    stamps outside the window, which is how a store's history ages out.
+    A turn Jev answered ends a run. A failed selection adds to one, even if it failed
+    before it could ask. Any other turn says nothing about Jev, so it neither adds to a
+    run nor ends one. Damaged lines count as nothing, and so do stamps outside the
+    window, which is how a store's history ages out.
     """
     current = time.time() if now is None else now
     outcomes = {route: dict.fromkeys(OUTCOMES, 0) for route in ROUTES.values()}

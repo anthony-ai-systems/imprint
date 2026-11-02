@@ -13,7 +13,8 @@ _DEGRADING_CAPTURE_SKIPS = (
     "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
 )
 # A live service can time out once. This many failed selections in a row, with no
-# reply from Jev between them, means it is down. The window is the hook route log's.
+# reply from Jev between them, means it is down or selection cannot reach it. The
+# window is the hook route log's.
 SELECTOR_FAILURE_LIMIT = 3
 
 

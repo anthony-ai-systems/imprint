@@ -34,9 +34,12 @@ check failed, so every turn falls back to deterministic delivery. Set the key in
 variable `selector.jev.api_key_env` names, or make `selector.jev.api_key_file` a
 private regular file you own. A key set only for the hooks reads as missing from
 another shell. `selector_failures_repeated` means 3 selections failed in a row with
-no reply from Jev. `logs/hook-routes.jsonl` gives each turn's `detail`, such as
-`timeout` or `http_error`. The reason clears on the first turn Jev answers, or when
-the failures pass 24 hours. See Hook route log in `docs/configuration.md`.
+no reply from Jev. Jev may be down, or selection may be failing on this side before
+it can ask. `logs/hook-routes.jsonl` gives each turn's `detail`, such as `timeout`,
+`http_error` or `missing_key`. A failure after Jev replied, such as a full disk, does
+not count: it reads `failed` with `answered` true. The reason clears on the first turn
+Jev answers, or when the failures pass 24 hours. See Hook route log in
+`docs/configuration.md`.
 
 ## Cloud-sync root refused
 

@@ -151,7 +151,7 @@ def commit_payload_delivery(
 def committed_delivery(
     *, root: Path, session_id: str, snapshot_id: str, domain_id: str | None = None,
 ) -> dict[str, object] | None:
-    """What a latch's committed delivery held, or None if it cannot say. Never raises."""
+    """What a latch's committed delivery held, or None if it cannot say."""
     return DeliveryReceipts(Path(root) / "receipts").committed_response(
         _session_ref(session_id), snapshot_id, domain_id,
     )

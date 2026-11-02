@@ -8,6 +8,9 @@
   `selector_failures_repeated` is raised by 3 failed selections in a row, all from the
   last 24 hours. One timeout does not raise it, any turn Jev answers clears it, and old
   failures age out by themselves. A turn with nothing to send to Jev is not a failure.
+  A hook that gave output it could not use, reported no route line or could not start
+  now leaves a file in `logs/hook-failures`, as a crash does, so `hook_failures_present`
+  reports it. What reaches the host does not change.
   Health gains `hook_route_outcomes_24h`, `hook_route_evidence`,
   `selector_failures_in_a_row` and `selector_failure_limit`, and no existing field or
   reason changes. When a reason is raised, the health hook's line at session start
@@ -17,8 +20,12 @@
   whatever `selector.jev.log_decisions` says. Each turn lands on exactly one of
   `delivered`, `nothing_relevant`, `already_delivered`, `scratch_skip` or `failed`. A
   failed selection stays `failed` even when the deterministic path then delivers, and
-  the line's byte count says what went out. No hook delivers a different byte, and no
-  config key is added.
+  the line's byte count says what went out. A repeat of a turn that delivered nothing
+  comes to what that turn came to, and records too big for the budget read `failed`
+  with `oversized_records`. The decision log's `stages` can gain `session_held` and
+  `local_unfit`. Neither memory hook delivers a different byte, and no config key is
+  added. The health hook's JSON gains the health fields above on every run, and the
+  context it gives the agent changes only when a reason is raised.
 - Add short delivered lines, off by default behind two switches,
   `org.imprint.short_lines.prompt` and `org.imprint.short_lines.session_start`. A
   short line keeps `authority`, `record_id`, the record's words and, on anything but
