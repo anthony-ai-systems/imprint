@@ -267,8 +267,10 @@ switches off delivery is unchanged.
   it. `org.imprint.short_lines.session_start` covers SessionStart, which stays
   deterministic: the same store and request give the same bytes. `imprint retrieve`,
   with or without `--prompt`, and analytical retrieval always give whole lines.
-- A short line has `authority`, `record_id` and `text`. `text` is always the record's
-  own words, and text over 400 bytes is cut. Text that was cut adds `text_basis` and
+- A short line has `authority`, `record_id` and `text`, and `partition` on anything
+  but a judgment, at up to 35 bytes. Authority alone cannot keep a declared claim from
+  an observed result, or a chosen future from a rule, so that label stays. `text` is
+  always the record's own words, and text over 400 bytes is cut. Text that was cut adds `text_basis` and
   `"text_complete": false`, and a line without them has all of its text. Picks whose
   text fits a short line go short even when they would all fit whole.
 - A pick whose text would be cut is delivered on a whole line instead when that line

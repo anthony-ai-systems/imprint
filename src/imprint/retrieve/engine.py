@@ -17,6 +17,7 @@ from imprint.capture.detector import (
 from .models import (
     CHOSEN_FUTURE_PARTITION,
     DEFAULT_FUTURE_PARTITION,
+    JUDGMENT_PARTITION,
     ONTOLOGY_PARTITIONS,
     AuthorityMode,
     RetrievalConfig,
@@ -311,12 +312,16 @@ def render_short(
     This shapes one delivery only. The text is always the record's own words:
     ``_short_text`` says how a long one is cut. ``authority`` says how far to trust it
     and ``record_id`` is what ``imprint history`` takes to return the rest, so neither
-    is ever left off. ``text_basis`` and ``text_complete`` appear only on text that was
-    cut, so their absence means the text is all there. ``lookup`` adds ``detail``, the
-    form of that command, which one line of a payload can say for all of them.
+    is ever left off. ``partition`` appears on anything but a judgment, because a
+    declared claim and an observed result can read alike under the same authority.
+    ``text_basis`` and ``text_complete`` appear only on text that was cut, so their
+    absence means the text is all there. ``lookup`` adds ``detail``, the form of that
+    command, which one line of a payload can say for all of them.
     """
     text, basis = _short_text(record, rules)
     value: dict[str, object] = {"authority": _authority(record), "record_id": record.record_id, "text": text}
+    if record.ontology_partition != JUDGMENT_PARTITION:
+        value["partition"] = record.ontology_partition
     if lookup:
         value["detail"] = SHORT_LINE_DETAIL
     if not whole_text_fits(record):

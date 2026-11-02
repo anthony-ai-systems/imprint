@@ -154,6 +154,43 @@ def test_a_short_line_keeps_the_authority_a_whole_line_gives(status, tier, autho
     assert json.loads(render_short(item))["authority"] == json.loads(_render(item))["authority"] == authority
 
 
+def labelled(partition: str, node_type: str, text: str) -> RetrievalRecord:
+    return record(text=text, provenance_status="ratified", authority_tier="ratified_knowledge",
+                  ontology_partition=partition, ontology_type=node_type, judgment_statement=None)
+
+
+@pytest.mark.parametrize("partition, node_type", [
+    ("business_declared", "Claim"), ("business_observed", "Result"), ("self_model", "SelfModelAssertion"),
+    ("chosen_future", "ChosenFuture"), ("default_future", "DefaultFuture"),
+    ("direction_comparison", "DirectionComparison"),
+])
+def test_a_short_line_says_a_partition_that_is_not_judgment(partition, node_type):
+    item = labelled(partition, node_type, RULE)
+    line = json.loads(render_short(item))
+    assert line == {"authority": "ratified", "partition": partition, "record_id": item.record_id, "text": RULE}
+    assert line["partition"] == json.loads(_render(item))["ontology"]["partition"]
+
+
+def test_declared_theory_and_observed_evidence_stay_apart_on_short_lines():
+    declared = labelled("business_declared", "Claim", "Onboarding calls halve churn inside 90 days.")
+    observed = labelled("business_observed", "Result", "Onboarding calls halved churn inside 90 days.")
+    assert json.loads(render_short(declared))["partition"] != json.loads(render_short(observed))["partition"]
+
+
+def test_a_judgment_pays_nothing_for_the_partition_label():
+    item = record()
+    assert "partition" not in json.loads(render_short(item))
+    assert len(render_short(item)) == len(render_short(record()))
+
+
+def test_the_label_costs_a_line_at_most_35_bytes():
+    plain = record()
+    assert max(
+        len(render_short(labelled(partition, "Claim", RULE))) - len(render_short(plain))
+        for partition in ("business_declared", "business_observed", "direction_comparison")
+    ) == 35
+
+
 def test_the_lookup_is_said_only_when_asked_for():
     line = json.loads(render_short(record(), lookup=True))
     assert line["detail"] == SHORT_LINE_DETAIL == "imprint history <record_id>"
