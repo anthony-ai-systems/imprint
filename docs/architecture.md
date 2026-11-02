@@ -41,6 +41,47 @@ SQLite is canonical. Markdown is a human-readable projection. JSON-LD is the
 lossless portable graph projection. Optional Atlas or Neo4j integrations are
 adapters, never required canonical stores.
 
+## Record scope
+
+The `record_scope` table holds at most one row per retrievable record: whose it
+is (`client`, `central`, `system`, `unresolved` or `held`), an optional client
+and project, a delivery tag and rank, and any `overrides`. The row is keyed by
+node, so a new version keeps it. A record with no row is legacy. This release
+only carries scope: no delivery route reads a row, and with no row and no scope
+extension the output matches the previous release byte for byte. The store and
+record schema versions do not move, and an older build still opens the store. The
+snapshot id moves at the first row, and then whenever a row changes.
+
+- **Capture.** An envelope may carry the `org.imprint.scope` extension, as
+  `{schema_version, payload}`. The compiler writes the row in the capture's own
+  transaction and quarantines a spool whose stamp is invalid. A stamp cannot say
+  `central` and cannot carry `overrides`. Nothing adds the extension yet, so the
+  Stop hook, `imprint capture` and a `CapturePipeline.capture` caller that passes
+  no `extensions` all write legacy records.
+- **A `held` stamp** can list `candidate_client_ids`. The list stays on the event,
+  where `imprint history` shows it in `event_payload`, and has no column.
+- **`imprint scope set`** appends a `scope_changed` event and updates the row in
+  one transaction, moving only what it names, and `resolved_by` becomes `explicit`.
+  It is the only way out of `held`. It takes `--override` only for a current central
+  record, and `scope_changed` is the only event that carries overrides. Because a
+  row sits beside the node's versions, a change adds no version. `imprint history`
+  lists the event and shows the current row as `scope`, or no `scope` when there is
+  no row.
+- **Other paths.** `ontology add-node`, `observation add` and `outcome add` take
+  `--scope-kind`, `--scope-client` and `--scope-project`, and write no row without
+  them. `imprint ratify apply` stamps a new node `unresolved`, except a Domain.
+  `import_legacy_principles` stamps `unresolved` unless given a scope.
+  `imprint ingest keep` writes no row yet.
+- **Supersession.** A successor keeps its own row. With none, it takes a copy of
+  the target's row in the same event. Superseding a central record needs a
+  successor that has its own row and is not `client`, because a client record adds
+  to a central one through `overrides` and never replaces it.
+- **Who writes `central`.** Nothing in this release does. `imprint scope set`, a
+  capture stamp and the ontology flags all refuse it, and import accepts it only on
+  a ratified record.
+- **Retrieval.** `RetrievalRecord.scope` carries the row. Eligibility, ordering and
+  rendering ignore it.
+
 ## Semantic ontology contract
 
 The store schema and semantic ontology are versioned independently. The generic

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Carry a scope on each record, with nothing reading it yet. A new `record_scope`
+  table holds one row per retrievable record, and a record with none is legacy. A
+  capture can bring a row through the `org.imprint.scope` extension, `imprint scope
+  set` changes one and appends a `scope_changed` event, and `imprint history` shows
+  both. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,
+  `--scope-client` and `--scope-project`. `imprint ratify apply` now stamps each new
+  record except a Domain `unresolved`, so its first run writes the first row and
+  moves the snapshot id once. Delivered text does not change. Rows cross JSON-LD
+  under a new `imprint:recordScope` key, come with a backup file, and go with a
+  purge. With no rows and no extension, output matches the previous release byte for
+  byte, the store and record schema versions stay 3.0.0, and an older build still
+  opens the store.
 - Send Jev nothing from T3's scratch chats. Under `t3_capture_origin`, the prompt
   hook and `imprint retrieve --prompt` give a thread T3's records place in its
   scratch folder the deterministic answer, with `selector_outcome`

@@ -20,6 +20,10 @@
 - The ontology can store ZMOS/self-model, chosen-direction, business observation,
   confidence, calibration, consent, and outcome records now. Automatic ZMOS,
   Operating Portrait, Mirror Score, and intervention engines are not included.
+- Scope is carried, not enforced. A record's scope row does not limit who
+  receives it, so every thread still gets every eligible record. Nothing stamps a
+  capture on its own yet, and a build that is rolled back to compile a stamped
+  capture keeps the stamp on the event and writes no row.
 - No software can guarantee that sensitive data is safe on a compromised host.
 
 ## Explicit non-claims
