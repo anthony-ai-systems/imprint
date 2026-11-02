@@ -408,6 +408,15 @@ def test_health_gains_fields_only(tmp_path):
     assert report["metrics"]["hook_route_evidence"] == "operator_logs_hook_routes_tail"
 
 
+def test_a_working_selector_adds_no_reason(tmp_path):
+    """The health hook's line at session start is built from these reasons alone."""
+    (tmp_path / "plain").mkdir()
+    (tmp_path / "live").mkdir()
+    plain = report_for(tmp_path / "plain", mode="deterministic")
+    live = report_for(tmp_path / "live", *ages(60, 70), {**empty(), "_age": 50})
+    assert live["degraded_reasons"] == plain["degraded_reasons"]
+
+
 def test_the_fallback_count_still_counts_what_it_counted(tmp_path):
     empty_pool = {"ts": jev._utc_stamp(), "outcome": "fallback", "fallback_reason": "no_candidates"}
     jev.log_decision(tmp_path, empty_pool)
