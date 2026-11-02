@@ -36,6 +36,9 @@ class _RouteLine:
         if self.written:
             return
         self.written = True
+        if not isinstance(self.entry, dict) and self.error == "hook_route_unreported":
+            # Nothing but this bridge saw it, and the output itself is not the fault.
+            _persist_failure(self.action, subprocess.CompletedProcess((), None, "", "hook reported no route line"))
         try:
             from imprint.config import effective_selector_mode, load_config, resolved_operator_root
             from imprint.hook_routes import failed_entry, record_route
@@ -172,6 +175,7 @@ def _run(action: str, line: _RouteLine) -> int:
         _persist_failure(action, subprocess.CompletedProcess(exc.cmd, None, "", "hook action timed out"))
         return _failure(action, "hook_action_timeout", line, stop_hook_active=stop_hook_active)
     except OSError:
+        _persist_failure(action, subprocess.CompletedProcess((), None, "", "hook executable unavailable"))
         return _failure(action, "hook_executable_unavailable", line, stop_hook_active=stop_hook_active)
     body = None
     valid_degraded_health = False
@@ -189,6 +193,7 @@ def _run(action: str, line: _RouteLine) -> int:
             try:
                 body = json.loads(process.stdout)
             except json.JSONDecodeError:
+                _persist_failure(action, process)
                 return _failure(action, "hook_output_invalid", line, stop_hook_active=stop_hook_active)
         if valid_degraded_health:
             reasons = body.get("degraded_reasons")

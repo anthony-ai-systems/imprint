@@ -914,6 +914,10 @@ def run_bridge(bridge, monkeypatch, action=SUBMIT, event="{}"):
     return bridge.run(action)
 
 
+def failure_files(tmp_path: Path) -> list[Path]:
+    return sorted((operator_root(tmp_path) / "logs" / "hook-failures").glob("*.json"))
+
+
 def entry_for(outcome="delivered", byte_count=7) -> dict:
     return {
         "answered": True, "bytes": byte_count, "detail": "picked", "method": "jev", "mode": "jev",
@@ -927,6 +931,7 @@ def test_the_bridge_writes_the_hook_s_line_and_keeps_it_from_the_host(tmp_path, 
     assert run_bridge(bridged, monkeypatch) == 0
     assert json.loads(capsys.readouterr().out) == child
     assert route_lines(tmp_path) == [entry_for()]
+    assert failure_files(tmp_path) == []
 
 
 def test_a_line_is_written_before_the_delivery_commit(tmp_path, bridged, monkeypatch, capsys):
@@ -955,6 +960,7 @@ def test_a_child_that_never_finished_is_one_failed_line(tmp_path, bridged, monke
     assert run_bridge(bridged, monkeypatch) == 0
     (line,) = route_lines(tmp_path)
     assert (line["outcome"], line["detail"], line["method"], line["mode"]) == ("failed", error, None, "deterministic")
+    assert len(failure_files(tmp_path)) == 1
 
 
 def test_a_child_that_failed_is_one_failed_line_whatever_it_said(tmp_path, bridged, monkeypatch, capsys):
@@ -969,12 +975,14 @@ def test_output_the_host_never_got_is_one_failed_line(tmp_path, bridged, monkeyp
     assert run_bridge(bridged, monkeypatch) == 0
     (line,) = route_lines(tmp_path)
     assert (line["outcome"], line["detail"]) == ("failed", "hook_output_invalid")
+    assert len(failure_files(tmp_path)) == 1
 
 
 def test_input_that_cannot_be_read_is_one_failed_line(tmp_path, bridged, monkeypatch, capsys):
     assert run_bridge(bridged, monkeypatch, event="{not json") == 0
     (line,) = route_lines(tmp_path)
     assert (line["outcome"], line["detail"]) == ("failed", "hook_input_invalid")
+    assert failure_files(tmp_path) == []
 
 
 @pytest.mark.parametrize("stdout", ["", '{"status": "delivered"}', "[]"], ids=["silent", "no_line", "not_an_object"])
@@ -983,6 +991,40 @@ def test_a_child_that_reports_no_line_is_one_failed_line(tmp_path, bridged, monk
     assert run_bridge(bridged, monkeypatch) == 0
     (line,) = route_lines(tmp_path)
     assert (line["outcome"], line["detail"]) == ("failed", "hook_route_unreported")
+    assert len(failure_files(tmp_path)) == 1
+
+
+def test_a_turn_with_no_line_does_not_copy_what_it_delivered_into_a_failure_file(tmp_path, bridged, monkeypatch, capsys):
+    delivered = {"status": "delivered", "hookSpecificOutput": {"additionalContext": "synthetic delivered words"}}
+    child_returns(bridged, monkeypatch, stdout=json.dumps(delivered))
+    assert run_bridge(bridged, monkeypatch) == 0
+    assert json.loads(capsys.readouterr().out) == delivered
+    (failure,) = failure_files(tmp_path)
+    assert "synthetic delivered words" not in failure.read_text()
+
+
+FAULTS = {
+    "output_not_json": lambda bridge, monkeypatch: child_returns(bridge, monkeypatch, stdout="not json"),
+    "silent": lambda bridge, monkeypatch: child_returns(bridge, monkeypatch, stdout=""),
+    "no_line": lambda bridge, monkeypatch: child_returns(bridge, monkeypatch, stdout='{"status": "delivered"}'),
+    "unavailable": lambda bridge, monkeypatch: child_raises(bridge, monkeypatch, FileNotFoundError("synthetic")),
+}
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_a_turn_the_bridge_saw_fail_reaches_health(tmp_path, bridged, monkeypatch, capsys, fault):
+    FAULTS[fault](bridged, monkeypatch)
+    assert run_bridge(bridged, monkeypatch) == 0
+    capsys.readouterr()
+    cli.main(["--config", str(tmp_path / "config.json"), "health"])
+    assert "hook_failures_present" in json.loads(capsys.readouterr().out)["degraded_reasons"]
+
+
+@pytest.mark.parametrize("fault", ["output_not_json", "unavailable"])
+def test_the_stop_hook_leaves_the_same_trace(tmp_path, bridged, monkeypatch, capsys, fault):
+    FAULTS[fault](bridged, monkeypatch)
+    assert run_bridge(bridged, monkeypatch, "stop-capture") == 0
+    assert len(failure_files(tmp_path)) == 1
 
 
 def test_output_that_cannot_reach_the_host_is_one_failed_line(tmp_path, bridged, monkeypatch, capsys):
@@ -998,6 +1040,7 @@ def test_output_that_cannot_reach_the_host_is_one_failed_line(tmp_path, bridged,
         bridged.run(SUBMIT)
     (line,) = route_lines(tmp_path)
     assert (line["outcome"], line["detail"]) == ("failed", "hook_route_unreported")
+    assert len(failure_files(tmp_path)) == 1
 
 
 def test_a_bridge_that_cannot_find_its_root_still_answers_the_host(bridged, monkeypatch, capsys):
@@ -1012,6 +1055,7 @@ def test_the_bridge_writes_no_line_for_a_hook_that_delivers_no_memory(tmp_path, 
     child_returns(bridged, monkeypatch, stdout='{"status": "skipped"}')
     assert run_bridge(bridged, monkeypatch, action) == 0
     assert route_lines(tmp_path) == []
+    assert failure_files(tmp_path) == []
 
 
 def test_a_hook_under_the_bridge_hands_its_line_over(tmp_path, monkeypatch, capsys):
