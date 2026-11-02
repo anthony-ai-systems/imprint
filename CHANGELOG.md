@@ -22,6 +22,10 @@
 - Add `whole_line` to `imprint history`: the record's whole retrieval line, read as
   delivery reads it. History had no ontology labels and did not say which evidence
   is a source receipt.
+- Count a prompt from a T3 window marked for scripting. A `user`/`mcp` prompt outside
+  a scratch chat is refused as before, and now logs `t3_marked_window`, which also
+  degrades health, because a person's typing there would otherwise be lost with no
+  sign. A machine send from such a window stays an ordinary refusal.
 - Send Jev nothing from T3's scratch chats. Under `t3_capture_origin`, the prompt
   hook and `imprint retrieve --prompt` give a thread T3's records place in its
   scratch folder the deterministic answer, with `selector_outcome`

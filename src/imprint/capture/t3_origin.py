@@ -29,15 +29,19 @@ T3_RECORD_UNAVAILABLE_REASON = "t3_record_unavailable"
 T3_SESSION_REF_UNREADABLE_REASON = "t3_session_ref_unreadable"
 T3_SESSION_UNMATCHED_REASON = "t3_session_unmatched"
 T3_PROMPT_UNMATCHED_REASON = "t3_prompt_unmatched"
+# T3 records user/mcp for a desktop window launched so a script could drive it. It is
+# refused like an agent's prompt, but a person may have typed it, so it is counted.
+T3_MARKED_WINDOW_REASON = "t3_marked_window"
 # T3's "No project" chats live in this folder of its home, as a project whose root
-# it is. Test scripts drive the app there and T3 records what they type as
-# user/web, so no prompt in one is credited, a person's included.
+# it is. Test scripts drive the app there, and old rows and unpatched builds record
+# what they type as user/web, so no prompt in one is credited, a person's included.
 T3_SCRATCH_THREAD_REASON = "t3_scratch_thread"
 _SCRATCH_FOLDER = "scratch"
 _HUMAN_AUTHOR = "user"
 # Sources tied to a person at a T3 client. "server" also covers older records
 # whose client is unknown, so it does not count.
 _CLIENT_SOURCES = frozenset({"web", "mobile"})
+_MARKED_WINDOW_SOURCE = "mcp"
 _RECENT_PROMPTS = 64
 _BUSY_TIMEOUT_SECONDS = 0.25
 _PROMPTS_QUERY = (
@@ -257,7 +261,8 @@ class T3HostOrigin:
         """Why the records could not judge the prompt last asked about, if they could not.
 
         A refused record is a judgment, so it gives no reason here: that is what
-        an agent's prompt looks like, and it stays an ordinary skip.
+        an agent's prompt looks like, and it stays an ordinary skip. A marked window
+        is the exception, because the words in it may be a person's.
         """
         return T3_RECORD_UNAVAILABLE_REASON if self.read_failed else self._miss
 
@@ -317,14 +322,17 @@ class T3HostOrigin:
             not isinstance(message_id, str)
             or not message_id
             or prompt.get("createdBy") != _HUMAN_AUTHOR
-            or not isinstance(source, str)
-            or source not in _CLIENT_SOURCES
             or prompt.get("senderThreadId")
             or prompt.get("notification")
             or prompt.get("scheduledTaskId")
             or _names_a_guest(prompt)
             or strip_effort_prefix(prompt["text"]).startswith(_PLAN_PREFIX)
         ):
+            return None
+        if source == _MARKED_WINDOW_SOURCE:
+            self._miss = T3_MARKED_WINDOW_REASON
+            return None
+        if not isinstance(source, str) or source not in _CLIENT_SOURCES:
             return None
         return words, message_id, prompt
 
