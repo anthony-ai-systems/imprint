@@ -9,7 +9,9 @@ SUPPORTED_HOOK_MAJOR = 1
 # A transcript refused or malformed used to surface as a hook failure. T3 session
 # references going unreadable stops all T3 capture. Any one of these needs someone
 # to look.
-_DEGRADING_CAPTURE_SKIPS = ("t3_session_ref_unreadable", "transcript_malformed", "transcript_refused")
+_DEGRADING_CAPTURE_SKIPS = (
+    "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
+)
 
 
 @dataclass(frozen=True)
