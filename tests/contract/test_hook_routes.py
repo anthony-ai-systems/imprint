@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -468,6 +469,19 @@ def test_a_log_that_cannot_be_written_changes_nothing_delivered(tmp_path, monkey
     root.mkdir(parents=True)
     (root / "logs").write_text("in the way")
     assert hook(config, SUBMIT, IN_DOMAIN, monkeypatch, capsys) == expected
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe")
+def test_a_pipe_at_the_log_path_cannot_hold_a_hook_open(tmp_path):
+    path = route_log_path(tmp_path)
+    path.parent.mkdir()
+    os.mkfifo(path)
+    writer = threading.Thread(
+        target=routes.record_route, args=(tmp_path, routes.failed_entry(START, "hook_exception", mode="jev")), daemon=True,
+    )
+    writer.start()
+    writer.join(5)
+    assert not writer.is_alive()
 
 
 def test_a_line_that_cannot_be_built_changes_nothing_delivered(tmp_path, monkeypatch, capsys):

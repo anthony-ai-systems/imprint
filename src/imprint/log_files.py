@@ -27,7 +27,11 @@ def append_capped(path: Path, entry: Mapping[str, object], max_bytes: int) -> No
     if size >= 0 and size + len(line) > max_bytes:
         os.replace(path, rotated_path(path))
         size = -1
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    # O_NONBLOCK is for a pipe left at this path, which would hold every hook open.
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
     descriptor = os.open(path, flags, 0o600)
     try:
         os.write(descriptor, line)
