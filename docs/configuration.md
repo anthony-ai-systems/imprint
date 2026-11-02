@@ -250,7 +250,63 @@ sent request also updates `<operator root>/logs/jev-selector-transfer.json`
 timestamps. It is written even when `log_decisions` is `false`, so turning the
 log off or rotating it cannot hide a transfer. `selector_fallbacks_24h` counts
 decision-log lines (current and rotated file), so it stays 0 when
-`log_decisions` is `false`.
+`log_decisions` is `false`. It counts every fallback, including a turn with
+nothing to send, so it cannot tell a failed selection from an empty one. The hook
+route log below can.
+
+## Hook route log
+
+Each turn of the two hooks that deliver memory, session start and the prompt hook,
+appends one line to `<operator root>/logs/hook-routes.jsonl` (private file mode).
+This happens on every selector mode, whatever `log_decisions` says, and it never
+changes what a hook delivers. At 5 MiB the file rotates once to
+`hook-routes.jsonl.1`. The stop and health hooks deliver no memory and write no
+line, and `imprint retrieve` is not a hook, so it writes none either.
+
+Each turn lands on exactly one `outcome`:
+
+- `delivered`: bytes went out, and nothing below applies.
+- `nothing_relevant`: the turn had nothing to deliver. No matched domain, no picks
+  from Jev, an empty store, or a turn with nothing to send to Jev (`no_candidates`)
+  all end here. Empty is not dead.
+- `already_delivered`: this session already has it.
+- `scratch_skip`: the T3 scratch check kept the turn from Jev. T3 is asked only on a
+  turn that would call Jev, so a `deterministic` store never reaches this.
+- `failed`: selection failed, the hook did not finish, or the host never got the
+  output. Picks that cannot fit in the budget, with nothing else delivered, are
+  also `failed`, because they are not the same as nothing relevant.
+
+A failed selection stays `failed`, and a scratch turn stays `scratch_skip`, even
+when the deterministic path then delivers its domain, so a dead Jev on a matched
+domain does not read as `delivered`. `bytes` says what went out either way.
+
+A line holds `ts`, `route` (`session_start` or `user_prompt_submit`), `outcome`,
+`detail`, `bytes`, `mode` (the selector mode in force), `method` (the hook output's
+`selector_method`, or null when the hook could not report one) and `answered`, which
+is true only when Jev replied on that turn. `detail` is a closed code: the fallback
+reason, the selector outcome, the domain diagnostic, or the hook bridge's error. A
+line never holds a prompt, a statement, a record id, a domain or a session.
+
+Health reports the last day as `hook_route_outcomes_24h`, per route and outcome. Two
+degraded reasons come from this and apply only under `selector.mode: jev`. `shadow`
+and `deterministic` stores, and a store `IMPRINT_SELECTOR` turns off, never raise
+them.
+
+- `selector_key_unavailable`: at once, with no traffic needed, when the key check
+  behind `selector_key_present` fails. That covers no environment variable and no
+  key file, and a key file that is empty or that selection would refuse as unsafe.
+  The file is checked and not read. The check sees the environment of the process
+  that runs it, so a key set only for the hooks reads as missing from another shell.
+- `selector_failures_repeated`: 3 or more failed selections in a row
+  (`selector_failure_limit`), all from the last 24 hours. `selector_failures_in_a_row`
+  is the count. A failed selection is a prompt turn under `jev` that fell back for a
+  reason other than `no_candidates`. One timeout does not degrade health, and neither
+  do two. Any turn Jev answered ends the run and clears the reason at once, even if
+  its picks would not fit. A turn that never asked Jev, such as a replay, a scratch
+  turn, session start or a turn with nothing to send, neither adds to a run nor ends
+  it. A failure older than 24 hours no longer counts, so old history ages out by
+  itself. A hook timeout or crash is not a failed selection: `hook_failures_present`
+  already reports those. Damaged log lines count as nothing.
 
 ## Short lines
 

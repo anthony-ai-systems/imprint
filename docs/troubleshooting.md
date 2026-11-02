@@ -29,6 +29,15 @@ counted: `hook_failure_count` is every file, split into
 `hook_failure_recent_count` and `hook_failure_old_count`. Health never deletes
 one. `imprint spool prune` is the only thing that does, and it is never automatic.
 
+`selector_key_unavailable` means the store is on `selector.mode: jev` and the key
+check failed, so every turn falls back to deterministic delivery. Set the key in the
+variable `selector.jev.api_key_env` names, or make `selector.jev.api_key_file` a
+private regular file you own. A key set only for the hooks reads as missing from
+another shell. `selector_failures_repeated` means 3 selections failed in a row with
+no reply from Jev. `logs/hook-routes.jsonl` gives each turn's `detail`, such as
+`timeout` or `http_error`. The reason clears on the first turn Jev answers, or when
+the failures pass 24 hours. See Hook route log in `docs/configuration.md`.
+
 ## Cloud-sync root refused
 
 Move the data root to a local non-synchronized directory and update config. A
