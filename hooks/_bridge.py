@@ -16,6 +16,36 @@ _EVENT_NAMES = {
     "user-prompt-submit": "UserPromptSubmit",
     "health-check": "SessionStart",
 }
+_DELIVERING_ACTIONS = frozenset({"session-start", "user-prompt-submit"})
+
+
+class _RouteLine:
+    """Where one delivering turn came to, written once however the bridge leaves it.
+
+    The hook hands over its line. Anything else that ends the turn is a failure,
+    and only this process can see it, so the hook writes no line of its own.
+    """
+
+    def __init__(self, action: str):
+        self.action = action
+        self.entry = None
+        self.error = "hook_route_unreported"
+        self.written = action not in _DELIVERING_ACTIONS
+
+    def write(self) -> None:
+        if self.written:
+            return
+        self.written = True
+        try:
+            from imprint.config import effective_selector_mode, load_config, resolved_operator_root
+            from imprint.hook_routes import failed_entry, record_route
+
+            config = load_config()
+            mode = effective_selector_mode(config.get("selector"))
+            entry = self.entry if isinstance(self.entry, dict) else failed_entry(self.action, self.error, mode=mode)
+            record_route(resolved_operator_root(config), entry)
+        except Exception:
+            pass
 
 
 def _graceful_run(argv: list[str], payload: str) -> subprocess.CompletedProcess[str]:
@@ -33,7 +63,7 @@ def _graceful_run(argv: list[str], payload: str) -> subprocess.CompletedProcess[
         stderr=subprocess.PIPE,
         text=True,
         # Preserve IMPRINT_CAPTURE_ORIGIN from the caller; never derive it from prompt text.
-        env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1"),
+        env=dict(os.environ, IMPRINT_DEFER_DELIVERY_COMMIT="1", IMPRINT_DEFER_ROUTE_LINE="1"),
     )
     try:
         stdout, stderr = process.communicate(payload, timeout=HOOK_TIMEOUT_SECONDS)
@@ -73,7 +103,7 @@ def _persist_failure(action: str, process: subprocess.CompletedProcess[str]) -> 
         pass
 
 
-def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
+def _failure(action: str, error: str, line: _RouteLine, *, stop_hook_active: bool = False) -> int:
     """Stop fails closed only on a definite capture failure; everything else
     fails open visibly.
 
@@ -84,6 +114,7 @@ def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
     whenever the install is degraded. A block also never repeats once
     stop_hook_active says a previous block already happened.
     """
+    line.error = error
     blocking = (
         action == "stop-capture"
         and error == "hook_action_failed"
@@ -113,14 +144,22 @@ def _failure(action: str, error: str, *, stop_hook_active: bool = False) -> int:
 
 
 def run(action: str) -> int:
+    line = _RouteLine(action)
+    try:
+        return _run(action, line)
+    finally:
+        line.write()
+
+
+def _run(action: str, line: _RouteLine) -> int:
     try:
         event = json.load(sys.stdin)
         # Stays ASCII: a lone surrogate in the event cannot be encoded for the pipe.
         payload = json.dumps(event, separators=(",", ":"))
     except (ValueError, RecursionError):
-        return _failure(action, "hook_input_invalid")
+        return _failure(action, "hook_input_invalid", line)
     if not isinstance(event, dict):
-        return _failure(action, "hook_input_invalid")
+        return _failure(action, "hook_input_invalid", line)
     stop_hook_active = bool(event.get("stop_hook_active"))
     try:
         process = _graceful_run(
@@ -131,9 +170,9 @@ def run(action: str) -> int:
         # The hook reports success to the host, so this is the only trace of the
         # work it gave up on.
         _persist_failure(action, subprocess.CompletedProcess(exc.cmd, None, "", "hook action timed out"))
-        return _failure(action, "hook_action_timeout", stop_hook_active=stop_hook_active)
+        return _failure(action, "hook_action_timeout", line, stop_hook_active=stop_hook_active)
     except OSError:
-        return _failure(action, "hook_executable_unavailable", stop_hook_active=stop_hook_active)
+        return _failure(action, "hook_executable_unavailable", line, stop_hook_active=stop_hook_active)
     body = None
     valid_degraded_health = False
     if action == "health-check" and process.returncode == 2 and process.stdout:
@@ -144,13 +183,13 @@ def run(action: str) -> int:
         valid_degraded_health = isinstance(body, dict) and body.get("status") == "degraded"
     if process.returncode and not valid_degraded_health:
         _persist_failure(action, process)
-        return _failure(action, "hook_action_failed", stop_hook_active=stop_hook_active)
+        return _failure(action, "hook_action_failed", line, stop_hook_active=stop_hook_active)
     if process.stdout:
         if body is None:
             try:
                 body = json.loads(process.stdout)
             except json.JSONDecodeError:
-                return _failure(action, "hook_output_invalid", stop_hook_active=stop_hook_active)
+                return _failure(action, "hook_output_invalid", line, stop_hook_active=stop_hook_active)
         if valid_degraded_health:
             reasons = body.get("degraded_reasons")
             concise_reasons = [
@@ -168,8 +207,11 @@ def run(action: str) -> int:
             })
             body["hookSpecificOutput"] = hook_output
         delivery = body.pop("_imprint_delivery", None) if isinstance(body, dict) else None
+        entry = body.pop("_imprint_route", None) if isinstance(body, dict) else None
         sys.stdout.write(json.dumps(body, sort_keys=True) + "\n")
         sys.stdout.flush()
+        line.entry = entry
+        line.write()  # before the commit, which can outlast the host's patience
         if delivery is not None:
             # The payload is already visible to the hook consumer. A failed
             # commit intentionally leaves the pending cache for replay.

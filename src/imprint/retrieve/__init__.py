@@ -201,6 +201,9 @@ class SelectorDecision:
     response: dict[str, object] | None = None
     context: RetrievalContext | None = None
     exclude_ids: frozenset[str] = frozenset()
+    # Jev replied on this turn. Only a reply says it is alive: a turn with nothing
+    # to send, or one replayed from a receipt, never asked.
+    answered: bool = False
 
     def fields(self) -> dict[str, object]:
         """Content-free diagnostics for hook and CLI output."""
@@ -523,9 +526,10 @@ def select_prompt_payload(
             return SelectorDecision(
                 failed_method, "fallback", result.fallback_reason, context=context, exclude_ids=already_sent(),
             )
+        answered = result.request_sent
         if shadow:
             record(result)
-            return SelectorDecision("shadow", result.outcome, context=context)
+            return SelectorDecision("shadow", result.outcome, context=context, answered=answered)
         assert scope is not None
         # Records Imprint never sends (an excluded domain, an unselected type,
         # no statement) keep their deterministic delivery.
@@ -550,17 +554,17 @@ def select_prompt_payload(
         stages = response["selector_stages"]
         if refresh:
             record(result, stages, outcome)
-            return SelectorDecision("jev", outcome, response=response, context=context)
+            return SelectorDecision("jev", outcome, response=response, context=context, answered=answered)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
             record(result, stages, "already_delivered")
             return SelectorDecision(
                 "jev", "already_delivered",
-                response=_already_delivered(context.snapshot_id), context=context,
+                response=_already_delivered(context.snapshot_id), context=context, answered=answered,
             )
         assert cached is not None
         record(result, stages, outcome)
-        return SelectorDecision("jev", outcome, response=cached, context=context)
+        return SelectorDecision("jev", outcome, response=cached, context=context, answered=answered)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn
         # fell back, even though the request itself succeeded.
