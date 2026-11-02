@@ -9,18 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from imprint.backup import create_backup, restore_backup
 from imprint.capture import CapturePipeline
 from imprint.capture.schema import build_capture_envelope, new_urn
 from imprint.cli import main
 from imprint.compiler import compile_spools, write_envelope
 from imprint.errors import ValidationError
 from imprint.ingest import IngestCandidate, IngestService, import_legacy_principles
+from imprint.portability.jsonld import _scope_digest, export_jsonld, import_jsonld, semantic_digest
 from imprint.purge import hard_purge
 from imprint.retrieve import RetrievalEngine, StoreRetrievalSource, retrieve_payload
 from imprint.retrieve.engine import eligible
 from imprint.retrieve.models import RecordScope
 from imprint.store import ImprintStore
-from imprint.store.scope import SCOPE_EXTENSION, write_scope_row
+from imprint.store.scope import SCOPE_EXTENSION, stamp_row, validate_stamp, write_scope_row
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -939,3 +941,168 @@ def test_a_legacy_import_stamps_unresolved_unless_told_otherwise(tmp_path):
             store, [{"text": "A third."}], operator_id=operator_id, source_version="1",
             source_locator="synthetic://legacy/3", scope={"scope_kind": "central", "resolved_by": "x"},
         )
+
+
+# JSON-LD. The tests that run the real 830eb7f are in test_scope_byte_identity.py ---
+
+
+def _reset_rows(document: dict, rows: list[dict]) -> dict:
+    return {**document, "imprint:recordScope": rows, "imprint:recordScopeSha256": _scope_digest(rows)}
+
+
+def _fresh(tmp_path: Path) -> ImprintStore:
+    return ImprintStore(tmp_path / "imported" / "imprint.db")
+
+
+def _exported(tmp_path: Path, envelope: dict, **payload) -> tuple[ImprintStore, dict]:
+    store = new_store(tmp_path)
+    store.apply_capture(stamped(envelope, **payload))
+    return store, export_jsonld(store)
+
+
+def test_rows_cross_an_export_and_an_import_whole(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope, project_id="a-project", delivery="general", delivery_rank=2)
+    store.apply_capture(envelope)
+    target = central(store, envelope)
+    closed = rule(store, envelope, "A closed rule.")
+    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"overrides": [target]})
+    store.set_record_scope(closed, actor_id=ACTOR, changes={"scope_kind": "held"})
+    store.tombstone_node(closed, reason="Withdrawn.")
+    document = export_jsonld(store)
+    assert document["imprint:recordScope"] == rows_of(store) and len(rows_of(store)) == 3
+
+    imported = _fresh(tmp_path)
+    assert import_jsonld(imported, document) == document["imprint:semanticSha256"]
+    assert rows_of(imported) == rows_of(store)
+    assert export_jsonld(imported) == document
+
+
+def test_an_export_with_no_rows_names_no_scope_key(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    assert not {key for key in export_jsonld(store) if "ecordScope" in key}
+
+
+def test_an_older_builds_checks_never_see_the_rows(tmp_path, capture_envelope):
+    """An older build reads only what the digest covers, so it imports this and drops the keys."""
+    _, document = _exported(tmp_path, capture_envelope)
+    bare = {key: value for key, value in document.items() if "ecordScope" not in key}
+    assert semantic_digest(document) == semantic_digest(bare) == document["imprint:semanticSha256"]
+    imported = _fresh(tmp_path)
+    import_jsonld(imported, bare)
+    assert rows_of(imported) == []
+    assert export_jsonld(imported) == bare
+
+
+def test_a_dry_run_import_writes_no_row(tmp_path, capture_envelope):
+    _, document = _exported(tmp_path, capture_envelope)
+    imported = _fresh(tmp_path)
+    import_jsonld(imported, document, dry_run=True)
+    assert not imported.path.exists()
+
+
+def test_import_takes_a_central_row_on_a_ratified_record(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    target = central(store, capture_envelope)
+    imported = _fresh(tmp_path)
+    import_jsonld(imported, export_jsonld(store))
+    assert row_of(imported, target)["scope_kind"] == "central"
+
+
+def test_import_reads_a_closed_central_records_last_version(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    target = central(store, capture_envelope)
+    store.tombstone_node(target, reason="Withdrawn.")
+    imported = _fresh(tmp_path)
+    import_jsonld(imported, export_jsonld(store))
+    assert row_of(imported, target)["scope_kind"] == "central"
+
+
+def test_central_is_refused_on_import_on_a_record_that_is_not_ratified(tmp_path, capture_envelope):
+    store, document = _exported(tmp_path, capture_envelope)
+    row = {**document["imprint:recordScope"][0], "scope_kind": "central", "client_id": None}
+    imported = _fresh(tmp_path)
+    with pytest.raises(ValidationError, match="requires a ratified record"):
+        import_jsonld(imported, _reset_rows(document, [row]))
+    assert not imported.path.exists() or rows_of(imported) == []
+
+
+@pytest.mark.parametrize("kind, client_id", [("client", "a-client"), ("central", None)])
+def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp_path, capture_envelope, kind, client_id):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope, payload={"domain_id": "research"})
+    store.ratify_node(node_id, ratifier=ACTOR)
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    document = export_jsonld(store)
+    row = {**document["imprint:recordScope"][0], "scope_kind": kind, "client_id": client_id}
+    with pytest.raises(ValidationError, match="domain_id"):
+        import_jsonld(_fresh(tmp_path), _reset_rows(document, [row]))
+
+
+@pytest.mark.parametrize("damage, message", [
+    (lambda doc: {**doc, "imprint:recordScopeSha256": "0" * 64}, "digest mismatch"),
+    (lambda doc: {key: value for key, value in doc.items() if key != "imprint:recordScopeSha256"}, "digest mismatch"),
+    (lambda doc: {key: value for key, value in doc.items() if key != "imprint:recordScope"}, "digest mismatch"),
+    (lambda doc: {**doc, "imprint:recordScope": {}}, "digest mismatch"),
+    (lambda doc: _reset_rows(doc, doc["imprint:recordScope"] * 2), "repeated"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "node_id": "urn:imprint:rule:unknown"}]), "unknown"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": "shared"}]), "unknown scope kind"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": None}]), "client id"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": "{"}]), "overrides"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "resolved_by": ""}]), "resolved_by"),
+    (lambda doc: _reset_rows(doc, [{"node_id": doc["imprint:recordScope"][0]["node_id"]}]), "invalid row"),
+], ids=range(11))
+def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
+    _, document = _exported(tmp_path, capture_envelope)
+    with pytest.raises(ValidationError, match=message):
+        import_jsonld(_fresh(tmp_path), damage(document))
+
+
+def test_a_row_an_older_builds_purge_left_stays_out_of_an_export(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        write_scope_row(conn, stamp_row(
+            "urn:imprint:rule:00000000-0000-4000-8000-000000000000",
+            validate_stamp({"scope_kind": "unresolved", "resolved_by": "test"}), event_id="gone", now=VALID_FROM,
+        ))
+    assert len(rows_of(store)) == 1
+    assert "imprint:recordScope" not in export_jsonld(store)
+
+
+def test_a_missing_table_reads_as_empty_for_an_export(tmp_path, capture_envelope):
+    assert "imprint:recordScope" not in export_jsonld(_older_store(tmp_path, capture_envelope))
+
+
+# Backup --------------------------------------------------------------------
+
+
+def test_rows_come_with_a_backup_file(tmp_path, capture_envelope):
+    root = tmp_path / "root"
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    backup = create_backup(store, root)
+    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "held"})
+    restore_backup(store, root, Path(backup["path"]), confirmation=Path(backup["path"]).name)
+    assert [row["scope_kind"] for row in rows_of(store)] == ["client"]
+
+
+def test_a_backup_from_before_the_table_restores_and_reads_as_legacy(tmp_path, capture_envelope):
+    root = tmp_path / "root"
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    store.apply_capture(capture_envelope)
+    with store.connect() as conn:
+        conn.execute("DROP TABLE record_scope")
+    backup = create_backup(store, root)
+    restore_backup(store, root, Path(backup["path"]), confirmation=Path(backup["path"]).name)
+    assert "record_scope" not in store.snapshot()
+    store.initialize()
+    assert rows_of(store) == []

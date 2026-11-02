@@ -23,6 +23,7 @@ from imprint.ontology.contracts import (
 from imprint.ontology.references import validate_payload_references
 from imprint.projections.jsonld import CONTEXT
 from imprint.store import ImprintStore
+from imprint.store.scope import read_scope_rows, validate_row, write_scope_row
 
 # Node types the canonical writer produces only through the strict semantic
 # contract path (append_semantic_node), i.e. everything except the raw-capture
@@ -75,6 +76,17 @@ def _rows(store: ImprintStore, table: str) -> list[dict[str, Any]]:
     key = PRIMARY_KEYS[table]
     with store.connect() as conn:
         return [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY {key}").fetchall()]
+
+
+def _scope_rows(store: ImprintStore) -> list[dict[str, Any]]:
+    """Rows on nodes that exist. An older build's purge can leave one behind."""
+    with store.connect() as conn:
+        known = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes")}
+        return [row for row in read_scope_rows(conn) if row["node_id"] in known]
+
+
+def _scope_digest(rows: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(canonical_bytes(rows)).hexdigest()
 
 
 def semantic_digest(document: dict[str, Any]) -> str:
@@ -147,6 +159,12 @@ def export_jsonld(store: ImprintStore) -> dict[str, Any]:
         "imprint:ledger": ledger,
     }
     document["imprint:semanticSha256"] = semantic_digest(document)
+    # Scope stays outside the ledger and the semantic digest, which an older
+    # build checks exactly: it imports this document and drops these two keys.
+    rows = _scope_rows(store)
+    if rows:
+        document["imprint:recordScope"] = rows
+        document["imprint:recordScopeSha256"] = _scope_digest(rows)
     return document
 
 
@@ -387,6 +405,43 @@ def _validate_semantic_rows(
                 raise ValidationError("typed relation creation event does not match its created version")
 
 
+def _checked_scope_rows(
+    document: dict[str, Any], ledger: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Rows a document brings. An older export names none, and every record reads as legacy."""
+    rows, digest = document.get("imprint:recordScope"), document.get("imprint:recordScopeSha256")
+    if rows is None and digest is None:
+        return []
+    if not isinstance(rows, list) or digest != _scope_digest(rows):
+        raise ValidationError("JSON-LD record scope digest mismatch")
+    nodes = {row["node_id"] for row in ledger["nodes"]}
+    versions_by_node: dict[str, list[dict[str, Any]]] = {}
+    for version in ledger["node_versions"]:
+        versions_by_node.setdefault(version["node_id"], []).append(version)
+    seen: set[str] = set()
+    for row in rows:
+        validate_row(row)
+        node_id = row["node_id"]
+        if node_id not in nodes or node_id in seen:
+            raise ValidationError("record scope names an unknown or repeated record")
+        seen.add(node_id)
+        # A closed record keeps its row, so its last version is the one to read.
+        versions = versions_by_node.get(node_id, [])
+        replaced = {version["prior_version_id"] for version in versions}
+        latest = [version for version in versions if version["version_id"] not in replaced]
+        if len(latest) != 1:
+            raise ValidationError("record scope names a record with no single head")
+        if row["scope_kind"] == "central" and (
+            (latest[0]["provenance_status"], latest[0]["authority_tier"]) != ("ratified", "ratified_knowledge")
+        ):
+            raise ValidationError("a central scope requires a ratified record")
+        if row["scope_kind"] in {"client", "central"} and isinstance(
+            json.loads(latest[0]["payload_json"]).get("domain_id"), str,
+        ):
+            raise ValidationError("a client or central record carries no domain_id")
+    return rows
+
+
 def import_jsonld(store: ImprintStore, document: dict[str, Any], *, dry_run: bool = False) -> str:
     """Import a complete export only into an empty compatible store."""
     if not isinstance(document, dict) or document.get("schemaVersion") != STORE_SCHEMA_VERSION:
@@ -405,6 +460,7 @@ def import_jsonld(store: ImprintStore, document: dict[str, Any], *, dry_run: boo
     _validate_semantic_rows(ledger, document["ontologySchemaVersion"])
     if document.get("@graph") != _graph_from_ledger(ledger):
         raise ValidationError("JSON-LD graph does not match its canonical ledger")
+    scope_rows = _checked_scope_rows(document, ledger)
     if dry_run:
         # A dry run must not touch the filesystem. A store that does not exist yet
         # is trivially empty; only an existing store needs the emptiness check.
@@ -434,6 +490,8 @@ def import_jsonld(store: ImprintStore, document: dict[str, Any], *, dry_run: boo
                     f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
                     tuple(row[column] for column in columns),
                 )
+        for row in scope_rows:
+            write_scope_row(conn, row)
         inserted = {
             table: [dict(row) for row in conn.execute(
                 f"SELECT * FROM {table} ORDER BY {PRIMARY_KEYS[table]}"
