@@ -27,6 +27,7 @@ from .config import (
     resolved_operator_root,
 )
 from .errors import ImprintError, ValidationError
+from .hook_routes import ROUTES, HookTurn
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
 from .store import ImprintStore
@@ -83,6 +84,20 @@ def _emit_retrieval_json(value: dict, *, root: Path, session_id: str,
             root=root, session_id=session_id, snapshot_id=snapshot_id,
             domain_id=domain_id,
         )
+
+
+def _delivery_behind(result: dict, *, root: Path, session_id: str, domain_id: str | None) -> dict | None:
+    """The retrieval a hook turn's output came from, for its route line only.
+
+    A turn that hit its latch has an empty result, so that is the committed receipt.
+    """
+    if result.get("status") != "already_delivered":
+        return result
+    from .retrieve import committed_delivery
+
+    return committed_delivery(
+        root=root, session_id=session_id, snapshot_id=str(result["snapshot_id"]), domain_id=domain_id,
+    )
 
 
 # SessionStart re-fires with these sources after the context window was wiped;
@@ -249,9 +264,10 @@ def _opaque_session_urn(root: Path, native_session_id: str) -> str:
     return f"urn:imprint:session:{mapped}"
 
 
-def _hook_input_invalid() -> int:
+def _hook_input_invalid(turn: HookTurn | None = None) -> int:
     """Skip an event a retry cannot change, without blocking the stop."""
-    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"})
+    body = {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"}
+    _write_json(turn.settle(body) if turn is not None else body)
     return 0
 
 
@@ -642,6 +658,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     # Facts the failure receipt must carry out of a partially completed action.
     error_details: dict[str, object] = {}
+    # Set on a hook that delivers, which records its outcome however it ends.
+    turn: HookTurn | None = None
     try:
         # Machine transport is authoritative even if a payload claims human
         # origin. Skip before resolving operator identity or touching the store.
@@ -1118,6 +1136,8 @@ def main(argv: list[str] | None = None) -> int:
             # escalating to SIGKILL; convert it to SystemExit so open store
             # connections unwind and close instead of orphaning WAL sidecars.
             signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
+            if args.action in ROUTES:
+                turn = HookTurn(root, args.action, config)
             try:
                 event = json.load(sys.stdin)
                 if not isinstance(event, dict):
@@ -1126,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
                 event = json.loads(json.dumps(event, ensure_ascii=False).encode("utf-8", "replace"))
             except RecursionError:
                 # The bridge's own read has a little more stack, so this can get past it.
-                return _hook_input_invalid()
+                return _hook_input_invalid(turn)
             native_value = event.get("session_id") or event.get("sessionId")
             native_session = (
                 str(native_value) if native_value
@@ -1168,13 +1188,14 @@ def main(argv: list[str] | None = None) -> int:
                         "additionalContext": result.get("payload", ""),
                     },
                 }
+                turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=None)
                 if not refresh and result.get("status") == "delivered":
                     _emit_retrieval_json(
-                        response, root=root, session_id=session,
+                        turn.settle(response), root=root, session_id=session,
                         snapshot_id=str(result["snapshot_id"]), domain_id=None,
                     )
                 else:
-                    _write_json(response)
+                    _write_json(turn.settle(response))
                 return 0
             if args.action == "user-prompt-submit":
                 _validate_hook_event(event, "UserPromptSubmit")
@@ -1204,6 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
                     selector_fields = decision.fields()
                     context = decision.context
                     exclude_ids = decision.exclude_ids
+                    turn.answered, turn.held = decision.answered, decision.held
                     if decision.response is not None:
                         selected = decision.response
                         response = {
@@ -1217,24 +1239,27 @@ def main(argv: list[str] | None = None) -> int:
                                 "additionalContext": selected.get("payload", ""),
                             },
                         }
+                        turn.delivery = _delivery_behind(
+                            selected, root=root, session_id=session, domain_id=decision.scope,
+                        )
                         if selected.get("status") == "delivered":
                             _emit_retrieval_json(
-                                response, root=root, session_id=session,
+                                turn.settle(response), root=root, session_id=session,
                                 snapshot_id=str(selected["snapshot_id"]),
                                 domain_id=str(selected["receipt_scope"]),
                             )
                         else:
-                            _write_json(response)
+                            _write_json(turn.settle(response))
                         return 0
                 # Deterministic behavior, and the exact fallback for every
                 # selector failure: domain-only injection, or skip.
                 if domain is None:
-                    _write_json({
+                    _write_json(turn.settle({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": selection.diagnostic_code,
                         **selector_fields,
                         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""},
-                    })
+                    }))
                     return 0
                 result = retrieve_payload(
                     store, root=root, session_id=session,
@@ -1254,13 +1279,14 @@ def main(argv: list[str] | None = None) -> int:
                         "additionalContext": result.get("payload", ""),
                     },
                 }
+                turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=domain)
                 if result.get("status") == "delivered":
                     _emit_retrieval_json(
-                        response, root=root, session_id=session,
+                        turn.settle(response), root=root, session_id=session,
                         snapshot_id=str(result["snapshot_id"]), domain_id=domain,
                     )
                 else:
-                    _write_json(response)
+                    _write_json(turn.settle(response))
                 return 0
             if args.action == "stop-capture":
                 _validate_hook_event(event, "Stop")
@@ -1475,11 +1501,20 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json({"hook_schema_version": "1.0.0", **result})
                 return 0 if result.get("status") == "healthy" else 2
     except (ImprintError, OSError, json.JSONDecodeError) as exc:
+        if turn is not None:
+            turn.abandon()
         _write_json({
             "status": "error", "error": str(exc), "error_type": type(exc).__name__,
             **error_details,
         })
         return 2
+    except BaseException:  # the SIGTERM handler's exit comes through here too
+        if turn is not None:
+            turn.abandon()
+        raise
+    finally:
+        if turn is not None:
+            turn.close()
     parser.error("unsupported command")
     return 2
 

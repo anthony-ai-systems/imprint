@@ -172,6 +172,25 @@ class DeliveryReceipts:
                 pass
             return False
 
+    def committed_response(
+        self, session_id: str, snapshot_id: str, domain_id: str | None,
+        *, max_bytes: int = DELIVERED_SCAN_BYTES,
+    ) -> dict[str, object] | None:
+        """Return what a committed latch delivered, or None if it cannot say. Never raises.
+
+        A latch is committed for an empty payload too, so its existence does not say
+        that anything went out. As in ``delivery_state``, only a regular file within
+        the bound is opened.
+        """
+        try:
+            _, final = self._paths(session_id, snapshot_id, domain_id)
+            status = final.stat(follow_symlinks=False)
+            if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
+                return None
+            return self._decode_prepared(final)
+        except Exception:
+            return None
+
     def reset_session(self, session_id: str) -> None:
         """Forget this session's delivery latches after the host wiped its context."""
         directory = self.root / self._safe(session_id, "session id")

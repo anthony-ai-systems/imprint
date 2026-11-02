@@ -284,13 +284,16 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         "network_state": "offline" if selector_mode == "deterministic" else "idle",
         "last_transfer_age_seconds": -1, "last_success_ts": "", "fallbacks_24h": 0,
     }
+    selector_key_checked = True
     try:
         # A selector that cannot load reports content-free unknown evidence;
         # health never crashes on it.
         from imprint.retrieve.jev import selector_health
         selector = selector_health(root, config.get("selector"))
     except Exception:
-        pass
+        selector_key_checked = False
+    from imprint.hook_routes import route_summary
+    hook_routes = route_summary(root, now=now)
     t3_homes = None
     if config.get("t3_capture_origin") is True:
         from .t3_homes import t3_home_report
@@ -339,9 +342,12 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         last_transfer_age_seconds=int(selector["last_transfer_age_seconds"]),
         selector_mode=selector["mode"],
         selector_key_present=bool(selector["key_present"]),
+        selector_key_checked=selector_key_checked,
         selector_endpoint_host=str(selector["endpoint_host"]),
         selector_last_success_ts=str(selector["last_success_ts"]),
         selector_fallbacks_24h=int(selector["fallbacks_24h"]),
+        selector_failures_in_a_row=hook_routes["selector_failures_in_a_row"],
+        hook_route_outcomes_24h=hook_routes["outcomes_24h"],
     ))
     result = report.as_dict()
     # CLI contract uses healthy/degraded while the invariant engine remains green/red.

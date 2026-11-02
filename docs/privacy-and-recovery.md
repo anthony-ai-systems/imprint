@@ -79,7 +79,10 @@ other than `jev` or `shadow`) disables it immediately. The local decision log
 (`logs/jev-selector.jsonl`) records only ids, scores, timings, outcomes, and
 content-free counts (request size, records and bytes per delivery stage), never
 prompt or judgment text; `logs/jev-selector-transfer.json` holds only the last
-transfer and success timestamps.
+transfer and success timestamps. `logs/hook-routes.jsonl`, written on every selector
+mode, holds one line per delivering hook turn with the time, route, outcome, a closed
+code, a byte count, the selector mode, the selection method and whether Jev replied,
+and no prompt, statement, record id, domain or session.
 
 On POSIX the optional `api_key_file` must be a private regular file owned by
 the current user. On Windows, Imprint checks only that it is a regular file,
