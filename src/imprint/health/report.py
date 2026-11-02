@@ -12,6 +12,9 @@ SUPPORTED_HOOK_MAJOR = 1
 _DEGRADING_CAPTURE_SKIPS = (
     "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
 )
+# One timeout is weather. This many failed selections in a row, with no reply from
+# Jev between them, is a dead selector. The window is the hook route log's.
+SELECTOR_FAILURE_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -67,9 +70,13 @@ class HealthInputs:
     database_state: Literal["healthy", "busy", "failed"] = "healthy"
     selector_mode: Literal["deterministic", "jev", "shadow"] = "deterministic"
     selector_key_present: bool = False
+    # False when the selector code could not load, so the key was never looked at.
+    selector_key_checked: bool = True
     selector_endpoint_host: str = ""
     selector_last_success_ts: str = ""
     selector_fallbacks_24h: int = 0
+    selector_failures_in_a_row: int = 0
+    hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -159,6 +166,11 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         reasons.append("backup_unverified")
     if values.experimental_enabled and values.experimental_state == "stalled":
         reasons.append("experimental_loop_stalled")
+    if values.selector_mode == "jev":
+        if values.selector_key_checked and not values.selector_key_present:
+            reasons.append("selector_key_unavailable")
+        if values.selector_failures_in_a_row >= SELECTOR_FAILURE_LIMIT:
+            reasons.append("selector_failures_repeated")
 
     metrics: dict[str, int | bool | str] = {
         "compiler_count": values.compiler_count,
@@ -194,6 +206,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_old_count": max(0, values.hook_failure_count - hook_failure_recent_count),
         "hook_failure_newest_age_seconds": max(-1, values.hook_failure_newest_age_seconds),
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
+        "hook_route_outcomes_24h": {route: dict(counts) for route, counts in values.hook_route_outcomes_24h.items()},
+        "hook_route_evidence": "operator_logs_hook_routes_tail",
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
         "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
         "t3_record_evidence": "operator_logs_capture_skips_tail",
@@ -207,6 +221,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "selected_bytes": max(0, values.selected_bytes),
         "selector_endpoint_host": values.selector_endpoint_host,
         "selector_evidence": "effective_config_plus_decision_log_tail_and_transfer_marker",
+        "selector_failure_limit": SELECTOR_FAILURE_LIMIT,
+        "selector_failures_in_a_row": max(0, values.selector_failures_in_a_row),
         "selector_fallbacks_24h": max(0, values.selector_fallbacks_24h),
         "selector_key_present": values.selector_key_present,
         "selector_last_success_ts": values.selector_last_success_ts,

@@ -771,8 +771,8 @@ def decision_log_summary(root: Path, *, now: datetime | None = None) -> dict[str
             entry = json.loads(raw)
         except (ValueError, RecursionError):
             continue
-        if not isinstance(entry, dict) or not isinstance(entry.get("ts"), str):
-            continue
+        if not isinstance(entry, dict) or not isinstance(entry.get("ts"), str) or not _STAMP.fullmatch(entry["ts"]):
+            continue  # one damaged line must not take the rest of selector health with it
         stamp = entry["ts"]
         if entry.get("request_sent") is True:
             summary["last_transfer_ts"] = max(stamp, summary["last_transfer_ts"] or stamp)
