@@ -14,6 +14,12 @@ from urllib.parse import urlsplit
 from .errors import ValidationError
 from .paths import default_data_root, expand_home, home_directory, operator_root, validate_data_root
 
+# Dotted, so a build that predates them keeps them without reading them and a
+# rollback needs no change to the config. The selector object is closed, so a key
+# there would have to be removed first.
+SHORT_LINES_PROMPT = "org.imprint.short_lines.prompt"
+SHORT_LINES_SESSION_START = "org.imprint.short_lines.session_start"
+
 DEFAULTS = {
     "config_version": "3.0.0",
     "operator_slug": "default",
@@ -22,6 +28,10 @@ DEFAULTS = {
     # Reads T3's own message records to verify who wrote a prompt. Off by
     # default: an installation opts in to trusting that local record.
     "t3_capture_origin": False,
+    # Deliver each route's records on short lines. Separate switches: session
+    # start is not filtered by client, so widening it widens what every session gets.
+    SHORT_LINES_PROMPT: False,
+    SHORT_LINES_SESSION_START: False,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -224,7 +234,7 @@ def _validate_config(data: dict[str, Any]) -> None:
         value = data.get(field)
         if not isinstance(value, str) or SAFE_LOCAL_ID.fullmatch(value) is None:
             raise ValidationError(f"{field} must be a safe lowercase identifier")
-    for field in ("compiler", "allow_higher_budget", "t3_capture_origin"):
+    for field in ("compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START):
         if not isinstance(data.get(field), bool):
             raise ValidationError(f"{field} must be a boolean")
     if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:

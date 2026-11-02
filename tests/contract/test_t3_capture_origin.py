@@ -116,6 +116,7 @@ def test_web_prompt_recorded_as_human_is_operator(tmp_path):
     _message(FEEDBACK, by="agent", source="mcp"),
     _message(FEEDBACK, by="agent", source="provider"),
     _message(FEEDBACK, source="server"),
+    _message(FEEDBACK, source="mcp"),
     _message(FEEDBACK, source="future-client"),
     _message(FEEDBACK, senderThreadId="thread-other"),
     _message(FEEDBACK, notification={"kind": "synthetic"}),
@@ -1189,6 +1190,47 @@ def test_no_prompt_in_a_scratch_thread_is_credited(tmp_path):
     assert json.loads(run.stdout)["reason"] == "t3_scratch_thread"
     assert [json.loads(line)["reason"] for line in _skip_log(root)] == ["t3_scratch_thread"]
     assert not _spooled(root)
+
+
+def test_a_prompt_from_a_marked_window_is_counted_under_its_own_reason(tmp_path):
+    env = _t3_home(tmp_path, _message(FEEDBACK, source="mcp"))
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path), env)
+    assert json.loads(run.stdout)["reason"] == "t3_marked_window"
+    assert [json.loads(line)["reason"] for line in _skip_log(root)] == ["t3_marked_window"]
+    assert not _spooled(root)
+
+
+@pytest.mark.parametrize("message", [
+    _message(FEEDBACK, by="agent", source="mcp"),
+    _message(FEEDBACK, source="mcp", senderThreadId="thread-other"),
+    _message(FEEDBACK, source="mcp", notification={"kind": "synthetic"}),
+    _message(FEEDBACK, source="mcp", scheduledTaskId="task-1"),
+    _message(FEEDBACK, source="mcp", context={"guest": {"kind": "synthetic"}}),
+    _message(f"PLEASE IMPLEMENT THIS PLAN:\n{FEEDBACK}", source="mcp"),
+])
+def test_a_machine_send_from_a_marked_window_stays_an_ordinary_skip(tmp_path, message):
+    text = json.loads(message[2])["text"]
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path, text), _t3_home(tmp_path, message))
+    assert json.loads(run.stdout)["reason"] == "unverified_provenance"
+    assert not _skip_log(root)
+    assert not _spooled(root)
+
+
+def test_a_marked_window_in_a_scratch_chat_counts_as_scratch(tmp_path):
+    env = _t3_home(tmp_path, _message(FEEDBACK, source="mcp"), threads=_in_folder(_scratch_chat(tmp_path)))
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path), env)
+    assert json.loads(run.stdout)["reason"] == "t3_scratch_thread"
+    assert [json.loads(line)["reason"] for line in _skip_log(root)] == ["t3_scratch_thread"]
+
+
+def test_a_person_after_a_marked_prompt_with_the_same_words_is_credited(tmp_path):
+    env = _t3_home(
+        tmp_path, _message(FEEDBACK, source="mcp"), _message(FEEDBACK, at="2026-01-01T00:00:01Z"),
+    )
+    run, root = _stop_hook(tmp_path, _exchange(tmp_path), env)
+    assert json.loads(run.stdout)["status"] != "skipped"
+    assert not _skip_log(root)
+    assert len(_spooled(root)) == 1
 
 
 def test_a_scratch_project_thread_with_no_folder_of_its_own_is_not_credited(tmp_path):

@@ -32,6 +32,7 @@ _HOOK_FAILURE_WINDOW_SECONDS = 7 * 24 * 60 * 60
 # turns reach these in normal use, so counting them is not a fault by itself.
 _COUNTED_CAPTURE_SKIPS = (
     "operator_text_oversized",
+    "t3_marked_window",
     "t3_prompt_unmatched",
     "t3_scratch_thread",
     "t3_session_ref_unreadable",
