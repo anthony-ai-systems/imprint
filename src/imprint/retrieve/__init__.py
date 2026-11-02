@@ -438,6 +438,7 @@ def select_prompt_payload(
     result: SelectionResult | None = None
     delivered_ids: set[str] = set()
     retried_ids: set[str] = set()
+    answered = False
     session_ref = _session_ref(session_id)
 
     def already_sent() -> frozenset[str]:
@@ -585,11 +586,13 @@ def select_prompt_payload(
         return SelectorDecision("jev", outcome, response=cached, context=context, answered=answered)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn
-        # fell back, even though the request itself succeeded.
+        # fell back, even though the request itself succeeded. Jev still replied.
         record(SelectionResult(fallback_reason="exception") if result is None else replace(
             result, picks=(), reserved=frozenset(), outcome="fallback", fallback_reason="exception",
         ))
-        return SelectorDecision(failed_method, "fallback", "exception", context=context, exclude_ids=already_sent())
+        return SelectorDecision(
+            failed_method, "fallback", "exception", context=context, exclude_ids=already_sent(), answered=answered,
+        )
 
 
 __all__ = [

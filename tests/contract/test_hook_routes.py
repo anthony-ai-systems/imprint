@@ -162,6 +162,13 @@ def prompted(number: int, event: dict = IN_DOMAIN) -> dict:
     return {**event, "prompt": f"synthetic prompt number {number}"}
 
 
+def failing(exception):
+    def fail(*args, **kwargs):
+        raise exception
+
+    return fail
+
+
 # -- session start -----------------------------------------------------------------
 
 @pytest.mark.parametrize("mode", ["deterministic", "jev", "shadow"])
@@ -501,6 +508,22 @@ def test_a_failure_after_jev_answered_is_failed(tmp_path, transport, monkeypatch
 
     monkeypatch.setattr(retrieval, "_jev_response", boom)
     line = one_turn(tmp_path, monkeypatch, capsys, SUBMIT, NO_DOMAIN)
+    assert (line["outcome"], line["detail"], line["answered"]) == ("failed", "exception", True)
+    assert transport.calls == 1
+
+
+def test_a_failure_on_a_turn_that_never_asked_jev_is_not_answered(tmp_path, transport, monkeypatch, capsys):
+    config = write_config(tmp_path, "jev")
+    hook(config, START, {"session_id": "s"}, monkeypatch, capsys)
+    monkeypatch.setattr(retrieval, "_jev_response", failing(RuntimeError("synthetic render failure")))
+    hook(config, SUBMIT, NO_DOMAIN, monkeypatch, capsys)
+    assert facts(tmp_path, "outcome", "detail", "answered")[-1] == ("failed", "exception", False)
+    assert transport.calls == 0
+
+
+def test_a_failure_before_any_reply_is_not_answered(tmp_path, transport, monkeypatch, capsys):
+    monkeypatch.setattr(jev.JevSelector, "select", failing(RuntimeError("synthetic selector failure")))
+    line = one_turn(tmp_path, monkeypatch, capsys, SUBMIT, NO_DOMAIN)
     assert (line["outcome"], line["detail"], line["answered"]) == ("failed", "exception", False)
 
 
@@ -699,13 +722,6 @@ def test_a_line_that_cannot_be_built_changes_nothing_delivered(tmp_path, monkeyp
 
 
 # -- a hook that raises ------------------------------------------------------------
-
-def failing(exception):
-    def fail(*args, **kwargs):
-        raise exception
-
-    return fail
-
 
 def run_expecting(config, action, event, monkeypatch) -> int:
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(event)))

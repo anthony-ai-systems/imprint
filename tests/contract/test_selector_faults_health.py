@@ -20,6 +20,7 @@ from imprint.health.report import SELECTOR_FAILURE_LIMIT
 from imprint.hook_routes import ROUTE_WINDOW_SECONDS, record_route, route_log_path, route_summary
 from imprint.retrieve import jev
 from imprint.retrieve.models import RetrievalRecord
+from imprint.retrieve.receipts import DeliveryReceipts
 from imprint.store import ImprintStore
 
 KEY_ENV = "JEV_TEST_KEY"
@@ -475,7 +476,8 @@ class Jev:
         return json.dumps({"answers": {name: {"type": "noul", "noul": 0.9} for name in questions}}).encode("utf-8")
 
 
-def test_a_dead_jev_degrades_on_the_third_failed_turn_and_clears_on_a_reply(tmp_path, monkeypatch, capsys):
+def live_hook(tmp_path, monkeypatch, capsys):
+    """A real hook on one store, a fake Jev, and the store's health as the CLI reports it."""
     monkeypatch.setattr(retrieval, "StoreRetrievalSource", lambda store: Source())
     service = Jev()
     monkeypatch.setattr(jev, "http_post", service)
@@ -490,15 +492,49 @@ def test_a_dead_jev_degrades_on_the_third_failed_turn_and_clears_on_a_reply(tmp_
         assert cli.main(["--config", str(config), "hook", "user-prompt-submit"]) == 0
         capsys.readouterr()
 
-    def reasons():
+    def health():
         cli.main(["--config", str(config), "health"])
-        return json.loads(capsys.readouterr().out)["degraded_reasons"]
+        return json.loads(capsys.readouterr().out)
 
+    return service, turn, health
+
+
+def test_a_dead_jev_degrades_on_the_third_failed_turn_and_clears_on_a_reply(tmp_path, monkeypatch, capsys):
+    service, turn, health = live_hook(tmp_path, monkeypatch, capsys)
     turn("first")
     turn("second")
-    assert REPEATED_REASON not in reasons()
+    assert REPEATED_REASON not in health()["degraded_reasons"]
     turn("third")
-    assert REPEATED_REASON in reasons()
+    assert REPEATED_REASON in health()["degraded_reasons"]
     service.down = False
     turn("fourth")
-    assert REPEATED_REASON not in reasons()
+    assert REPEATED_REASON not in health()["degraded_reasons"]
+
+
+def disk_full(self, *args, **kwargs):
+    raise OSError(28, "synthetic: no space left on device")
+
+
+def test_a_local_failure_after_each_reply_is_not_a_dead_jev(tmp_path, monkeypatch, capsys):
+    service, turn, health = live_hook(tmp_path, monkeypatch, capsys)
+    service.down = False
+    monkeypatch.setattr(DeliveryReceipts, "prepare_delivery", disk_full)
+    for prompt in ("first", "second", "third"):
+        turn(prompt)
+    report = health()
+    assert REPEATED_REASON not in report["degraded_reasons"]
+    assert report["metrics"]["selector_failures_in_a_row"] == 0
+    assert report["metrics"]["hook_route_outcomes_24h"]["user_prompt_submit"]["failed"] == 3
+
+
+def test_a_reply_ends_a_run_even_when_a_local_step_then_fails(tmp_path, monkeypatch, capsys):
+    service, turn, health = live_hook(tmp_path, monkeypatch, capsys)
+    turn("first")
+    turn("second")
+    service.down = False
+    with monkeypatch.context() as patch:
+        patch.setattr(DeliveryReceipts, "prepare_delivery", disk_full)
+        turn("third")
+    service.down = True
+    turn("fourth")
+    assert health()["metrics"]["selector_failures_in_a_row"] == 1
