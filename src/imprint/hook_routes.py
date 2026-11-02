@@ -191,9 +191,10 @@ class HookTurn:
 def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     """Last-day outcome counts per route, and the run of failed selections the log ends on.
 
-    A turn Jev answered ends a run. A failed selection adds to one, even if it failed
-    before it could ask. Any other turn says nothing about Jev, so it neither adds to a
-    run nor ends one. Damaged lines count as nothing, and so do stamps outside the
+    A turn that used Jev's answer ends a run. A failed selection adds to one, even if it
+    failed before it could ask or after Jev replied, because the agent got no picks either
+    way. Any other turn says nothing about selection, so it neither adds to a run nor
+    ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
     """
     current = time.time() if now is None else now
@@ -210,7 +211,7 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
             continue
         if entry.get("mode") != "jev":
             continue
-        if entry.get("answered") is True:
+        if entry.get("answered") is True and entry.get("method") == "jev":
             failures = 0
         elif (
             entry["outcome"] == "failed" and entry.get("method") == "deterministic_fallback"

@@ -320,8 +320,9 @@ them.
   reason other than `no_candidates`. That includes one that failed before it could
   ask, such as a key selection refused or a local time budget already spent, so
   `detail` says which it was. One timeout does not degrade health, and neither do two.
-  Any turn Jev answered ends the run and clears the reason at once, even if its picks
-  would not fit or a local step then failed. Any other turn that never asked Jev, such
+  A turn that used Jev's answer ends the run and clears the reason at once, even if its
+  picks would not fit. A failure after Jev replied adds to the run, because the agent
+  got no picks, and `answered` true on the line tells it apart. Any other turn that never asked Jev, such
   as a replay, a scratch turn, session start or a turn with nothing to send, neither
   adds to a run nor ends it, and neither does `oversized_records`. A failure older
   than 24 hours no longer counts, so old history ages out by itself. A hook that timed

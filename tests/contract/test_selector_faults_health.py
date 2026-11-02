@@ -576,19 +576,19 @@ def disk_full(self, *args, **kwargs):
     raise OSError(28, "synthetic: no space left on device")
 
 
-def test_a_local_failure_after_each_reply_is_not_a_dead_jev(tmp_path, monkeypatch, capsys):
+def test_a_local_failure_after_each_reply_still_counts(tmp_path, monkeypatch, capsys):
     service, turn, health = live_hook(tmp_path, monkeypatch, capsys)
     service.down = False
     monkeypatch.setattr(DeliveryReceipts, "prepare_delivery", disk_full)
     for prompt in ("first", "second", "third"):
         turn(prompt)
     report = health()
-    assert REPEATED_REASON not in report["degraded_reasons"]
-    assert report["metrics"]["selector_failures_in_a_row"] == 0
+    assert REPEATED_REASON in report["degraded_reasons"]
+    assert report["metrics"]["selector_failures_in_a_row"] == 3
     assert report["metrics"]["hook_route_outcomes_24h"]["user_prompt_submit"]["failed"] == 3
 
 
-def test_a_reply_ends_a_run_even_when_a_local_step_then_fails(tmp_path, monkeypatch, capsys):
+def test_a_reply_a_local_step_then_failed_does_not_end_a_run(tmp_path, monkeypatch, capsys):
     service, turn, health = live_hook(tmp_path, monkeypatch, capsys)
     turn("first")
     turn("second")
@@ -598,4 +598,4 @@ def test_a_reply_ends_a_run_even_when_a_local_step_then_fails(tmp_path, monkeypa
         turn("third")
     service.down = True
     turn("fourth")
-    assert health()["metrics"]["selector_failures_in_a_row"] == 1
+    assert health()["metrics"]["selector_failures_in_a_row"] == 4

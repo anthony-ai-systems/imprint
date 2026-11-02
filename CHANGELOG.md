@@ -6,7 +6,7 @@
   `selector.mode: jev` only. `selector_key_unavailable` is raised at once, with no
   traffic, when the key check fails, and the check never reads the key.
   `selector_failures_repeated` is raised by 3 failed selections in a row, all from the
-  last 24 hours. One timeout does not raise it, any turn Jev answers clears it, and old
+  last 24 hours. One timeout does not raise it, a turn that uses Jev's answer clears it, and old
   failures age out by themselves. A turn with nothing to send to Jev is not a failure.
   A hook that gave output it could not use, reported no route line or could not start
   now leaves a file in `logs/hook-failures`, as a crash does, so `hook_failures_present`
