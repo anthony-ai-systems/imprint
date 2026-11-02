@@ -267,10 +267,19 @@ switches off delivery is unchanged.
   it. `org.imprint.short_lines.session_start` covers SessionStart, which stays
   deterministic: the same store and request give the same bytes. `imprint retrieve`,
   with or without `--prompt`, and analytical retrieval always give whole lines.
-- A short line has `authority`, `record_id` and `text`. `text` follows the compact
-  line's rules above, so it is always the record's own words. Text that was cut adds
-  `text_basis` and `"text_complete": false`, and a line without them has all of its
-  text. Picks go short even when they would all fit whole.
+- A short line has `authority`, `record_id` and `text`. `text` is always the record's
+  own words, and text over 400 bytes is cut. Text that was cut adds `text_basis` and
+  `"text_complete": false`, and a line without them has all of its text. Picks go
+  short even when they would all fit whole.
+- A captured record is cut by the compact line's rules above, which read an operator's
+  message and drop what it quotes or pastes. A short line also carries documents and
+  imports, where a quote can be the rule itself, so any other record is cut as it
+  stands: its start and its last sentence, with `text_basis` `stored_text`.
+- A reserved rule keeps the record's last sentence after its rule, and `text_basis`
+  stays `rule_sentences`. A later sentence can overrule the rule, and the reserved
+  mark would otherwise vouch for what it overruled. The last sentence takes at most
+  half of the 400 bytes, so the rule always has the rest. A compact line says the rule
+  alone.
 - The first short line of a payload also has `"detail": "imprint history
   <record_id>"`, which holds for every line in it.
 - `selector` appears only on a reserved rule, as `{"reserved": true}`. Nothing reads

@@ -180,7 +180,91 @@ def test_a_short_line_at_the_limit_is_complete_and_one_byte_past_it_is_not():
 
 def test_the_rule_a_standing_rule_was_delivered_for_comes_first():
     line = json.loads(render_short(record(text=f"{BACKGROUND}{RULE} {BACKGROUND}"), rules=[RULE]))
-    assert (line["text"], line["text_basis"]) == (RULE, "rule_sentences")
+    assert line["text"].split("\n")[0] == RULE
+    assert line["text_basis"] == "rule_sentences"
+
+
+@pytest.mark.parametrize("rule, closing", [
+    ("Always use the vendor template for release notes.",
+     "Scratch that first part, it was wrong and the vendor template must go."),
+    ("Never email the client directly.", "The one exception is the billing contact."),
+])
+def test_a_standing_rule_keeps_the_sentence_that_overrules_it(rule, closing):
+    line = json.loads(render_short(record(text=f"{rule} {BACKGROUND}{closing}"), rules=[rule]))
+    assert line["text"] == f"{rule}\n{closing}"
+    assert (line["text_basis"], line["text_complete"]) == ("rule_sentences", False)
+
+
+def test_a_long_closing_sentence_leaves_the_rule_its_half():
+    rule, closing = f"Never {'use the vendor template ' * 13}again.", f"Except {'when the client asks in writing ' * 12}first."
+    text = json.loads(render_short(record(text=f"{rule} {BACKGROUND}{closing}"), rules=[rule]))["text"]
+    said, end = text.split("\n")
+    assert rule.startswith(said) and closing.startswith(end)
+    assert len(said) > COMPACT_TEXT_BYTES // 3 and len(end) > COMPACT_TEXT_BYTES // 3
+    assert len(text.encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+def test_a_rule_that_is_the_last_sentence_is_said_once():
+    item = record(text=f"{BACKGROUND}{RULE}")
+    assert json.loads(render_short(item, rules=[RULE]))["text"] == RULE
+
+
+def test_a_compact_line_still_says_its_rule_and_nothing_else():
+    item = record(text=f"{RULE} {BACKGROUND}Scratch that first part, it was wrong.")
+    assert json.loads(render_compact(item, rules=[RULE]))["text"] == RULE
+
+
+HANDBOOK = "\n".join((
+    "Refund policy, quoted from the handbook:",
+    *["> Refunds are never issued after thirty days from the date of purchase."] * 6,
+    "This does not apply to annual plans.",
+))
+
+
+def imported(text: str, **overrides) -> RetrievalRecord:
+    values = dict(
+        text=text, provenance_status="extracted", authority_tier="imported_floor", imported_selected=True,
+        ontology_type="IngestedItem", ontology_path=("judgment", "IngestedItem"), judgment_statement=None,
+    )
+    return record(**{**values, **overrides})
+
+
+def test_a_record_no_operator_typed_keeps_what_it_quotes():
+    line = json.loads(render_short(imported(HANDBOOK)))
+    assert "> Refunds are never issued after thirty days" in line["text"]
+    assert line["text"].endswith("\nThis does not apply to annual plans.")
+    assert (line["text_basis"], line["text_complete"]) == ("stored_text", False)
+    assert len(line["text"].encode("utf-8")) <= COMPACT_TEXT_BYTES
+
+
+def test_a_record_no_operator_typed_ends_as_it_is_stored():
+    text = f"{BACKGROUND}\n> The closing clause is a quotation and it is the one that matters."
+    assert json.loads(render_short(imported(text)))["text"].endswith("\n> The closing clause is a quotation and it is the one that matters.")
+
+
+def test_ratified_text_is_read_as_it_is_stored_too():
+    item = imported(HANDBOOK, provenance_status="ratified", authority_tier="ratified_knowledge", imported_selected=False)
+    assert "> Refunds are never issued" in json.loads(render_short(item))["text"]
+
+
+def test_a_captured_message_still_loses_what_it_quotes():
+    text = f"Keep the summary short and say what failed.\n{HANDBOOK}\nNo, the refund note must go."
+    item = record(text=text)
+    line = json.loads(render_short(item))
+    assert "> Refunds" not in line["text"]
+    assert (line["text"], line["text_basis"]) == (
+        json.loads(render_compact(item))["text"], json.loads(render_compact(item))["text_basis"],
+    )
+
+
+def test_a_record_of_nothing_but_leading_blanks_is_never_an_empty_line():
+    assert json.loads(render_short(imported(f"{' ' * 500}Refunds end after thirty days. {BACKGROUND}")))["text"].strip()
+
+
+def test_an_imported_standing_rule_keeps_how_its_record_ended():
+    rule = "Never refund after thirty days."
+    text = f"{rule} {BACKGROUND}\n> The one exception is an annual plan."
+    assert json.loads(render_short(imported(text), rules=[rule]))["text"] == f"{rule}\n> The one exception is an annual plan."
 
 
 def test_shaping_a_line_leaves_the_record_alone():
@@ -332,7 +416,7 @@ def test_a_standing_rule_keeps_its_mark_and_nothing_else(text):
     item, score = pick(1, text=text)
     first, second = lines(respond([(item, score), pick(2)], reserved={item.record_id: [RULE]}))
     assert first["selector"] == {"reserved": True}
-    assert first["text"] == (text if text == RULE else RULE)
+    assert first["text"].startswith(RULE)
     assert "selector" not in second
 
 

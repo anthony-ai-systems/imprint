@@ -6,7 +6,13 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
-from imprint.capture.detector import closing_sentence, feedback_sentences, operator_words, stored_words
+from imprint.capture.detector import (
+    closing_sentence,
+    feedback_sentences,
+    operator_words,
+    stored_closing_sentence,
+    stored_words,
+)
 
 from .models import (
     CHOSEN_FUTURE_PARTITION,
@@ -252,20 +258,62 @@ def whole_text_fits(record: RetrievalRecord) -> bool:
     return _size(record.text) <= COMPACT_TEXT_BYTES
 
 
+def _rule_with_close(rules: Sequence[str], closing: str | None) -> str:
+    """Return a standing rule's sentences and how its record ended.
+
+    The end is where a message overrules what came before it, and a reserved mark
+    says the line stands, so a rule never goes out without it. The closing takes at
+    most half the limit, so the rule always has the rest.
+    """
+    said = "\n".join(rules)
+    if closing is None or closing in said:
+        return _cut(said)
+    close = _cut(closing, COMPACT_TEXT_BYTES // 2)
+    return f"{_cut(said, COMPACT_TEXT_BYTES - _size(close) - 1)}\n{close}"
+
+
+def _stored_opening(text: str) -> str:
+    """Return the start of stored text as it stands, and how it ended if it stops short."""
+    stored = text.strip()
+    head = _cut(stored)
+    closing = stored_closing_sentence(stored)
+    if closing is None or closing in head or _size(closing) > COMPACT_TEXT_BYTES // 2:
+        return head
+    return f"{_cut(stored, COMPACT_TEXT_BYTES - _size(closing) - 1)}\n{closing}"
+
+
+def _short_text(record: RetrievalRecord, rules: Sequence[str]) -> tuple[str, str]:
+    """Return what a short line says, and what that text is.
+
+    The compact rules read an operator's message, where a quote is someone else's
+    words. A short line also carries documents and imports, where a quote can be the
+    rule itself, so only a captured record is read that way.
+    """
+    if whole_text_fits(record):
+        return record.text, "whole"
+    captured = record.provenance_status == "captured"
+    if rules:
+        ending = closing_sentence if captured else stored_closing_sentence
+        return _rule_with_close(rules, ending(record.text)), "rule_sentences"
+    if captured:
+        return _compact_text(record.text)
+    return _stored_opening(record.text), "stored_text"
+
+
 def render_short(
     record: RetrievalRecord, *, selector: dict[str, object] | None = None, rules: Sequence[str] = (),
     lookup: bool = False,
 ) -> bytes:
     """Render a record's words with only what a reader needs to trust and find it.
 
-    This shapes one delivery only. The text follows the compact line's rules.
-    ``authority`` says how far to trust it and ``record_id`` is what ``imprint
-    history`` takes to return the rest, so neither is ever left off. ``text_basis``
-    and ``text_complete`` appear only on text that was cut, so their absence means
-    the text is all there. ``lookup`` adds ``detail``, the form of that command, which
-    one line of a payload can say for all of them.
+    This shapes one delivery only. The text is always the record's own words:
+    ``_short_text`` says how a long one is cut. ``authority`` says how far to trust it
+    and ``record_id`` is what ``imprint history`` takes to return the rest, so neither
+    is ever left off. ``text_basis`` and ``text_complete`` appear only on text that was
+    cut, so their absence means the text is all there. ``lookup`` adds ``detail``, the
+    form of that command, which one line of a payload can say for all of them.
     """
-    text, basis = _compact_text(record.text, rules)
+    text, basis = _short_text(record, rules)
     value: dict[str, object] = {"authority": _authority(record), "record_id": record.record_id, "text": text}
     if lookup:
         value["detail"] = SHORT_LINE_DETAIL
