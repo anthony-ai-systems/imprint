@@ -396,9 +396,11 @@ def api_key_present(settings: JevSettings) -> bool:
         status = os.lstat(path)
     except OSError:
         return False
-    if not path.is_absolute() or not stat.S_ISREG(status.st_mode) or status.st_size <= 0:
+    if not path.is_absolute() or not stat.S_ISREG(status.st_mode) or not 0 < status.st_size <= MAX_KEY_FILE_BYTES:
         return False
-    if os.name != "nt" and (status.st_uid != os.getuid() or stat.S_IMODE(status.st_mode) & 0o077):
+    if os.name != "nt" and (
+        status.st_uid != os.getuid() or stat.S_IMODE(status.st_mode) & 0o077 or not status.st_mode & stat.S_IRUSR
+    ):
         return False
     return True
 

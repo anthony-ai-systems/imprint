@@ -232,31 +232,60 @@ def test_a_key_in_the_environment_is_enough(tmp_path):
 def test_a_key_file_is_judged_by_its_metadata_and_never_opened(tmp_path, monkeypatch):
     monkeypatch.delenv(KEY_ENV)
     key = tmp_path / "synthetic-key"
-    key.write_text("synthetic-key-contents")
-    key.chmod(0o000)  # health could not read it if it tried
+    key.write_text("not a usable key, which only reading it could show")
+    key.chmod(0o600)
 
     def never(*args, **kwargs):
         raise AssertionError("health must not read the key")
 
+    real_open = os.open
+
+    def opened(path, *args, **kwargs):
+        assert str(path) != str(key), "health must not open the key"
+        return real_open(path, *args, **kwargs)
+
     monkeypatch.setattr(jev, "_read_key_file", never)
     monkeypatch.setattr(jev, "resolve_api_key", never)
+    monkeypatch.setattr(os, "open", opened)
     report = report_for(tmp_path, config_selector=selector(api_key_file=str(key)))
     assert KEY_REASON not in report["degraded_reasons"]
     assert "synthetic-key" not in json.dumps(report)
 
 
-@pytest.mark.parametrize("prepare", ["absent", "empty", "group_readable", "directory"])
+def test_an_environment_value_is_taken_as_set_and_left_unread(tmp_path, monkeypatch):
+    monkeypatch.setenv(KEY_ENV, "not a usable key")
+    assert KEY_REASON not in report_for(tmp_path)["degraded_reasons"]
+
+
+KEY_FILES = {
+    "empty": ("", 0o600),
+    "group_readable": ("synthetic", 0o640),
+    "no_owner_read": ("synthetic", 0o000),
+    "write_only": ("synthetic", 0o200),
+    "too_long_to_be_a_key": ("x" * (jev.MAX_KEY_FILE_BYTES + 1), 0o600),
+}
+
+
+@pytest.mark.parametrize("prepare", ["absent", "directory", *KEY_FILES])
 def test_a_key_file_that_will_not_serve_degrades(tmp_path, monkeypatch, prepare):
     monkeypatch.delenv(KEY_ENV)
     key = tmp_path / "synthetic-key"
     if prepare == "directory":
         key.mkdir()
     elif prepare != "absent":
-        key.write_text("" if prepare == "empty" else "synthetic")
-        key.chmod(0o640 if prepare == "group_readable" else 0o600)
+        key.write_text(KEY_FILES[prepare][0])
+        key.chmod(KEY_FILES[prepare][1])
     report = report_for(tmp_path, config_selector=selector(api_key_file=str(key)))
     assert KEY_REASON in report["degraded_reasons"]
     assert str(key) not in json.dumps(report)
+
+
+def test_a_key_file_at_the_size_limit_is_present(tmp_path, monkeypatch):
+    monkeypatch.delenv(KEY_ENV)
+    key = tmp_path / "synthetic-key"
+    key.write_text("x" * jev.MAX_KEY_FILE_BYTES)
+    key.chmod(0o400)
+    assert KEY_REASON not in report_for(tmp_path, config_selector=selector(api_key_file=str(key)))["degraded_reasons"]
 
 
 def test_a_selector_that_cannot_load_is_not_called_a_missing_key(tmp_path, monkeypatch):
@@ -408,6 +437,37 @@ def test_health_gains_fields_only(tmp_path):
     assert set(report) == {"degraded_reasons", "health_schema_version", "metrics", "status"}
     assert report["health_schema_version"] == "1.0.0"
     assert report["metrics"]["hook_route_evidence"] == "operator_logs_hook_routes_tail"
+
+
+def fallbacks(root, count: int) -> None:
+    for _ in range(count):
+        jev.log_decision(root, {"ts": jev._utc_stamp(), "outcome": "fallback", "fallback_reason": "timeout"})
+
+
+TAIL = "operator_logs_hook_routes_tail"
+
+
+@pytest.mark.parametrize("count, mode, entries, evidence", [
+    (SELECTOR_FAILURE_LIMIT, "jev", (), "unavailable"),
+    (SELECTOR_FAILURE_LIMIT - 1, "jev", (), TAIL),
+    (SELECTOR_FAILURE_LIMIT, "jev", (line(),), TAIL),
+    (SELECTOR_FAILURE_LIMIT, "shadow", (), TAIL),
+], ids=["no_lines", "under_the_limit", "the_log_has_lines", "not_on_jev"])
+def test_fallbacks_with_no_route_lines_say_the_log_is_not_evidence(tmp_path, count, mode, entries, evidence):
+    root = tmp_path / "operator"
+    root.mkdir()
+    fallbacks(root, count)
+    assert report_for(tmp_path, *entries, mode=mode)["metrics"]["hook_route_evidence"] == evidence
+
+
+def test_a_log_path_that_cannot_take_a_line_does_not_read_as_no_failures(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir()
+    fallbacks(root, SELECTOR_FAILURE_LIMIT)
+    route_log_path(root).mkdir()
+    record_route(root, line())
+    metrics = report_for(tmp_path)["metrics"]
+    assert (metrics["selector_failures_in_a_row"], metrics["hook_route_evidence"]) == (0, "unavailable")
 
 
 def test_a_working_selector_adds_no_reason(tmp_path):
