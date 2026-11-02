@@ -1,7 +1,7 @@
 """Nothing changes for anyone yet. With no rows and no extension, a build prints what main printed.
 
 ``fixtures/scope_identity/golden.json`` holds one hash per scenario, made by running
-``driver.py`` on 830eb7f. The tests that run 830eb7f itself need that commit, so a
+``driver.py`` on 0c561dd. The tests that run 0c561dd itself need that commit, so a
 shallow checkout skips them and keeps the golden and the committed export.
 """
 
@@ -25,7 +25,7 @@ from imprint.store import ImprintStore
 from imprint.store.scope import SCOPE_EXTENSION
 
 
-MAIN = "830eb7f"
+MAIN = "0c561dd"
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src"
 FIXTURES = ROOT / "tests" / "fixtures" / "scope_identity"

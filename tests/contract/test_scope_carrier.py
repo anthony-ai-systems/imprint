@@ -1092,7 +1092,7 @@ def test_a_legacy_import_stamps_unresolved_unless_told_otherwise(tmp_path):
         )
 
 
-# JSON-LD. The tests that run the real 830eb7f are in test_scope_byte_identity.py ---
+# JSON-LD. The tests that run real main are in test_scope_byte_identity.py ---
 
 
 def _reset_rows(document: dict, rows: list[dict]) -> dict:
