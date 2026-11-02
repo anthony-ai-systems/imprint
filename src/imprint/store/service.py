@@ -1597,7 +1597,8 @@ class ImprintStore:
               WHERE event_type IN (
                 'ratified','rejected','deferred','corrected','contested',
                 'consent_revoked','tombstoned','reason_added','reinforced',
-                'contradicts','supersedes','domain_selected','domain_frozen'
+                'contradicts','supersedes','domain_selected','domain_frozen',
+                'scope_changed'
               )
                 AND (payload_json LIKE ? OR payload_json LIKE ? OR payload_json LIKE ?)
               ORDER BY system_time,event_id
@@ -1605,6 +1606,7 @@ class ImprintStore:
                 f'%"node_id":"{node_id}"%', f'%"source_id":"{node_id}"%',
                 f'%"target_id":"{node_id}"%',
             )).fetchall()
+            scope = read_scope_row(conn, node_id)
         if not rows:
             raise ValidationError("node does not exist")
         versions: list[dict[str, Any]] = []
@@ -1615,7 +1617,7 @@ class ImprintStore:
             item["provenance"] = json.loads(item.pop("provenance_json"))
             item["evidence"] = json.loads(item.pop("evidence_json"))
             versions.append(item)
-        return {
+        history: dict[str, Any] = {
             "node_id": node_id,
             "versions": versions,
             "dispositions": [
@@ -1628,6 +1630,66 @@ class ImprintStore:
                 for row in dispositions
             ],
         }
+        if scope is not None:
+            history["scope"] = scope_view(scope)
+        return history
+
+    def set_record_scope(self, node_id: str, *, actor_id: str, changes: Mapping[str, Any]) -> str:
+        """Change one record's scope and say so, with no new version of the record.
+
+        This is the only release for a held row. It need not pick a candidate.
+        The event is the one place an override list is written down: a capture or
+        node event naming a central id would make that central rule's purge fail.
+        """
+        actor_id = self._require_actor(actor_id)
+        now = utc_now()
+        event_id = make_urn("event")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("""
+              SELECT n.operator_id,n.node_type,nv.* FROM nodes n JOIN node_versions nv USING(node_id)
+              WHERE n.node_id=? AND nv.system_to IS NULL
+            """, (node_id,)).fetchone()
+            if not current:
+                raise ValidationError("node is missing or not current")
+            self._require_configured_operator(current["operator_id"])
+            prior = read_scope_row(conn, node_id)
+            prior_scope = scope_view(prior) if prior else None
+            value = merge_change(prior_scope, changes)
+            require_fits_node(value, current["node_type"], json.loads(current["payload_json"]))
+            for override in changes.get("overrides", ()):
+                self._require_current_central(conn, override)
+            scope = {key: value[key] for key in (
+                "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides",
+            )}
+            event_payload = {
+                "node_id": node_id, "actor_id": actor_id, "prior_scope": prior_scope,
+                "scope": scope, "resolved_by": RESOLVED_EXPLICIT,
+            }
+            conn.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
+                (event_id, "scope_changed", current["operator_id"], now, now,
+                 canonical_bytes(event_payload).decode(), payload_sha256(event_payload),
+                 current["event_id"], current["provenance_status"]),
+            )
+            write_scope_row(conn, {
+                "node_id": node_id, "scope_kind": value["scope_kind"], "client_id": value["client_id"],
+                "project_id": value["project_id"], "delivery": value["delivery"],
+                "delivery_rank": value["delivery_rank"], "speaker": value["speaker"],
+                "endorser": value["endorser"], "overrides_json": json.dumps(value["overrides"]),
+                "resolved_by": RESOLVED_EXPLICIT, "event_id": event_id, "stamped_at": now,
+            }, replace=True)
+        return event_id
+
+    @staticmethod
+    def _require_current_central(conn, node_id: str) -> None:
+        known = conn.execute("""
+          SELECT 1 FROM record_scope rs JOIN node_versions nv USING(node_id)
+          WHERE rs.node_id=? AND rs.scope_kind='central' AND nv.system_to IS NULL
+            AND nv.provenance_status='ratified' AND nv.authority_tier='ratified_knowledge'
+        """, (node_id,)).fetchone()
+        if not known:
+            raise ValidationError("an override must name a current central record")
 
     def add_reason(
         self,

@@ -221,3 +221,187 @@ def test_recompiling_a_retained_spool_adds_no_row_and_moves_none(tmp_path, captu
         "captured": 0, "duplicate": 1, "quarantined": 0,
     }
     assert rows_of(store) == before
+
+
+# imprint scope set ---------------------------------------------------------
+
+
+def test_scope_set_appends_an_event_updates_the_row_and_reads_back(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    envelope = stamped(
+        capture_envelope, scope_kind="held", client_id=None, resolved_by="conflict",
+        candidate_client_ids=["a-client", "b-client"],
+    )
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    versions = len(store.node_history(verdict_id)["versions"])
+
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "client", "--client", "c-client",
+                 "--project", "a-project", "--delivery", "general", "--rank", "4", "--by", ACTOR]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "scope_changed"
+    row = row_of(store, verdict_id)
+    assert (row["scope_kind"], row["client_id"], row["project_id"], row["delivery"], row["delivery_rank"]) == (
+        "client", "c-client", "a-project", "general", 4)
+    assert (row["resolved_by"], row["event_id"]) == ("explicit", result["event_id"])
+
+    assert main(["--config", str(config), "history", verdict_id]) == 0
+    history = json.loads(capsys.readouterr().out)["history"]
+    assert len(history["versions"]) == versions
+    assert history["scope"]["client_id"] == "c-client" and history["scope"]["overrides"] == []
+    change = history["dispositions"][-1]
+    assert change["event_type"] == "scope_changed" and change["event_id"] == result["event_id"]
+    assert change["payload"]["prior_scope"]["scope_kind"] == "held"
+    assert change["payload"]["scope"]["client_id"] == "c-client"
+    assert change["payload"]["actor_id"] == ACTOR
+
+
+def test_scope_set_moves_only_what_it_names(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    envelope = stamped(capture_envelope, project_id="a-project", delivery="specific", delivery_rank=2,
+                       speaker="a-team-member", endorser="the-operator")
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--delivery", "general", "--by", ACTOR]) == 0
+    row = row_of(store, verdict_id)
+    assert (row["delivery"], row["delivery_rank"], row["project_id"], row["client_id"]) == (
+        "general", 2, "a-project", "example-client")
+    assert (row["speaker"], row["endorser"]) == ("a-team-member", "the-operator")
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--clear", "delivery", "--clear", "rank",
+                 "--clear", "project", "--by", ACTOR]) == 0
+    row = row_of(store, verdict_id)
+    assert (row["delivery"], row["delivery_rank"], row["project_id"]) == (None, None, None)
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system", "--by", ACTOR]) == 0
+    assert row_of(store, verdict_id)["client_id"] is None
+    capsys.readouterr()
+
+
+def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    target = central(store, envelope)
+    event_id = store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": [target]})
+    assert json.loads(row_of(store, verdict_id)["overrides_json"]) == [target]
+    with store.connect() as conn:
+        naming = [row[0] for row in conn.execute(
+            "SELECT event_type FROM events WHERE event_id<>? AND payload_json LIKE ? AND event_type<>'ratified'"
+            " AND event_type NOT LIKE 'inferred%'",
+            (event_id, f'%"overrides"%{target}%'),
+        )]
+    assert naming == []
+    store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": []})
+    assert row_of(store, verdict_id)["overrides_json"] == "[]"
+
+
+@pytest.mark.parametrize("changes, message", [
+    ({}, "must name"),
+    ({"scope_kind": "central"}, "only at ratification"),
+    ({"scope_kind": "shared"}, "unknown scope kind"),
+    ({"scope_kind": "client"}, "client id"),
+    ({"scope_kind": "system", "client_id": "a-client"}, "client id"),
+    ({"scope_kind": "system", "delivery": "general"}, "delivery tag"),
+    ({"scope_kind": "unresolved", "delivery": "specific"}, "delivery tag"),
+    ({"scope_kind": "held", "delivery": "general"}, "delivery tag"),
+    ({"scope_kind": "client", "client_id": "a-client", "delivery": "broad"}, "unknown delivery"),
+    ({"scope_kind": "client", "client_id": "a-client", "delivery_rank": True}, "rank"),
+    ({"scope_kind": "client", "client_id": "a-client", "speaker": "someone"}, "must name"),
+    ({"scope_kind": "client", "client_id": "a-client", "overrides": ["urn:imprint:rule:nope"]}, "current central"),
+], ids=repr)
+def test_scope_set_refusals_change_nothing(tmp_path, capture_envelope, changes, message):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope)
+    with pytest.raises(ValidationError, match=message):
+        store.set_record_scope(node_id, actor_id=ACTOR, changes=changes)
+    assert row_of(store, node_id) is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE event_type='scope_changed'").fetchone()[0] == 0
+
+
+def test_scope_set_needs_a_kind_where_no_row_exists(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    with pytest.raises(ValidationError, match="needs a kind"):
+        store.set_record_scope(rule(store, capture_envelope), actor_id=ACTOR, changes={"delivery": "general"})
+
+
+def test_a_central_row_keeps_its_kind_but_can_be_retagged(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    target = central(store, capture_envelope)
+    for kind in ("client", "system", "held", "unresolved"):
+        with pytest.raises(ValidationError, match="keeps its kind"):
+            store.set_record_scope(target, actor_id=ACTOR, changes={"scope_kind": kind, "client_id": None})
+    store.set_record_scope(target, actor_id=ACTOR, changes={"delivery": "specific"})
+    row = row_of(store, target)
+    assert (row["scope_kind"], row["delivery"]) == ("central", "specific")
+
+
+def test_scope_set_refuses_an_override_that_is_not_a_current_central_record(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    plain = rule(store, envelope, "Not central.")
+    closed = central(store, envelope, "Closed central.")
+    store.tombstone_node(closed, reason="Withdrawn.")
+    for override in (plain, closed, verdict_id):
+        with pytest.raises(ValidationError, match="current central"):
+            store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": [override]})
+
+
+def test_scope_set_refuses_a_closed_record_and_an_unknown_one(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    store.tombstone_node(verdict_id, reason="Withdrawn.")
+    for node_id in (verdict_id, "urn:imprint:rule:00000000-0000-4000-8000-000000000000"):
+        with pytest.raises(ValidationError, match="missing or not current"):
+            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+
+
+def test_scope_set_refuses_a_record_that_is_never_retrieved(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    for node_id in (capture_envelope["case"]["case_id"], capture_envelope["evidence"][0]["evidence_id"]):
+        with pytest.raises(ValidationError, match="not retrievable"):
+            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+
+
+def test_scope_set_keeps_a_tag_to_the_three_taggable_types(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    evidence_id = capture_envelope["evidence"][0]["evidence_id"]
+    belief = store.append_derived_node(
+        node_type="Belief", payload={"statement": "A belief."}, provenance_status="inferred",
+        authority_tier="inferred_candidate", evidence_ids=[evidence_id],
+        operator_id=capture_envelope["operator_id"], valid_from=VALID_FROM, proposed_by="test",
+    )
+    with pytest.raises(ValidationError, match="Verdict, Principle or Rule"):
+        store.set_record_scope(belief, actor_id=ACTOR, changes={
+            "scope_kind": "client", "client_id": "a-client", "delivery": "general",
+        })
+
+
+def test_scope_set_keeps_a_client_off_a_record_with_a_domain_id(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope, payload={"domain_id": "research"})
+    with pytest.raises(ValidationError, match="domain_id"):
+        store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+
+
+def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    store.apply_capture(capture_envelope)
+    verdict_id = capture_envelope["verdict"]["verdict_id"]
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "central", "--by", ACTOR]) == 2
+    assert "only at ratification" in json.loads(capsys.readouterr().out)["error"]
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system",
+                 "--delivery", "specific", "--clear", "delivery", "--by", ACTOR]) == 2
+    assert "both set and clear" in json.loads(capsys.readouterr().out)["error"]
+    assert rows_of(store) == []

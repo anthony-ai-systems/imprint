@@ -23,6 +23,7 @@ from .errors import ImprintError, ValidationError
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
 from .store import ImprintStore
+from .store.scope import RESOLVED_EXPLICIT
 
 
 def _store(root: Path) -> ImprintStore:
@@ -393,6 +394,26 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
     }
 
 
+_SCOPE_CLEARS = {
+    "project": ("project_id", None), "delivery": ("delivery", None),
+    "rank": ("delivery_rank", None), "overrides": ("overrides", []),
+}
+
+
+def _scope_changes(args: argparse.Namespace) -> dict[str, object]:
+    """What ``imprint scope set`` names. Anything it does not name stays as it is."""
+    changes = dict(_SCOPE_CLEARS[name] for name in args.clear)
+    for key, value in (
+        ("scope_kind", args.kind), ("client_id", args.client), ("project_id", args.project),
+        ("delivery", args.delivery), ("delivery_rank", args.rank), ("overrides", args.override),
+    ):
+        if value is not None:
+            if key in changes:
+                raise ValidationError(f"scope set cannot both set and clear {key}")
+            changes[key] = value
+    return changes
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="imprint", description="Local-first captured judgment")
     parser.add_argument("--config", type=Path)
@@ -532,6 +553,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     history = subs.add_parser("history", help="show immutable versions and dispositions")
     history.add_argument("node_id")
+
+    scope = subs.add_parser("scope", help="change one record's scope, on the operator's word")
+    scope_subs = scope.add_subparsers(dest="scope_action", required=True)
+    scope_set = scope_subs.add_parser("set")
+    scope_set.add_argument("node_id")
+    scope_set.add_argument("--kind", help="client, system, unresolved or held")
+    scope_set.add_argument("--client")
+    scope_set.add_argument("--project")
+    scope_set.add_argument("--delivery", help="general or specific")
+    scope_set.add_argument("--rank", type=int)
+    scope_set.add_argument("--override", action="append", help="a central record this client rule wins over")
+    scope_set.add_argument("--clear", action="append", default=[],
+                           choices=("project", "delivery", "rank", "overrides"))
+    scope_set.add_argument("--by", required=True)
 
     verdict = subs.add_parser("verdict", help="append later WHY or reinforcement evidence")
     verdict_subs = verdict.add_subparsers(dest="verdict_action", required=True)
@@ -935,6 +970,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "history":
             store.initialize()
             _write_json({"status": "ok", "history": store.node_history(args.node_id)})
+            return 0
+        if args.command == "scope":
+            store.initialize()
+            event_id = store.set_record_scope(args.node_id, actor_id=args.by, changes=_scope_changes(args))
+            _write_json({"status": "scope_changed", "event_id": event_id, "node_id": args.node_id})
             return 0
         if args.command == "verdict":
             store.initialize()
