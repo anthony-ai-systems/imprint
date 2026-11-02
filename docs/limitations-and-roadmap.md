@@ -23,7 +23,10 @@
 - Scope is carried, not enforced. A record's scope row does not limit who
   receives it, so every thread still gets every eligible record. Nothing stamps a
   capture on its own yet, and a build that is rolled back to compile a stamped
-  capture keeps the stamp on the event and writes no row.
+  capture keeps the stamp on the event and writes no row. Any other record written
+  by that build also has no row, including a successor that would have taken the
+  target's row, so it reads as legacy after you upgrade again. `imprint scope set`
+  can give it one.
 - No software can guarantee that sensitive data is safe on a compromised host.
 
 ## Explicit non-claims
