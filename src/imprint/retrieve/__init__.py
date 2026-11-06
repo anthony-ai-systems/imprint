@@ -148,6 +148,15 @@ def commit_payload_delivery(
     )
 
 
+def committed_delivery(
+    *, root: Path, session_id: str, snapshot_id: str, domain_id: str | None = None,
+) -> dict[str, object] | None:
+    """What a latch's committed delivery held, or None if it cannot say."""
+    return DeliveryReceipts(Path(root) / "receipts").committed_response(
+        _session_ref(session_id), snapshot_id, domain_id,
+    )
+
+
 def reset_payload_delivery(*, root: Path, session_id: str) -> None:
     """Forget a session's delivery latches after its host context was wiped."""
     DeliveryReceipts(Path(root) / "receipts").reset_session(_session_ref(session_id))
@@ -201,6 +210,14 @@ class SelectorDecision:
     response: dict[str, object] | None = None
     context: RetrievalContext | None = None
     exclude_ids: frozenset[str] = frozenset()
+    # Jev replied on this turn. Only a reply says it is alive: a turn with nothing
+    # to send, or one replayed from a receipt, never asked.
+    answered: bool = False
+    # The receipt scope of a turn that hit its latch, whose response cannot name it.
+    scope: str | None = None
+    # Nothing was left to send because this session already has it. A turn Jev owns
+    # says so in its response's ``session_held`` stage, which its receipt keeps.
+    held: bool = False
 
     def fields(self) -> dict[str, object]:
         """Content-free diagnostics for hook and CLI output."""
@@ -244,7 +261,7 @@ def _jev_response(
     snapshot_id: str, scope: str, picks: Sequence[tuple[RetrievalRecord, float]], outcome: str,
     eligible_count: int, budget: int, local: RetrievalResult | None = None,
     retried: frozenset[str] = frozenset(), reserved: Mapping[str, Sequence[str]] | None = None,
-    withheld: int = 0, short_lines: bool = False,
+    withheld: int = 0, short_lines: bool = False, held: int = 0,
 ) -> dict[str, object]:
     """Render ``local`` (the matched domain's never-sent records, ranked
     deterministically) and then picks in score order, never exceeding the
@@ -258,7 +275,8 @@ def _jev_response(
     would be cut on every turn. Only a pick that can never fit is latched compact.
     ``reserved`` maps picks that are standing rules to their rule sentences. They
     are marked on their lines, and a compact one says its rule. ``withheld`` counts
-    stale records kept from this turn.
+    stale records kept from this turn, and ``held`` the records there was nothing left
+    to send because this session already has them.
 
     ``short_lines`` puts picks on short lines, which frees the room the rules above
     exist to share. A short line cuts long text, so a pick it would cut goes whole
@@ -375,6 +393,8 @@ def _jev_response(
             **({"reserved": delivered_rules} if delivered_rules else {}),
             **({"stale_withheld": withheld} if withheld else {}),
             **({"delivered_short": short_picks} if short_picks else {}),
+            **({"session_held": held} if held else {}),
+            **({"local_unfit": local.omitted_count} if local is not None and local.omitted_count else {}),
         },
     }
 
@@ -419,6 +439,7 @@ def select_prompt_payload(
     result: SelectionResult | None = None
     delivered_ids: set[str] = set()
     retried_ids: set[str] = set()
+    answered = False
     session_ref = _session_ref(session_id)
 
     def already_sent() -> frozenset[str]:
@@ -478,7 +499,7 @@ def select_prompt_payload(
                 if delivered.exists():
                     return SelectorDecision(
                         "jev", "already_delivered",
-                        response=_already_delivered(context.snapshot_id), context=context,
+                        response=_already_delivered(context.snapshot_id), context=context, scope=scope,
                     )
                 if pending.exists():
                     cached = receipts._decode_prepared(pending)
@@ -502,6 +523,7 @@ def select_prompt_payload(
             and egress_text(item) is not None
         }
         pool = [item for item in candidates if item.record_id in sendable and item.record_id not in delivered_ids]
+        held = 0 if pool else sum(item.record_id in delivered_ids for item in candidates)
         if deadline is not None:
             settings = replace(settings, timeout_seconds=min(settings.timeout_seconds, deadline - time.monotonic()))
         standing: frozenset[str] = frozenset()
@@ -522,10 +544,12 @@ def select_prompt_payload(
             record(result)
             return SelectorDecision(
                 failed_method, "fallback", result.fallback_reason, context=context, exclude_ids=already_sent(),
+                held=held > 0,
             )
+        answered = result.request_sent
         if shadow:
             record(result)
-            return SelectorDecision("shadow", result.outcome, context=context)
+            return SelectorDecision("shadow", result.outcome, context=context, answered=answered, held=held > 0)
         assert scope is not None
         # Records Imprint never sends (an excluded domain, an unselected type,
         # no statement) keep their deterministic delivery.
@@ -544,30 +568,32 @@ def select_prompt_payload(
             context.snapshot_id, scope, result.picks, result.outcome,
             len(pool) + len(local_records), selector_budget, local, frozenset(retried_ids),
             {item.record_id: rule_sentences(item) for item, _ in result.picks if item.record_id in result.reserved},
-            result.withheld, short_lines,
+            result.withheld, short_lines, held,
         )
         outcome = str(response["selector_outcome"])
         stages = response["selector_stages"]
         if refresh:
             record(result, stages, outcome)
-            return SelectorDecision("jev", outcome, response=response, context=context)
+            return SelectorDecision("jev", outcome, response=response, context=context, answered=answered)
         status, cached = receipts.prepare_delivery(session_ref, context.snapshot_id, scope, response)
         if status == "delivered":
             record(result, stages, "already_delivered")
             return SelectorDecision(
                 "jev", "already_delivered",
-                response=_already_delivered(context.snapshot_id), context=context,
+                response=_already_delivered(context.snapshot_id), context=context, answered=answered, scope=scope,
             )
         assert cached is not None
         record(result, stages, outcome)
-        return SelectorDecision("jev", outcome, response=cached, context=context)
+        return SelectorDecision("jev", outcome, response=cached, context=context, answered=answered)
     except Exception:
         # A failure after Jev answered is still one fallback line: the turn
-        # fell back, even though the request itself succeeded.
+        # fell back, even though the request itself succeeded. Jev still replied.
         record(SelectionResult(fallback_reason="exception") if result is None else replace(
             result, picks=(), reserved=frozenset(), outcome="fallback", fallback_reason="exception",
         ))
-        return SelectorDecision(failed_method, "fallback", "exception", context=context, exclude_ids=already_sent())
+        return SelectorDecision(
+            failed_method, "fallback", "exception", context=context, exclude_ids=already_sent(), answered=answered,
+        )
 
 
 __all__ = [
@@ -575,6 +601,7 @@ __all__ = [
     "BUSINESS_OBSERVED_PARTITION",
     "CHOSEN_FUTURE_PARTITION",
     "commit_payload_delivery",
+    "committed_delivery",
     "DEFAULT_FUTURE_PARTITION",
     "AuthorityMode",
     "DeliveryReceipts",

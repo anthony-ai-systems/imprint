@@ -31,6 +31,8 @@ def healthy(**changes):
         ({"hook_failure_count": 1}, "hook_failures_present"),
         ({"t3_record_unavailable_24h": 1}, "t3_record_unavailable"),
         ({"experimental_enabled": True, "experimental_state": "stalled"}, "experimental_loop_stalled"),
+        ({"selector_mode": "jev"}, "selector_key_unavailable"),
+        ({"selector_mode": "jev", "selector_key_present": True, "selector_failures_in_a_row": 3}, "selector_failures_repeated"),
     ],
 )
 def test_required_failures_turn_health_red(changes, reason):
