@@ -802,8 +802,8 @@ class ImprintStore:
         take the rule away from readers who had it. A client rule that means to win
         over a central one uses ``overrides``. A central row is written only at
         ratification, so it is never handed on, and a central record cannot be
-        closed by one with no row. An ``unresolved`` or ``held`` record reaches no
-        reader yet, so any successor may close it.
+        closed by one with no row. An ``unresolved`` or ``held`` record has no
+        settled readers yet, so any successor may close it.
         """
         if target is None:
             return None

@@ -83,13 +83,23 @@ snapshot id moves at the first row, and then whenever a row changes.
   the same client, and a `system` record only by a `system` one. Every other pair
   is refused, so one client's record cannot close another's and an unknown record
   cannot close a central one. A record that is `unresolved`, `held` or has no row
-  reaches no reader yet, so any successor may close it. A client record adds to a
-  central one through `overrides` and never replaces it.
+  has no settled readers yet, so any successor may close it. A client record adds
+  to a central one through `overrides` and never replaces it.
 - **Who writes `central`.** Nothing in this release does. `imprint scope set`, a
   capture stamp and the ontology flags all refuse it, and import accepts it only on
   a ratified record.
 - **Retrieval.** `RetrievalRecord.scope` carries the row. Eligibility, ordering and
   rendering ignore it.
+- **Delivery contract, for the filter a later release adds.** No row, `unresolved`
+  and `held` are unknown, and an unknown record is never treated as `central`. A
+  client door receives only `central` records and `client` records with its own
+  exact client id. `system` marks a record about the operator's own systems and
+  tools rather than any client's work, so no client door receives it: it reaches
+  only doors that are not a client's, and what else those doors receive is not
+  settled here. The filter is an allow-list, never a list of what to drop: a record
+  reaches a door only when its row matches an entry above, so a missing or lost row
+  withholds the record, and a door whose own client cannot be resolved receives
+  `central` only.
 
 ## Semantic ontology contract
 
