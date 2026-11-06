@@ -11,9 +11,10 @@
   record except a Domain `unresolved`, so its first run writes the first row and
   moves the snapshot id once. Delivered text does not change. Rows cross JSON-LD
   under a new `imprint:recordScope` key, come with a backup file, and go with a
-  purge. With no rows and no extension, output matches the previous release byte for
-  byte, the store and record schema versions stay 3.0.0, and an older build still
-  opens the store.
+  purge. A client or project id is lower case letters and digits joined by single
+  hyphens, and anything else is refused. With no rows and no extension, output
+  matches the previous release byte for byte, the store and record schema versions
+  stay 3.0.0, and an older build still opens the store.
 - Treat a dead Jev as a fault. `imprint health` adds two degraded reasons, under
   `selector.mode: jev` only. `selector_key_unavailable` is raised at once, with no
   traffic, when the key check fails, and the check never reads the key.

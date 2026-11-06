@@ -9,6 +9,7 @@ no rows, because several read paths never call ``initialize``.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Mapping
 
@@ -17,7 +18,12 @@ from imprint.errors import ValidationError
 SCOPE_EXTENSION = "org.imprint.scope"
 SCOPE_EXTENSION_VERSION = "1.0.0"
 SCOPE_KINDS = frozenset({"client", "central", "system", "unresolved", "held"})
+# Delivery tags and ranks are checked here only, not by the table, so they can
+# still change: no doc yet says what a delivery route does with them.
 DELIVERY_TAGS = frozenset({"general", "specific"})
+# One shape for a client or project id, here and in the table's CHECKs: lower
+# case letters and digits in runs joined by single hyphens, none at either end.
+ID_SHAPE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 # A delivery tag goes only on these: they sit in the ``general`` section, and Jev
 # can be sent them.
 TAGGED_NODE_TYPES = frozenset({"Verdict", "Principle", "Rule"})
@@ -42,12 +48,24 @@ def _require_text(value: Any, field: str, *, nullable: bool = True) -> None:
         raise ValidationError(f"scope {field} must be a non-empty string")
 
 
-def _require_shape(kind: Any, client_id: Any, delivery: Any, rank: Any) -> None:
-    """The table's CHECKs in Python, so a bad value is refused by name."""
+def _require_id(value: Any, field: str) -> None:
+    """A client or project id in its one shape, so a slip of case or spacing is refused, not a new client."""
+    if value is None:
+        return
+    if not isinstance(value, str) or ID_SHAPE.fullmatch(value) is None:
+        raise ValidationError(
+            f"scope {field} must be lower case letters and digits joined by single hyphens"
+        )
+
+
+def _require_shape(kind: Any, client_id: Any, project_id: Any, delivery: Any, rank: Any) -> None:
+    """The table's CHECKs in Python, so a bad value is refused by name, and the delivery rules."""
     if not isinstance(kind, str) or kind not in SCOPE_KINDS:
         raise ValidationError("unknown scope kind")
     if (kind == "client") != (client_id is not None):
         raise ValidationError("a client id goes on a client scope and on no other kind")
+    _require_id(client_id, "client_id")
+    _require_id(project_id, "project_id")
     if delivery is not None:
         if not isinstance(delivery, str) or delivery not in DELIVERY_TAGS:
             raise ValidationError("unknown delivery tag")
@@ -70,9 +88,11 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
     value = {key: stamp.get(key) for key in _STAMP_KEYS}
     if value["scope_kind"] == "central":
         raise ValidationError("a central scope is written only at ratification")
-    _require_shape(value["scope_kind"], value["client_id"], value["delivery"], value["delivery_rank"])
+    _require_shape(
+        value["scope_kind"], value["client_id"], value["project_id"], value["delivery"], value["delivery_rank"],
+    )
     _require_text(value["resolved_by"], "resolved_by", nullable=False)
-    for field in ("client_id", "project_id", "speaker", "endorser"):
+    for field in ("speaker", "endorser"):
         _require_text(value[field], field)
     if value["speaker"] is not None and value["endorser"] is None:
         raise ValidationError("a speaker needs an endorser")
@@ -84,7 +104,7 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
     ):
         raise ValidationError("candidate_client_ids must be a sorted list")
     for candidate in candidates:
-        _require_text(candidate, "candidate_client_ids", nullable=False)
+        _require_id(candidate, "candidate_client_ids")
     if candidates and value["scope_kind"] != "held":
         raise ValidationError("candidate_client_ids go only on a held scope")
     return value
@@ -130,9 +150,9 @@ def merge_change(prior: Mapping[str, Any] | None, changes: Mapping[str, Any]) ->
     }
     if "client_id" not in changes and value["scope_kind"] != "client":
         value["client_id"] = None
-    _require_shape(value["scope_kind"], value["client_id"], value["delivery"], value["delivery_rank"])
-    for field in ("client_id", "project_id"):
-        _require_text(value[field], field)
+    _require_shape(
+        value["scope_kind"], value["client_id"], value["project_id"], value["delivery"], value["delivery_rank"],
+    )
     overrides = value["overrides"]
     if not isinstance(overrides, list):
         raise ValidationError("overrides must be a list")
@@ -146,10 +166,10 @@ def validate_row(row: Any) -> None:
     """Fail closed on one row a document carries, ``central`` included."""
     if not isinstance(row, dict) or set(row) != set(SCOPE_COLUMNS):
         raise ValidationError("invalid row in record scope")
-    _require_shape(row["scope_kind"], row["client_id"], row["delivery"], row["delivery_rank"])
+    _require_shape(row["scope_kind"], row["client_id"], row["project_id"], row["delivery"], row["delivery_rank"])
     for field in ("node_id", "resolved_by", "event_id", "stamped_at"):
         _require_text(row[field], field, nullable=False)
-    for field in ("client_id", "project_id", "speaker", "endorser"):
+    for field in ("speaker", "endorser"):
         _require_text(row[field], field)
     try:
         overrides = json.loads(row["overrides_json"])

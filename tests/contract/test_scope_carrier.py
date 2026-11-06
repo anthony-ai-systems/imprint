@@ -199,6 +199,11 @@ def test_the_capture_pipeline_passes_extensions_through(tmp_path, capture_envelo
     {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["b-client", "a-client"]},
     {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["a-client", "a-client"]},
     {"client_id": "  "},
+    {"client_id": "North-Wind"},
+    {"client_id": " north-wind "},
+    {"client_id": "north_wind"},
+    {"project_id": "BFCM 2026"},
+    {"scope_kind": "held", "client_id": None, "candidate_client_ids": ["North-Wind"]},
     *MISTYPED_STAMPS,
 ], ids=repr)
 def test_a_bad_stamp_is_refused_and_writes_nothing(tmp_path, capture_envelope, payload):
@@ -347,6 +352,11 @@ def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_env
     ({"scope_kind": "client", "client_id": "a-client", "speaker": "someone"}, "must name"),
     ({"scope_kind": "client", "client_id": "a-client", "overrides": ["urn:imprint:rule:nope"]}, "current central"),
     ({"scope_kind": "client", "client_id": "a-client", "overrides": "x"}, "must be a list"),
+    ({"scope_kind": "client", "client_id": "North-Wind"}, "client_id must be lower case"),
+    ({"scope_kind": "client", "client_id": " north-wind "}, "client_id must be lower case"),
+    ({"scope_kind": "client", "client_id": "north--wind"}, "client_id must be lower case"),
+    ({"scope_kind": "client", "client_id": "a-client", "project_id": "A Project"}, "project_id must be lower case"),
+    ({"scope_kind": "system", "project_id": "-a-project"}, "project_id must be lower case"),
 ], ids=repr)
 def test_scope_set_refusals_change_nothing(tmp_path, capture_envelope, changes, message):
     store = new_store(tmp_path)
@@ -849,12 +859,19 @@ def _write_directly(store: ImprintStore, **fields) -> None:
 
 @pytest.mark.parametrize("fields", [
     {"scope_kind": "shared"},
-    {"scope_kind": "client", "client_id": "a-client", "delivery": "broad"},
     {"scope_kind": "client"},
     {"scope_kind": "held", "client_id": "a-client"},
-    {"delivery": "general"},
-    {"scope_kind": "unresolved", "delivery": "specific"},
-    {"scope_kind": "held", "delivery": "specific"},
+    {"scope_kind": "client", "client_id": "North-Wind"},
+    {"scope_kind": "client", "client_id": " north-wind "},
+    {"scope_kind": "client", "client_id": "north_wind"},
+    {"scope_kind": "client", "client_id": ""},
+    {"project_id": "A-Project"},
+    {"project_id": "a-project "},
+    {"project_id": "a--project"},
+    {"overrides_json": "not json"},
+    {"overrides_json": "{}"},
+    {"overrides_json": '"urn:imprint:rule:x"'},
+    {"overrides_json": "1"},
 ], ids=repr)
 def test_the_table_itself_refuses_what_python_refuses(tmp_path, fields):
     """``CREATE TABLE IF NOT EXISTS`` cannot change a CHECK later, so each one is pinned here."""
@@ -864,16 +881,69 @@ def test_the_table_itself_refuses_what_python_refuses(tmp_path, fields):
     assert rows_of(store) == []
 
 
+def test_a_row_the_table_refuses_cannot_reach_retrieval(tmp_path, capture_envelope):
+    """One unreadable overrides list used to stop retrieval for every record and every door."""
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope)
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    with store.connect() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE record_scope SET overrides_json='not json' WHERE node_id=?", (node_id,))
+    assert StoreRetrievalSource(store).retrieval_candidates("x")
+
+
 @pytest.mark.parametrize("fields", [
     {"delivery": "specific"},
     {"scope_kind": "held"},
     {"scope_kind": "client", "client_id": "a-client", "delivery": "general"},
     {"scope_kind": "central", "delivery": "specific"},
+    {"scope_kind": "client", "client_id": "blue-harbor", "project_id": "bfcm-2026"},
+    {"overrides_json": '["urn:imprint:rule:00000000-0000-4000-8000-000000000000"]'},
 ], ids=repr)
 def test_the_table_takes_what_the_spec_allows(tmp_path, fields):
     store = new_store(tmp_path)
     _write_directly(store, **fields)
     assert len(rows_of(store)) == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {"scope_kind": "client", "client_id": "a-client", "delivery": "broad"},
+    {"delivery": "general"},
+    {"scope_kind": "unresolved", "delivery": "specific"},
+    {"scope_kind": "held", "delivery": "specific"},
+    {"delivery_rank": "1"},
+], ids=repr)
+def test_the_delivery_rules_live_in_python_alone(tmp_path, fields):
+    """No doc says yet what a delivery route does with a tag or rank, so the table leaves them open."""
+    from imprint.store.scope import _require_shape
+
+    value = {"scope_kind": "system", "client_id": None, "project_id": None, "delivery": None,
+             "delivery_rank": None, **fields}
+    with pytest.raises(ValidationError):
+        _require_shape(value["scope_kind"], value["client_id"], value["project_id"], value["delivery"],
+                       value["delivery_rank"])
+    store = new_store(tmp_path)
+    _write_directly(store, **fields)
+    assert len(rows_of(store)) == 1
+
+
+@pytest.mark.parametrize("value", [
+    "a", "a1", "7", "north-wind", "blue-harbor", "bfcm-2026",
+    "North-Wind", " north-wind ", "north-wind ", "north_wind", "north wind", "", "-a", "a-", "a--b",
+    "rog\u00e9r", "a\n", "a/b", "a.b",
+], ids=repr)
+def test_python_and_the_table_hold_one_id_shape(tmp_path, value):
+    from imprint.store.scope import ID_SHAPE
+
+    python_takes = ID_SHAPE.fullmatch(value) is not None
+    for name, fields in (("client", {"scope_kind": "client", "client_id": value}), ("project", {"project_id": value})):
+        store = new_store(tmp_path / name)
+        try:
+            _write_directly(store, **fields)
+            table_takes = True
+        except sqlite3.IntegrityError:
+            table_takes = False
+        assert table_takes == python_takes, fields
 
 
 def test_store_and_record_versions_stay_put():
@@ -1210,7 +1280,9 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": ["client"]}]), "unknown scope kind"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery": ["general"]}]), "unknown delivery"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery_rank": 2**63}]), "rank"),
-], ids=range(15))
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": "Example-Client"}]), "client_id must"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "project_id": "a project"}]), "project_id must"),
+], ids=range(17))
 def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
     _, document = _exported(tmp_path, capture_envelope)
     with pytest.raises(ValidationError, match=message):

@@ -137,22 +137,28 @@ CREATE TABLE IF NOT EXISTS purge_receipts (
   counts_json TEXT NOT NULL
 );
 -- No foreign keys: a key on nodes or events would fail an older build's purge
--- after a rollback. CREATE TABLE IF NOT EXISTS cannot change a CHECK later.
+-- after a rollback. CREATE TABLE IF NOT EXISTS cannot change a CHECK later, so the
+-- table checks only what is settled: the kind, one shape for a client or project
+-- id (store/scope.py ID_SHAPE), and overrides that are a JSON list. The delivery
+-- tag and rank are checked in store/scope.py alone, so they can still change.
 CREATE TABLE IF NOT EXISTS record_scope (
   node_id TEXT PRIMARY KEY,
   scope_kind TEXT NOT NULL CHECK(scope_kind IN ('client','central','system','unresolved','held')),
-  client_id TEXT,
-  project_id TEXT,
-  delivery TEXT CHECK(delivery IN ('general','specific')),
+  client_id TEXT CHECK(client_id IS NULL OR (
+    client_id <> '' AND client_id NOT GLOB '*[^a-z0-9-]*'
+    AND client_id NOT GLOB '-*' AND client_id NOT GLOB '*-' AND client_id NOT GLOB '*--*')),
+  project_id TEXT CHECK(project_id IS NULL OR (
+    project_id <> '' AND project_id NOT GLOB '*[^a-z0-9-]*'
+    AND project_id NOT GLOB '-*' AND project_id NOT GLOB '*-' AND project_id NOT GLOB '*--*')),
+  delivery TEXT,
   delivery_rank INTEGER,
   speaker TEXT,
   endorser TEXT,
-  overrides_json TEXT NOT NULL DEFAULT '[]',
+  overrides_json TEXT NOT NULL DEFAULT '[]'
+    CHECK(json_valid(overrides_json) AND json_type(overrides_json) = 'array'),
   resolved_by TEXT NOT NULL,
   event_id TEXT NOT NULL,
   stamped_at TEXT NOT NULL,
-  CHECK((scope_kind = 'client') = (client_id IS NOT NULL)),
-  CHECK(delivery IS NULL OR scope_kind IN ('client','central')
-        OR (scope_kind = 'system' AND delivery = 'specific'))
+  CHECK((scope_kind = 'client') = (client_id IS NOT NULL))
 );
 """

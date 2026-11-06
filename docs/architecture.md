@@ -46,7 +46,11 @@ adapters, never required canonical stores.
 The `record_scope` table holds at most one row per retrievable record: whose it
 is (`client`, `central`, `system`, `unresolved` or `held`), an optional client
 and project, a delivery tag and rank, and any `overrides`. The row is keyed by
-node, so a new version keeps it. A record with no row is legacy. This release
+node, so a new version keeps it. A record with no row is legacy. A client or
+project id has one shape: lower case letters and digits joined by single hyphens,
+such as `north-wind`. Python refuses any other by name, and so does the table,
+which also refuses `overrides` that are not a JSON list. The delivery tag and rank
+are checked in Python only, so their rules can still change. This release
 only carries scope: no delivery route reads a row, and with no row and no scope
 extension the output matches the previous release byte for byte. The store and
 record schema versions do not move, and an older build still opens the store. The
