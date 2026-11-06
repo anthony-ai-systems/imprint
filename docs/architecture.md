@@ -77,9 +77,14 @@ snapshot id moves at the first row, and then whenever a row changes.
   `import_legacy_principles` stamps `unresolved` unless given a scope.
   `imprint ingest keep` writes no row yet.
 - **Supersession.** A successor keeps its own row. With none, it takes a copy of
-  the target's row in the same event. Superseding a central record needs a
-  successor that has its own row and is not `client`, because a client record adds
-  to a central one through `overrides` and never replaces it.
+  the target's row in the same event, unless the target is central: a central row
+  is never copied. A successor may close a record only if it reaches the same
+  readers: a central record only by a central one, a client record only by one of
+  the same client, and a `system` record only by a `system` one. Every other pair
+  is refused, so one client's record cannot close another's and an unknown record
+  cannot close a central one. A record that is `unresolved`, `held` or has no row
+  reaches no reader yet, so any successor may close it. A client record adds to a
+  central one through `overrides` and never replaces it.
 - **Who writes `central`.** Nothing in this release does. `imprint scope set`, a
   capture stamp and the ontology flags all refuse it, and import accepts it only on
   a ratified record.

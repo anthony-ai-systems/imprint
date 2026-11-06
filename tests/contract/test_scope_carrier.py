@@ -640,7 +640,9 @@ def test_a_successor_keeps_its_own_row(tmp_path, capture_envelope):
     store.apply_capture(capture_envelope)
     old, new = rule(store, capture_envelope, "Old."), rule(store, capture_envelope, "New.")
     store.set_record_scope(old, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
-    store.set_record_scope(new, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(new, actor_id=ACTOR, changes={
+        "scope_kind": "client", "client_id": "a-client", "project_id": "another-project",
+    })
     before = row_of(store, new)
     _supersede(store, capture_envelope, new, old)
     assert row_of(store, new) == before
@@ -682,7 +684,7 @@ def test_a_client_record_cannot_supersede_a_central_one(tmp_path, capture_envelo
     target = central(store, capture_envelope)
     new = rule(store, capture_envelope, "Client wording.")
     store.set_record_scope(new, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
-    with pytest.raises(ValidationError, match="cannot supersede a central"):
+    with pytest.raises(ValidationError, match="only a central record can supersede a central"):
         _supersede(store, capture_envelope, new, target)
     assert target in {node["node_id"] for node in store.current_nodes()}
 
@@ -692,20 +694,87 @@ def test_a_central_row_is_never_copied_onto_a_successor(tmp_path, capture_envelo
     store.apply_capture(capture_envelope)
     target = central(store, capture_envelope)
     new = rule(store, capture_envelope, "Unscoped wording.")
-    with pytest.raises(ValidationError, match="cannot supersede a central"):
+    with pytest.raises(ValidationError, match="only a central record can supersede a central"):
         _supersede(store, capture_envelope, new, target)
     assert row_of(store, new) is None
     assert target in {node["node_id"] for node in store.current_nodes()}
 
 
-def test_a_successor_with_its_own_non_client_row_may_close_a_central_record(tmp_path, capture_envelope):
+def _scoped(store: ImprintStore, envelope: dict, text: str, scope: str) -> str:
+    """A rule with the named row: ``central``, ``none``, a kind, or ``client:<id>``."""
+    if scope == "central":
+        return central(store, envelope, text)
+    node_id = rule(store, envelope, text)
+    if scope.startswith("client:"):
+        store.set_record_scope(node_id, actor_id=ACTOR, changes={
+            "scope_kind": "client", "client_id": scope.removeprefix("client:"),
+        })
+    elif scope != "none":
+        store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": scope})
+    return node_id
+
+
+def _supersessions(store: ImprintStore) -> int:
+    with store.connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM edges WHERE edge_type='supersedes'").fetchone()[0]
+
+
+# Every pair a successor with its own row may not close: it would take the rule from readers who had it.
+REFUSED_SUPERSESSIONS = [
+    ("central", "client:a-client", "only a central record"),
+    ("central", "unresolved", "only a central record"),
+    ("central", "held", "only a central record"),
+    ("central", "system", "only a central record"),
+    ("client:a-client", "client:b-client", "only a record of the same client"),
+    ("client:a-client", "unresolved", "only a record of the same client"),
+    ("client:a-client", "held", "only a record of the same client"),
+    ("client:a-client", "system", "only a record of the same client"),
+    ("client:a-client", "central", "only a record of the same client"),
+    ("system", "client:a-client", "only a system record"),
+    ("system", "unresolved", "only a system record"),
+    ("system", "held", "only a system record"),
+    ("system", "central", "only a system record"),
+]
+
+
+@pytest.mark.parametrize("target_scope, source_scope, message", REFUSED_SUPERSESSIONS, ids=repr)
+def test_a_successor_that_reaches_other_readers_cannot_close_a_scoped_record(
+    tmp_path, capture_envelope, target_scope, source_scope, message,
+):
     store = new_store(tmp_path)
     store.apply_capture(capture_envelope)
-    target = central(store, capture_envelope)
-    new = rule(store, capture_envelope, "System wording.")
-    store.set_record_scope(new, actor_id=ACTOR, changes={"scope_kind": "system"})
+    target = _scoped(store, capture_envelope, "Old wording.", target_scope)
+    new = _scoped(store, capture_envelope, "New wording.", source_scope)
+    rows = rows_of(store)
+    with pytest.raises(ValidationError, match=message):
+        _supersede(store, capture_envelope, new, target)
+    assert target in {node["node_id"] for node in store.current_nodes()}
+    assert _supersessions(store) == 0
+    assert rows_of(store) == rows
+
+
+@pytest.mark.parametrize("target_scope, source_scope", [
+    ("central", "central"),
+    ("client:a-client", "client:a-client"),
+    ("system", "system"),
+    ("unresolved", "client:a-client"),
+    ("unresolved", "system"),
+    ("held", "client:a-client"),
+    ("held", "unresolved"),
+    ("none", "client:a-client"),
+    ("none", "central"),
+], ids=repr)
+def test_a_successor_that_reaches_the_same_readers_may_close_a_record(
+    tmp_path, capture_envelope, target_scope, source_scope,
+):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    target = _scoped(store, capture_envelope, "Old wording.", target_scope)
+    new = _scoped(store, capture_envelope, "New wording.", source_scope)
+    before = row_of(store, new)
     _supersede(store, capture_envelope, new, target)
-    assert row_of(store, new)["scope_kind"] == "system"
+    assert target not in {node["node_id"] for node in store.current_nodes()}
+    assert row_of(store, new) == before
 
 
 def test_supersession_keeps_a_domain_id_off_a_copied_client_row(tmp_path, capture_envelope):

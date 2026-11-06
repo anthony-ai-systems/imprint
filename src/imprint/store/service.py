@@ -795,20 +795,29 @@ class ImprintStore:
     ) -> Mapping[str, Any] | None:
         """The row a successor takes from the record it closes, if it has none.
 
-        Supersession closes a record for every thread, so a client rule that means
-        to win over a central one uses ``overrides``. A central row is written only
-        at ratification, so it is never handed on either.
+        Supersession closes a record for every thread, so a successor may close a
+        record whose readers are known only when it reaches the same readers: a
+        central record only by a central one, a client record only by one of the
+        same client, a system record only by a system one. Any other pair would
+        take the rule away from readers who had it. A client rule that means to win
+        over a central one uses ``overrides``. A central row is written only at
+        ratification, so it is never handed on, and a central record cannot be
+        closed by one with no row. An ``unresolved`` or ``held`` record reaches no
+        reader yet, so any successor may close it.
         """
         if target is None:
             return None
-        if target["scope_kind"] == "central":
-            if source is None or source["scope_kind"] == "client":
-                raise ValidationError("a record with no scope or a client scope cannot supersede a central record")
-            return None
-        if source is not None:
-            return None
-        require_fits_node(target, node_type, payload)
-        return target
+        kind = target["scope_kind"]
+        if kind == "central" and (source is None or source["scope_kind"] != "central"):
+            raise ValidationError("only a central record can supersede a central record")
+        if source is None:
+            require_fits_node(target, node_type, payload)
+            return target
+        if kind == "client" and (source["scope_kind"] != "client" or source["client_id"] != target["client_id"]):
+            raise ValidationError("only a record of the same client can supersede a client record")
+        if kind == "system" and source["scope_kind"] != "system":
+            raise ValidationError("only a system record can supersede a system record")
+        return None
 
     def append_derived_node(
         self,
