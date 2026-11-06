@@ -661,8 +661,12 @@ def test_a_successor_with_no_row_takes_the_targets_in_the_same_event(tmp_path, c
         event_id = conn.execute("SELECT created_event_id FROM edges WHERE edge_id=?", (edge_id,)).fetchone()[0]
     copied = row_of(store, new)
     assert copied["event_id"] == event_id
-    keep = ("scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides_json", "resolved_by")
+    keep = ("scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides_json")
     assert {key: copied[key] for key in keep} == {key: target[key] for key in keep}
+    assert (target["resolved_by"], copied["resolved_by"]) == ("explicit", "inherited")
+    with store.connect() as conn:
+        event = json.loads(conn.execute("SELECT payload_json FROM events WHERE event_id=?", (event_id,)).fetchone()[0])
+    assert (event["source_id"], event["target_id"]) == (new, old)
     assert row_of(store, old) == target
 
 

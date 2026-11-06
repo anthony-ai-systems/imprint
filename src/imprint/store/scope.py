@@ -28,6 +28,9 @@ ID_SHAPE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 # can be sent them.
 TAGGED_NODE_TYPES = frozenset({"Verdict", "Principle", "Rule"})
 RESOLVED_EXPLICIT = "explicit"
+# A successor's copy of the row of the record it closed. The supersession event
+# that wrote it names that record as ``target_id``.
+RESOLVED_INHERITED = "inherited"
 SCOPE_COLUMNS = (
     "node_id", "scope_kind", "client_id", "project_id", "delivery", "delivery_rank",
     "speaker", "endorser", "overrides_json", "resolved_by", "event_id", "stamped_at",

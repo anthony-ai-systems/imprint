@@ -22,6 +22,7 @@ from imprint.permissions import secure_directory, secure_file
 from .schema import SCHEMA_SQL
 from .scope import (
     RESOLVED_EXPLICIT,
+    RESOLVED_INHERITED,
     capture_stamp,
     merge_change,
     read_scope_row,
@@ -804,6 +805,10 @@ class ImprintStore:
         ratification, so it is never handed on, and a central record cannot be
         closed by one with no row. An ``unresolved`` or ``held`` record has no
         settled readers yet, so any successor may close it.
+
+        A copied row says ``inherited``, not the target's own ``resolved_by``: its
+        ``event_id`` is the supersession event, whose ``target_id`` names the record
+        the row came from.
         """
         if target is None:
             return None
@@ -812,7 +817,7 @@ class ImprintStore:
             raise ValidationError("only a central record can supersede a central record")
         if source is None:
             require_fits_node(target, node_type, payload)
-            return target
+            return {**target, "resolved_by": RESOLVED_INHERITED}
         if kind == "client" and (source["scope_kind"] != "client" or source["client_id"] != target["client_id"]):
             raise ValidationError("only a record of the same client can supersede a client record")
         if kind == "system" and source["scope_kind"] != "system":

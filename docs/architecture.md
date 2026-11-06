@@ -78,7 +78,8 @@ snapshot id moves at the first row, and then whenever a row changes.
   `imprint ingest keep` writes no row yet.
 - **Supersession.** A successor keeps its own row. With none, it takes a copy of
   the target's row in the same event, unless the target is central: a central row
-  is never copied. A successor may close a record only if it reaches the same
+  is never copied. The copy says `resolved_by: inherited`, and its event names the
+  record it came from as `target_id`. A successor may close a record only if it reaches the same
   readers: a central record only by a central one, a client record only by one of
   the same client, and a `system` record only by a `system` one. Every other pair
   is refused, so one client's record cannot close another's and an unknown record
