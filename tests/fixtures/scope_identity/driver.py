@@ -5,6 +5,11 @@ JSON object, ``{scenario: sha256}``, or the text itself with ``--full``. Clocks,
 ids and Jev are stand-ins, and no socket can connect. Every step here runs with
 no scope row and no scope extension. ``ratify apply`` and the legacy import are
 left out, because both write a row.
+
+Two flags are for this branch's own tests, never for main's golden. ``--rows``
+writes one scope row on every current record after the seed, straight into the
+table, so no id or clock read moves. ``--bodies`` adds each Jev request body,
+as sent, as one more scenario.
 """
 
 from __future__ import annotations
@@ -86,8 +91,10 @@ class Transport:
 
     def __init__(self):
         self.score, self.error = 0.9, None
+        self.bodies: list[str] = []
 
     def __call__(self, endpoint, body, headers, timeout):
+        self.bodies.append(body.decode("utf-8") if isinstance(body, bytes) else body)
         if self.error is not None:
             raise self.error
         questions = json.loads(body)["questions"]
@@ -281,8 +288,28 @@ class Replay:
                 written[str(path.relative_to(self.data))] = self.clean(path.read_text("utf-8", "replace"))
         self.record("files_on_disk", json.dumps(written, sort_keys=True))
 
+    def rows(self) -> None:
+        """One row on every current record, of each kind in turn."""
+        kinds = (
+            ("client", "a-client", "bfcm-2026", "specific", 1),
+            ("central", None, None, None, None),
+            ("system", None, None, None, None),
+            ("held", None, None, None, None),
+            ("unresolved", None, None, None, None),
+            ("client", "other-client", None, "general", None),
+        )
+        with sqlite3.connect(self.root / "imprint.db") as conn:
+            nodes = [row[0] for row in conn.execute("SELECT node_id FROM nodes ORDER BY node_id")]
+            for index, node in enumerate(nodes):
+                kind, client, project, delivery, rank = kinds[index % len(kinds)]
+                conn.execute(
+                    "INSERT INTO record_scope (node_id, scope_kind, client_id, project_id, delivery, delivery_rank,"
+                    " overrides_json, resolved_by, event_id, stamped_at) VALUES (?,?,?,?,?,?,'[]','driver','driver',?)",
+                    (node, kind, client, project, delivery, rank, EPOCH.isoformat()),
+                )
 
-def replay(work: Path) -> dict[str, str]:
+
+def replay(work: Path, rows: bool = False, bodies: bool = False) -> dict[str, str]:
     os.environ.update({
         "HOME": str(work / "home"), "XDG_CONFIG_HOME": str(work / "xdg-config"),
         "XDG_DATA_HOME": str(work / "xdg-data"), "XDG_STATE_HOME": str(work / "xdg-state"),
@@ -293,16 +320,20 @@ def replay(work: Path) -> dict[str, str]:
         os.environ.pop(name, None)
     run = Replay(work)
     seeded = run.seed()
+    if rows:
+        run.rows()
     run.deliveries()
     run.selector()
     run.records(seeded)
     run.reads()
+    if bodies:
+        run.scenarios["jev_request_bodies"] = run.clean(json.dumps(run.transport.bodies))
     return run.scenarios
 
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="imprint-scope-identity-") as folder:
-        scenarios = replay(Path(folder))
+        scenarios = replay(Path(folder), rows="--rows" in sys.argv, bodies="--bodies" in sys.argv)
     if "--full" in sys.argv:
         print(json.dumps(scenarios, indent=1, sort_keys=True))
     else:

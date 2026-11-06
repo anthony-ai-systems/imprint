@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,9 +40,9 @@ def environment(source: Path) -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(source), "PYTHONHASHSEED": "0"}
 
 
-def replay(source: Path) -> dict[str, str]:
+def replay(source: Path, *flags: str) -> dict[str, str]:
     result = subprocess.run(
-        [sys.executable, str(FIXTURES / "driver.py")], env=environment(source),
+        [sys.executable, str(FIXTURES / "driver.py"), *flags], env=environment(source),
         capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -58,6 +59,34 @@ def test_every_scenario_is_there():
 
 def test_no_rows_and_no_extension_replay_mains_bytes():
     assert different(replay(SOURCE), GOLDEN) == []
+
+
+# Every step whose output a thread or the Jev service is handed, and the Jev request bodies.
+HANDED = ("session_start", "prompt_hook", "retrieve", "jev_")
+# The retrieval steps print the snapshot id, which a row moves by design.
+PRINTS_SNAPSHOT = ("jev_prepared", "jev_prepared_replay", "jev_retrieve",
+                   "retrieve", "retrieve_delivered", "retrieve_domain", "retrieve_refresh")
+SNAPSHOT_ID = re.compile(r'"snapshot_id": "[0-9a-f]{64}"')
+
+
+def handed(scenarios: dict[str, str]) -> dict[str, str]:
+    return {name: SNAPSHOT_ID.sub('"snapshot_id": "<moves>"', text)
+            for name, text in scenarios.items() if name.startswith(HANDED)}
+
+
+def test_rows_on_every_record_change_no_hook_byte_and_no_jev_request():
+    plain = replay(SOURCE, "--full", "--bodies")
+    stamped = replay(SOURCE, "--full", "--bodies", "--rows")
+
+    rows = json.loads(stamped["snapshot"])["record_scope"]
+    assert len(rows) == 15  # every record the seed wrote; the later steps add three with no row
+    assert {row["scope_kind"] for row in rows} == {"client", "central", "system", "held", "unresolved"}
+    assert "record_scope" not in json.loads(plain["snapshot"])
+    assert len(json.loads(plain["jev_request_bodies"])) == 6
+    assert len(handed(plain)) == 22
+
+    assert sorted(name for name in handed(plain) if plain[name] != stamped[name]) == sorted(PRINTS_SNAPSHOT)
+    assert handed(stamped) == handed(plain)
 
 
 @pytest.fixture(scope="module")
