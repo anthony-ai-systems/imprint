@@ -172,10 +172,85 @@ def test_a_weak_pattern_never_counts(rooms):
     assert {"detail": "product", "kind": "named", "room": "northwind", "strength": "weak"} in row["client"]["signals"]
 
 
-def test_a_first_name_alone_is_not_a_signal(rooms):
+FIRST_NAME_BACKING = {"detail": "person_first_name", "kind": "first_name", "room": "northwind", "strength": "backing"}
+
+
+def test_a_first_name_alone_gives_no_client(rooms):
     assert row_for("Mara said the second paragraph is too long", rooms) is None
+    # A weak pattern does not make it count either.
+    assert row_for("Mara said the boathouse page is too long", rooms) is None
+    assert reader.client_verdict(reader.first_name_signals("Mara and Tam", rooms)).status == reader.NONE
+
+
+def test_a_first_name_backs_a_prefix_for_the_same_client(rooms):
     row = row_for("Mara said the second paragraph is too long", rooms, thread_name="NW · pages")
+    assert (row["client"]["status"], row["client"]["guess"], row["client"]["reason"]) == (
+        "client", "northwind", "signals_agree",
+    )
+    assert FIRST_NAME_BACKING in row["client"]["signals"]
+    assert row["asks"] == ["speaker"]
+
+
+def test_a_first_name_backs_a_domain_or_a_folder(rooms, tmp_path):
+    row = row_for("Mara wrote from northwind-rowing.example", rooms)
+    assert (row["client"]["status"], row["client"]["guess"]) == ("client", "northwind")
+    row = row_for("Mara wants it shorter", rooms, cwd=str(tmp_path / "clients" / "northwind"))
+    assert (row["client"]["status"], row["client"]["guess"]) == ("client", "northwind")
+
+
+def test_a_first_name_of_another_client_makes_it_unknown(rooms):
+    row = row_for("Mara said the second paragraph is too long", rooms, thread_name="BF · pages")
+    assert row["client"]["status"] == "unknown"
+    assert row["client"]["guess"] is None
+    assert row["client"]["reason"] == "signals_disagree"
+    assert row["asks"] == ["client", "speaker"]
+
+
+def test_a_full_name_is_not_also_counted_as_a_first_name(rooms):
+    row = row_for(f"{NW_PERSON} said the second paragraph is too long", rooms)
     assert row["client"]["reason"] == "one_signal"
+    assert reader.first_name_signals(f"{NW_PERSON} said so", rooms) == []
+    assert reader.first_name_signals("ask mara@northwind-rowing.example", rooms) == []
+
+
+@pytest.mark.parametrize("person", [
+    {"room": 1, "entry": {"name": "Tam Rook"}},
+    {"room": 2, "entry": {"name": "Tam Ash"}},
+    {"room": 0, "entry": {"name": "Tam Ivers", "spans": ["bluefin"]}},
+])
+def test_a_first_name_held_by_two_rooms_counts_for_neither(tmp_path, person):
+    document = client_list(tmp_path)
+    people = document["rooms"][person["room"]]["people"]
+    if person["room"] == 0:
+        people[1] = person["entry"]
+    else:
+        people.append(person["entry"])
+    rooms = reader.rooms_from_document(document)
+    assert "Tam" not in next(room for room in rooms if room.room_id == "northwind").first_names
+    assert reader.first_name_signals("Tam said so", rooms) == []
+    row = row_for("Tam said the second paragraph is too long", rooms, thread_name="NW · pages")
+    assert row["client"]["reason"] == "one_signal"
+
+
+@pytest.mark.parametrize("text,counts", [
+    ("Mara's notes are in", True), ("mara said so", False), ("Maradona said so", False),
+    ("Mara-Lee said so", False), ("see (Mara) above", True),
+])
+def test_a_first_name_matches_as_a_whole_word_as_written(rooms, text, counts):
+    assert bool(reader.first_name_signals(text, rooms)) is counts
+
+
+@pytest.mark.parametrize("text,thread_name,images,status,asks", [
+    ("Here is the note:\nfirst point", "NW · pages", 0, "unknown", ["client"]),
+    (f"{NW_PERSON} sent this:\nfirst point", "NW · pages", 0, "client", []),
+    (f"{NW_PERSON} thinks it is too long", "NW · pages", 0, "client", ["speaker"]),
+    ("Please tighten the second paragraph", "NW · pages", 0, "unknown", ["client", "speaker"]),
+    ("Please tighten the second paragraph", "NW · pages", 1, "unknown", ["client"]),
+])
+def test_the_row_says_what_the_card_must_ask(rooms, text, thread_name, images, status, asks):
+    row = row_for(text, rooms, thread_name=thread_name, image_count=images)
+    assert row["client"]["status"] == status
+    assert row["asks"] == asks
 
 
 def test_a_prefix_counts_only_at_the_start_of_the_name(rooms):
@@ -434,10 +509,11 @@ def test_the_row_is_a_pointer_with_no_text(rooms):
     )
     row = row_for(f"  {text}  ", rooms, thread_name="NW · pages", image_count=1)
     assert set(row) == {
-        "schema", "thread_id", "message_id", "text_sha256", "time", "shape_flags", "client",
+        "schema", "thread_id", "message_id", "text_sha256", "time", "shape_flags", "client", "asks",
         "loom_ids", "image_paths", "speaker_guess", "channel", "carrier", "round",
     }
     assert set(row["client"]) == {"status", "guess", "reason", "signals"}
+    assert row["asks"] == []
     assert row["schema"] == "imprint.carrier/0"
     assert row["text_sha256"] == hashlib.sha256(text.strip().encode()).hexdigest()
     assert row["shape_flags"] == ["colon_lead", "rule_run", "timestamp_lines", "image_attachment"]

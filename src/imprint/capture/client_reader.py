@@ -13,7 +13,19 @@ Two signals of different kinds that name the same client mark client work for th
 client. One signal marks the client unknown, so a card can ask later. Signals that
 name different clients mark it unknown too, and never pick one. No signal means it
 is not client work, and nothing is written. A weak pattern is recorded with the
-row but never counts as a signal, and a first name alone is never matched.
+row but never counts as a signal.
+
+A client person's first name is a backing signal (``first_name``). It counts as a
+second, agreeing signal only when another signal already names that same client;
+alone, or with only a weak pattern, it makes nothing. A first name that people of
+two rooms share counts for neither, and so does the first name of a person who
+spans rooms. A first name pointing at another client than the other signals makes
+the client unknown. A first name inside a name or address a pattern already matched
+is not counted again.
+
+Each row says what the card must ask: ``client`` when the client is unknown, and
+``speaker`` when the prompt has no feedback-shape flag, so whether it is a paste, a
+paraphrase or the person's own words is unknown.
 
 Paste shape (a colon lead, a lone ``====`` run, timestamp lines, Slack
 name-and-time lines, image attachments) marks the prompt as carrying feedback. It
@@ -60,10 +72,14 @@ SCAN_CHARS = 256 * 1024
 # An event larger than this is not read at all.
 MAX_EVENT_BYTES = 8 * 1024 * 1024
 
-SIGNAL_KINDS = ("folder", "thread_name", "named")
+SIGNAL_KINDS = ("folder", "thread_name", "named", "first_name")
 CLIENT = "client"
 UNKNOWN = "unknown"
 NONE = "none"
+# A signal of this strength only backs up another signal for the same client.
+BACKING = "backing"
+ASK_CLIENT = "client"
+ASK_SPEAKER = "speaker"
 
 # Rooms of these kinds are clients. Anything else in the list (own ventures,
 # for one) names no client here.
@@ -138,6 +154,9 @@ class Room:
     strong: tuple[tuple[re.Pattern[str], str], ...]
     weak: tuple[tuple[re.Pattern[str], str], ...]
     people: tuple[Person, ...]
+    # First names that belong to this room's people and to no other room.
+    first_names: tuple[str, ...] = ()
+    first_name_re: re.Pattern[str] | None = field(default=None, compare=False, repr=False)
 
 
 def _folder_forms(value: Any) -> tuple[str, ...]:
@@ -202,6 +221,37 @@ def _room_people(people: Any) -> tuple[Person, ...]:
     return tuple(found)
 
 
+def _first_name_owners(entries: Sequence[Mapping[str, Any]]) -> dict[str, set[str]]:
+    """Map each first name to every room its people belong to, spans included.
+
+    Every room in the list counts here, clients or not, so a first name that a
+    client shares with anyone else in the list counts for no room.
+    """
+    owners: dict[str, set[str]] = {}
+    for entry in entries:
+        people = entry.get("people")
+        for person in people if isinstance(people, list) else []:
+            if not isinstance(person, Mapping):
+                continue
+            name = person.get("name")
+            words = name.split() if isinstance(name, str) else []
+            if not words or not words[0][:1].isupper():
+                continue
+            spans = person.get("spans")
+            spanned = [item for item in (spans if isinstance(spans, list) else []) if isinstance(item, str)]
+            rooms = {entry["id"], *spanned}
+            owners.setdefault(words[0], set()).update(rooms)
+    return owners
+
+
+def _first_name_pattern(names: Sequence[str]) -> re.Pattern[str] | None:
+    if not names:
+        return None
+    # Whole words, case as written: a lowercase word or a longer word never matches.
+    choices = "|".join(re.escape(name) for name in sorted(names, key=lambda item: (-len(item), item)))
+    return re.compile(rf"(?<![\w-])(?:{choices})(?![\w-])")
+
+
 def rooms_from_document(document: Any) -> tuple[Room, ...]:
     """Build the client rooms from a decoded client list.
 
@@ -219,6 +269,9 @@ def rooms_from_document(document: Any) -> tuple[Room, ...]:
         if not isinstance(room_id, str) or not room_id or room_id in seen:
             raise ValueError("room needs a unique id")
         seen.add(room_id)
+    owners = _first_name_owners(document["rooms"])
+    for entry in document["rooms"]:
+        room_id = entry["id"]
         if entry.get("kind") not in _CLIENT_ROOM_KINDS:
             continue
         prefixes = entry.get("thread_title_prefixes")
@@ -227,9 +280,14 @@ def rooms_from_document(document: Any) -> tuple[Room, ...]:
             if isinstance(item, str) and item.strip()
         )
         strong, weak = _room_patterns(entry.get("name_patterns"))
+        people = _room_people(entry.get("people"))
+        first_names = tuple(sorted({
+            person.first for person in people if owners.get(person.first) == {room_id}
+        }))
         rooms.append(Room(
             room_id=room_id, prefixes=prefixes, folders=_room_folders(entry.get("folders")),
-            strong=strong, weak=weak, people=_room_people(entry.get("people")),
+            strong=strong, weak=weak, people=people, first_names=first_names,
+            first_name_re=_first_name_pattern(first_names),
         ))
     return tuple(rooms)
 
@@ -308,6 +366,27 @@ def named_signals(text: str, rooms: Sequence[Room]) -> list[Signal]:
     return found
 
 
+def first_name_signals(text: str, rooms: Sequence[Room]) -> list[Signal]:
+    """Name each room one of whose own first names stands alone in the text.
+
+    A first name that is part of a name, domain or address some room's pattern
+    already matched is not counted again, so one full name is never two signals.
+    """
+    scanned = text[:SCAN_CHARS]
+    if not any(room.first_name_re is not None for room in rooms):
+        return []
+    masked = list(scanned)
+    for room in rooms:
+        for pattern, _signal in (*room.strong, *room.weak):
+            for match in pattern.finditer(scanned):
+                masked[match.start():match.end()] = " " * (match.end() - match.start())
+    remaining = "".join(masked)
+    return [
+        Signal("first_name", room.room_id, "person_first_name", BACKING)
+        for room in rooms if room.first_name_re is not None and room.first_name_re.search(remaining)
+    ]
+
+
 @dataclass(frozen=True)
 class ClientVerdict:
     status: str
@@ -316,21 +395,36 @@ class ClientVerdict:
 
 
 def client_verdict(signals: Iterable[Signal]) -> ClientVerdict:
-    """Apply the two-signal rule to strong signals.
+    """Apply the two-signal rule.
 
-    Two kinds naming one client mark client work for it. One kind marks it unknown.
-    Signals naming different clients mark it unknown, and no client is picked.
+    Strong signals of two kinds naming one client mark client work for it. A
+    backing signal (a first name) is a second kind only beside a strong signal for
+    the same client, and makes nothing on its own. One kind marks the client
+    unknown. Signals naming different clients, a first name included, mark it
+    unknown, and no client is picked. Weak signals never count.
     """
+    signals = list(signals)
     strong = [signal for signal in signals if signal.strength == "strong"]
     if not strong:
         return ClientVerdict(NONE, None, "no_signal")
-    named_rooms = {signal.room for signal in strong}
+    counted = strong + [signal for signal in signals if signal.strength == BACKING]
+    named_rooms = {signal.room for signal in counted}
     if len(named_rooms) > 1:
         return ClientVerdict(UNKNOWN, None, "signals_disagree")
-    kinds = {signal.kind for signal in strong}
+    kinds = {signal.kind for signal in counted}
     if len(kinds) >= 2:
         return ClientVerdict(CLIENT, next(iter(named_rooms)), "signals_agree")
     return ClientVerdict(UNKNOWN, None, "one_signal")
+
+
+def card_asks(verdict: ClientVerdict, shape: Shape) -> list[str]:
+    """What the card must ask about a row: the client, the speaker, both or nothing."""
+    asks = []
+    if verdict.status == UNKNOWN:
+        asks.append(ASK_CLIENT)
+    if not shape.flags:
+        asks.append(ASK_SPEAKER)
+    return sorted(asks)
 
 
 # ---------------------------------------------------------------- shape
@@ -551,6 +645,7 @@ def read_prompt(text: str, *, rooms: Sequence[Room], cwd: str | None, thread_nam
     """Read one prompt's client signals and paste shape. Pure."""
     signals = (
         *folder_signals(cwd, rooms), *thread_name_signals(thread_name, rooms), *named_signals(text, rooms),
+        *first_name_signals(text, rooms),
     )
     return Reading(signals=signals, verdict=client_verdict(signals), shape=paste_shape(text, image_count=image_count))
 
@@ -594,6 +689,7 @@ def carrier_row(
                 reading.signals, key=lambda item: (item.kind, item.room, item.strength),
             )],
         },
+        "asks": card_asks(verdict, shape),
         "loom_ids": list(shape.loom_ids),
         "image_paths": list(shape.image_paths),
         "speaker_guess": speaker_guess(shape, rooms, candidates),
@@ -763,6 +859,9 @@ def run_carrier_step(host: str, stream: Any, *, config_path: Path | None = None)
 
 
 __all__ = [
+    "ASK_CLIENT",
+    "ASK_SPEAKER",
+    "BACKING",
     "CLIENT",
     "CLIENTS_KEY",
     "CHANNEL_CODEX",
@@ -778,12 +877,14 @@ __all__ = [
     "UNKNOWN",
     "append_row",
     "carrier_kinds",
+    "card_asks",
     "carrier_row",
     "checked_queue_path",
     "client_verdict",
     "codex_carrier_step",
     "codex_state_path",
     "codex_thread_record",
+    "first_name_signals",
     "folder_signals",
     "load_rooms",
     "machine_prompt",
