@@ -81,11 +81,12 @@ snapshot id moves at the first row, and then whenever a row changes.
 - **Subject.** A row may carry a `subject`: lower case words joined by single
   dots, such as `marketing`, `marketing.video`, `engineering` or `work`. The head
   before the first dot says which work the record is about, and the tail is open.
-  Only `imprint scope set --subject` writes one, on a row of any kind, and `--clear
-  subject` removes it. A capture stamp and the ontology flags cannot carry one. A
-  client row takes no subject, `marketing` or `marketing.<tail>`, so `engineering`,
-  `work` or any other head is refused there, and so is a change of kind that would
-  bring a row with such a subject to `client`. Nothing reads the subject yet.
+  Only `imprint scope set --subject` writes one, on a row of any kind, and
+  `--clear subject` removes it. A capture stamp and the ontology flags cannot carry
+  one. A client row takes no subject, `marketing` or `marketing.<tail>`, so
+  `engineering`, `work` or any other head is refused there, and so is a change of
+  kind that would bring a row with such a subject to `client`. Nothing reads the
+  subject yet.
 - **Other paths.** `ontology add-node`, `observation add` and `outcome add` take
   `--scope-kind`, `--scope-client` and `--scope-project`, and write no row without
   them. `imprint ratify apply` stamps a new node `unresolved`, except a Domain.
