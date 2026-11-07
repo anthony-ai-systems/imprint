@@ -645,6 +645,13 @@ def build_parser() -> argparse.ArgumentParser:
     hook = subs.add_parser("hook", help="execute one portable hook action")
     hook.add_argument("action", choices=("session-start", "user-prompt-submit", "stop-capture", "health-check"))
 
+    carrier = subs.add_parser(
+        "carrier",
+        help="append one client-work carrier row for a prompt event on stdin; "
+             "does nothing unless a queue is configured, prints nothing, exits 0",
+    )
+    carrier.add_argument("host", choices=("codex",))
+
     subs.add_parser("delivery-commit", help=argparse.SUPPRESS)
 
     subs.add_parser("health", help="report content-free health as JSON")
@@ -660,6 +667,11 @@ def main(argv: list[str] | None = None) -> int:
     error_details: dict[str, object] = {}
     # Set on a hook that delivers, which records its outcome however it ends.
     turn: HookTurn | None = None
+    if args.command == "carrier":
+        # Before the config is loaded or the store is touched: the carrier step
+        # reads its own config, never opens the store, and never fails the prompt.
+        from .capture.client_reader import run_carrier_step
+        return run_carrier_step(args.host, sys.stdin, config_path=args.config)
     try:
         # Machine transport is authoritative even if a payload claims human
         # origin. Skip before resolving operator identity or touching the store.
