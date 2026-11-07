@@ -9,8 +9,9 @@
   `org.imprint.client_carrier.clients`. For a prompt in a thread a person started,
   two agreeing signals (starting folder, thread name prefix, a strong name pattern)
   mark client work, one or disagreeing signals mark the client unknown, and none
-  writes nothing. Each row is a pointer with ids, a text hash, shape flags, the
-  client guess and its signals, and no text. No hook is registered, the store is
+  writes nothing. A client person's first name only backs another signal for the
+  same client. Each row is a pointer with ids, a text hash, shape flags, the client
+  guess and its signals, what the card must ask, and no text. No hook is registered, the store is
   never opened, and no existing output changes.
 - Treat a dead Jev as a fault. `imprint health` adds two degraded reasons, under
   `selector.mode: jev` only. `selector_key_unavailable` is raised at once, with no
