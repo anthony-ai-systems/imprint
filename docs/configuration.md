@@ -53,6 +53,12 @@ object and preserves unknown namespaced extensions.
   age: it sends records from every client, it does not read
   `selector.jev.stale_before`, and short lines let it send about three times as
   many of both.
+- `org.imprint.client_carrier.queue`: `null` (default) or an absolute path. The
+  file the client-work carrier step appends to; see Client-work carrier queue
+  below. Unset, the step does nothing.
+- `org.imprint.client_carrier.clients`: `null` (default) or an absolute path. The
+  client list the carrier step reads at run time. Unset or unreadable, it names no
+  client and writes nothing.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -432,6 +438,42 @@ them.
 
 Both keys are dotted, so an older build keeps them and reads nothing into them, and
 rolling back needs no change to the config.
+
+## Client-work carrier queue
+
+`imprint carrier codex` reads one Codex UserPromptSubmit event on stdin. It is fixed
+code: no model and no network. It prints nothing and always exits 0, so it can never
+block a prompt. It does nothing at all until `org.imprint.client_carrier.queue` is
+set. No hook calls it yet; registering one is a separate, deliberate step.
+
+When the queue is set, it appends one row for a prompt that is client work:
+
+- The thread must be one a person started. Codex's own thread record is read from
+  `$CODEX_HOME/state_5.sqlite` (default `~/.codex`), opened read-only with a short
+  wait for a lock. The record must say a user started it from the desktop app or the
+  CLI, with no spawn edge and no agent field. A subagent, automation, scripted run,
+  or unreadable record makes no row, and so does harness or automation text.
+- Up to three signals name a client, each from the client list: the starting folder
+  is inside one of the client's folders (the deepest match wins), the thread's name
+  starts with one of its prefixes, or the prompt matches one of its strong name
+  patterns. Two kinds of signal naming the same client mark client work for that
+  client. One signal, or signals naming different clients, mark the client unknown,
+  and nothing is guessed. No signal means it is not client work and nothing is
+  written. Weak patterns are recorded in the row but never count, and a first name
+  is never matched. Only rooms of kind `client` or `client_rules_core_agents` are
+  clients.
+- Paste shape is recorded as flags (`colon_lead`, `rule_run`, `timestamp_lines`,
+  `slack_name_time`, `image_attachment`) and is never a client signal.
+
+The row is a pointer: `schema`, `thread_id`, `message_id` (the turn id), `text_sha256`,
+`time`, `shape_flags`, `client` (`status`, `guess`, `reason`, `signals`), `loom_ids`,
+`image_paths`, `speaker_guess`, `channel`, `carrier` and `round`. It holds no word of
+the prompt. The queue file is created with mode 0600 and is refused when it is a link,
+relative, in a cloud-synced folder, or inside the session's starting folder, the
+operator's data root, the Codex home or the transcript's folder. The queue is never
+the store and never a spool, and nothing in it reaches retrieval.
+
+Both keys are dotted, so an older build keeps them and reads nothing into them.
 
 ## Environment overrides
 
