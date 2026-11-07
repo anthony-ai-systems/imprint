@@ -473,6 +473,36 @@ def test_reading_the_state_never_writes_it(tmp_path):
     assert before == after
 
 
+def test_reading_a_write_ahead_log_state_with_codex_running_changes_no_file(tmp_path):
+    """The live case: Codex keeps the file in write-ahead-log mode and holds it open."""
+    folder = tmp_path / "codex"
+    folder.mkdir()
+    state = make_state(folder / "state.sqlite", [PERSON_ROW])
+    writer = sqlite3.connect(state)
+    try:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("SELECT count(*) FROM threads").fetchone()
+
+        def snapshot():
+            return sorted(
+                (name, hashlib.sha256((folder / name).read_bytes()).hexdigest(), (folder / name).stat().st_mtime_ns)
+                for name in os.listdir(folder)
+            )
+
+        before = snapshot()
+        assert any(name.endswith("-wal") for name, _, _ in before)
+        for _ in range(3):
+            assert reader.codex_thread_record(state, "t-person") is not None
+        assert snapshot() == before
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE threads SET name='changed' WHERE id='t-person'")
+        record = reader.codex_thread_record(state, "t-person")
+        assert record is not None and record.name == "NW · pages"
+        writer.rollback()
+    finally:
+        writer.close()
+
+
 def test_codex_state_path_follows_codex_home(tmp_path):
     assert reader.codex_state_path({"CODEX_HOME": str(tmp_path)}) == tmp_path / "state_5.sqlite"
     assert reader.codex_state_path({"HOME": str(tmp_path)}).name == "state_5.sqlite"
@@ -544,6 +574,32 @@ def test_the_queue_must_be_a_private_absolute_file_outside_session_folders(tmp_p
     for value in refused:
         assert reader.checked_queue_path(value, cwd=str(cwd), forbidden=[str(store)]) is None, value
     assert reader.checked_queue_path(str(good), cwd=None) is None
+
+
+@pytest.mark.parametrize("folder", ["Documents", "Desktop"])
+def test_the_queue_is_refused_in_a_home_folder_icloud_can_sync(tmp_path, monkeypatch, folder):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    cwd = str(tmp_path / "work")
+    assert reader.checked_queue_path(str(home / folder / "imprint" / "carrier.jsonl"), cwd=cwd) is None
+    assert reader.checked_queue_path(str(home / folder / "carrier.jsonl"), cwd=cwd) is None
+    beside = home / f"{folder}-not" / "carrier.jsonl"
+    assert reader.checked_queue_path(str(beside), cwd=cwd) == Path(os.path.realpath(beside))
+
+
+@pytest.mark.parametrize("worktree", [False, True])
+def test_the_queue_is_refused_inside_a_git_repository(tmp_path, worktree):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if worktree:
+        (repo / ".git").write_text("gitdir: /elsewhere\n")
+    else:
+        (repo / ".git").mkdir()
+    cwd = str(tmp_path / "work")
+    assert reader.checked_queue_path(str(repo / "carrier.jsonl"), cwd=cwd) is None
+    assert reader.checked_queue_path(str(repo / "deep" / "carrier.jsonl"), cwd=cwd) is None
+    outside = tmp_path / "queues" / "carrier.jsonl"
+    assert reader.checked_queue_path(str(outside), cwd=cwd) == Path(os.path.realpath(outside))
 
 
 def test_a_linked_queue_is_refused(tmp_path):

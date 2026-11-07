@@ -135,6 +135,24 @@ _TEXT_SHAPES = frozenset({"colon_lead", "rule_run", "timestamp_lines", "slack_na
 
 # Cloud-synced folders, where a private queue must not live.
 _SYNC_MARKERS = ("Dropbox", "OneDrive", "CloudStorage", "Google Drive", "Mobile Documents", "iCloud")
+# Home folders that iCloud can sync whole, with no marker in the path.
+_SYNCED_HOME_FOLDERS = ("Documents", "Desktop")
+
+
+def _synced_home_folders() -> tuple[str, ...]:
+    try:
+        home = Path.home()
+    except (RuntimeError, KeyError):
+        return ()
+    return tuple(str(home / name) for name in _SYNCED_HOME_FOLDERS)
+
+
+def _inside_a_repository(resolved: str) -> bool:
+    """True when any folder above the file holds ``.git``, as a folder or a worktree's file."""
+    try:
+        return any(os.path.lexists(os.path.join(parent, ".git")) for parent in Path(resolved).parents)
+    except (OSError, ValueError):
+        return True
 
 
 # ---------------------------------------------------------------- client list
@@ -569,7 +587,10 @@ def codex_thread_record(database: Path | str | None, thread_id: str | None) -> T
     """Read one thread's own record, read-only. Any failure returns None.
 
     The database is opened by URI with ``mode=ro`` and queried only, with a short
-    wait for a lock, so this can never write it or hold a prompt for long.
+    wait for a lock, so this can never write it or hold a prompt for long. Codex
+    keeps it in write-ahead-log mode. While Codex is running, as it is for every
+    hook call, the read creates no file. With no writer present, SQLite itself
+    may create the empty ``-wal`` and ``-shm`` files beside it, as on a hand run.
     """
     if database is None or not isinstance(thread_id, str) or not thread_id:
         return None
@@ -720,7 +741,8 @@ def checked_queue_path(
 
     It must be an absolute path that is not a link, outside the session's
     starting folder, outside every forbidden folder (the store's root, the host's
-    session folders), and not in a cloud-synced folder.
+    session folders), outside every git repository, and not in a cloud-synced
+    folder, which includes the home ``Documents`` and ``Desktop`` folders.
     """
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         return None
@@ -733,9 +755,11 @@ def checked_queue_path(
     resolved = os.path.realpath(os.path.normpath(str(path)))
     if any(marker.lower() in resolved.lower() for marker in _SYNC_MARKERS):
         return None
-    for folder in (cwd, *forbidden):
+    for folder in (cwd, *forbidden, *_synced_home_folders()):
         if _inside(resolved, folder):
             return None
+    if _inside_a_repository(resolved):
+        return None
     if os.path.islink(str(path)):
         return None
     return Path(resolved)

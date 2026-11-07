@@ -479,8 +479,10 @@ no word of the prompt. `asks` lists what a card must ask: `client` when the clie
 unknown, and `speaker` when the prompt has no feedback-shape flag, so whether it is a
 paste, a paraphrase or the person's own words is unknown. It is empty when nothing
 needs asking. The queue file is created with mode 0600 and is refused when it is a link,
-relative, in a cloud-synced folder, or inside the session's starting folder, the
-operator's data root, the Codex home or the transcript's folder. The queue is never
+relative, in a cloud-synced folder (the home `Documents` and `Desktop` folders count,
+because iCloud can sync them whole), inside any git repository, or inside the session's
+starting folder, the operator's data root, the Codex home or the transcript's folder.
+The queue is never
 the store and never a spool, and nothing in it reaches retrieval.
 
 Both keys are dotted, so an older build keeps them and reads nothing into them.
