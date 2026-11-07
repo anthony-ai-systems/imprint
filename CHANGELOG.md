@@ -11,7 +11,9 @@
   both. `imprint scope set --subject` gives a row of any kind a subject, lower case
   words joined by single dots such as `marketing.video`, and `--clear subject`
   removes it. A client row takes `marketing`, `marketing.<tail>` or no subject. No
-  capture stamp carries one. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,
+  capture stamp carries one. A stamp may carry `said_in`, `channel` and `carrier`,
+  each null or non-empty text, which stay on the capture event and have no column,
+  so a later build's stamp is not refused after a rollback. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,
   `--scope-client` and `--scope-project`. `imprint ratify apply` now stamps each new
   record except a Domain `unresolved`, so its first run writes the first row and
   moves the snapshot id once. Delivered text does not change. Rows cross JSON-LD

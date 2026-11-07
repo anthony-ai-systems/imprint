@@ -59,11 +59,18 @@ snapshot id moves at the first row, and then whenever a row changes.
 - **Capture.** An envelope may carry the `org.imprint.scope` extension, as
   `{schema_version, payload}`. The compiler writes the row in the capture's own
   transaction and quarantines a spool whose stamp is invalid. A stamp cannot say
-  `central` and cannot carry `overrides`. Nothing adds the extension yet, so the
+  `central` and cannot carry `overrides` or a `subject`. Nothing adds the extension yet, so the
   Stop hook, `imprint capture` and a `CapturePipeline.capture` caller that passes
   no `extensions` all write legacy records.
 - **A `held` stamp** can list `candidate_client_ids`. The list stays on the event,
   where `imprint history` shows it in `event_payload`, and has no column.
+- **`said_in`, `channel` and `carrier`** can go on any stamp: where the words were
+  said, and how they arrived. Each is null or non-empty text, and nothing checks
+  its value. They stay on the capture event, where `imprint history` shows them in
+  `event_payload`, and have no column. Nothing stamps them yet. This build knows
+  them so that a later build's stamp is not refused after a rollback, and the
+  extension's `schema_version` stays `1.0.0`. On the other paths that take a stamp,
+  they are checked and kept nowhere, as `candidate_client_ids` is.
 - **`imprint scope set`** appends a `scope_changed` event and updates the row in
   one transaction, moving only what it names, and `resolved_by` becomes `explicit`.
   It is the only way out of `held`. It takes `--override` only for a current central

@@ -24,7 +24,10 @@ from imprint.retrieve import RetrievalEngine, StoreRetrievalSource, retrieve_pay
 from imprint.retrieve.engine import eligible
 from imprint.retrieve.models import RecordScope
 from imprint.store import ImprintStore
-from imprint.store.scope import SCOPE_EXTENSION, stamp_row, validate_stamp, write_scope_row
+from imprint.store.scope import (
+    EVENT_ONLY_TEXT_KEYS, SCOPE_COLUMNS, SCOPE_EXTENSION, SCOPE_EXTENSION_VERSION, stamp_row, validate_stamp,
+    write_scope_row,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -264,6 +267,92 @@ def test_recompiling_a_retained_spool_adds_no_row_and_moves_none(tmp_path, captu
         "captured": 0, "duplicate": 1, "quarantined": 0,
     }
     assert rows_of(store) == before
+
+
+# said_in, channel and carrier: on the event, never on the row ---------------
+
+
+EVENT_ONLY = {"said_in": "a-client-door", "channel": "Loom posted to Slack", "carrier": "relayed by a teammate"}
+
+
+def _event_payload(store: ImprintStore, event_id: str) -> dict:
+    with store.connect() as conn:
+        return json.loads(conn.execute("SELECT payload_json FROM events WHERE event_id=?", (event_id,)).fetchone()[0])
+
+
+def test_the_event_only_keys_are_said_in_channel_and_carrier_and_the_version_holds():
+    assert EVENT_ONLY_TEXT_KEYS == ("said_in", "channel", "carrier")
+    assert not set(EVENT_ONLY_TEXT_KEYS) & set(SCOPE_COLUMNS)
+    # A later build's stamp with these keys must still be read by this one after a rollback.
+    assert SCOPE_EXTENSION_VERSION == "1.0.0"
+
+
+@pytest.mark.parametrize("key", EVENT_ONLY_TEXT_KEYS)
+def test_each_event_only_key_stays_on_the_capture_event_and_off_the_row(tmp_path, capsys, capture_envelope, key):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    envelope = stamped(capture_envelope, **{key: EVENT_ONLY[key]})
+    assert store.apply_capture(envelope) == "captured"
+    verdict_id = envelope["verdict"]["verdict_id"]
+
+    row = row_of(store, verdict_id)
+    assert set(row) == set(SCOPE_COLUMNS) and key not in row
+    assert EVENT_ONLY[key] not in json.dumps(row)
+    with store.connect() as conn:
+        columns = {item[1] for item in conn.execute("PRAGMA table_info(record_scope)")}
+    assert columns == set(SCOPE_COLUMNS)
+    assert _event_payload(store, envelope["input_event_id"])["extensions"][SCOPE_EXTENSION]["payload"][key] == (
+        EVENT_ONLY[key])
+
+    assert main(["--config", str(config), "history", verdict_id]) == 0
+    history = json.loads(capsys.readouterr().out)["history"]
+    assert history["versions"][0]["event_payload"]["extensions"][SCOPE_EXTENSION]["payload"][key] == EVENT_ONLY[key]
+    assert key not in history["scope"]
+    exported = export_jsonld(store)
+    assert all(key not in item for item in exported["imprint:recordScope"])
+
+
+def test_a_spool_with_all_three_compiles_with_no_quarantine(tmp_path, capture_envelope):
+    """The rollback case: a later build wrote the spool, and this build compiles it."""
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope, speaker="a-team-member", endorser="the-operator", **EVENT_ONLY)
+    write_envelope(tmp_path, envelope)
+    assert compile_spools(tmp_path, store, compiler_authorized=True) == {
+        "captured": 1, "duplicate": 0, "quarantined": 0,
+    }
+    row = rows_of(store)[0]
+    assert (row["scope_kind"], row["client_id"], row["speaker"], row["endorser"]) == (
+        "client", "example-client", "a-team-member", "the-operator")
+    assert not {value for value in EVENT_ONLY.values()} & {str(value) for value in row.values()}
+    payload = _event_payload(store, envelope["input_event_id"])["extensions"][SCOPE_EXTENSION]["payload"]
+    assert {key: payload[key] for key in EVENT_ONLY_TEXT_KEYS} == EVENT_ONLY
+
+
+@pytest.mark.parametrize("value", ["x", "folder:/synthetic/door", "relayed", "Slack, then Codex", "\u00e9"], ids=repr)
+@pytest.mark.parametrize("key", EVENT_ONLY_TEXT_KEYS)
+def test_an_event_only_key_takes_any_non_empty_text_or_null(key, value):
+    for item in (value, None):
+        assert validate_stamp({"scope_kind": "unresolved", "resolved_by": "test", key: item})[key] == item
+
+
+@pytest.mark.parametrize("value", ["", " ", "\n\t", 1, True, ["slack"], {"via": "slack"}], ids=repr)
+@pytest.mark.parametrize("key", EVENT_ONLY_TEXT_KEYS)
+def test_an_event_only_key_that_is_not_non_empty_text_is_refused(tmp_path, capture_envelope, key, value):
+    store = new_store(tmp_path)
+    with pytest.raises(ValidationError, match=f"scope {key} must be a non-empty string"):
+        store.apply_capture(stamped(capture_envelope, **{key: value}))
+    assert store.current_nodes() == [] and rows_of(store) == []
+
+
+def test_a_derived_node_takes_the_keys_and_keeps_them_nowhere(tmp_path, capture_envelope):
+    """Off the capture path a stamp is not on the event, so these keys are checked and dropped."""
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope, scope={"scope_kind": "core_owner", "resolved_by": "explicit", **EVENT_ONLY})
+    row = row_of(store, node_id)
+    assert row["scope_kind"] == "core_owner" and set(row) == set(SCOPE_COLUMNS)
+    assert not {value for value in EVENT_ONLY.values()} & {str(value) for value in row.values()}
+    event = json.dumps(_event_payload(store, row["event_id"]))
+    assert not [value for value in EVENT_ONLY.values() if value in event]
 
 
 # imprint scope set ---------------------------------------------------------

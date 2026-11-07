@@ -41,9 +41,14 @@ SCOPE_COLUMNS = (
     "node_id", "scope_kind", "client_id", "project_id", "delivery", "delivery_rank",
     "subject", "speaker", "endorser", "overrides_json", "resolved_by", "event_id", "stamped_at",
 )
+# Where words were said and how they arrived. Each is null or non-empty text, with
+# no check on its value. They stay on the capture event and have no column. A
+# later build may stamp them, and this one must not refuse that stamp after a
+# rollback, which is why they are known here though nothing reads them.
+EVENT_ONLY_TEXT_KEYS = ("said_in", "channel", "carrier")
 _STAMP_KEYS = frozenset({
     "scope_kind", "client_id", "project_id", "resolved_by", "candidate_client_ids",
-    "speaker", "endorser", "delivery", "delivery_rank",
+    "speaker", "endorser", "delivery", "delivery_rank", *EVENT_ONLY_TEXT_KEYS,
 })
 # A stamp never carries a subject: only ``imprint scope set`` writes one.
 SCOPE_CHANGE_KEYS = frozenset({
@@ -99,6 +104,7 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
 
     The list of ids a held record could belong to stays on the event: a held
     row's ``client_id`` must stay null, and the list is history, not scope.
+    ``said_in``, ``channel`` and ``carrier`` stay on the event too.
     """
     if not isinstance(stamp, Mapping) or set(stamp) - _STAMP_KEYS:
         raise ValidationError("scope stamp has unknown fields")
@@ -110,7 +116,7 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
         None,
     )
     _require_text(value["resolved_by"], "resolved_by", nullable=False)
-    for field in ("speaker", "endorser"):
+    for field in ("speaker", "endorser", *EVENT_ONLY_TEXT_KEYS):
         _require_text(value[field], field)
     if value["speaker"] is not None and value["endorser"] is None:
         raise ValidationError("a speaker needs an endorser")
