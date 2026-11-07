@@ -105,6 +105,8 @@ MACHINE_PREFIXES = (
     "<subagent_notification",
     "<turn_aborted",
     "# AGENTS.md instructions for",
+    # The event intake's wake envelope: a fixed template no person types.
+    "AUTOMATED EVENT WAKE",
 )
 
 _FILES_HEADER = re.compile(r"\A\s*# Files (?:mentioned|pasted) by the user\b")

@@ -512,6 +512,7 @@ def test_codex_state_path_follows_codex_home(tmp_path):
     "<environment_context>\n<cwd>/x</cwd>", "  <heartbeat/>", "<user_instructions>x",
     "<external_codex_apps_open_page>", "<subagent_notification>done", "<turn_aborted>",
     "# AGENTS.md instructions for /x",
+    "AUTOMATED EVENT WAKE 0123456789abcdef0123456789abcdef\nsource: chat\ndesk: nw",
 ])
 def test_harness_and_automation_text_makes_no_row(rooms, text):
     assert reader.machine_prompt(text)
