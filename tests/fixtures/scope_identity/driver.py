@@ -6,10 +6,12 @@ ids and Jev are stand-ins, and no socket can connect. Every step here runs with
 no scope row and no scope extension. ``ratify apply`` and the legacy import are
 left out, because both write a row.
 
-Two flags are for this branch's own tests, never for main's golden. ``--rows``
+Three flags are for this branch's own tests, never for main's golden. ``--rows``
 writes one scope row on every current record after the seed, straight into the
-table, so no id or clock read moves. ``--bodies`` adds each Jev request body,
-as sent, as one more scenario.
+table, so no id or clock read moves, most of them with a subject. ``--stamps``
+puts a scope stamp carrying ``said_in``, ``channel`` and ``carrier`` on the
+seed's CLI capture, so those words sit on its event. ``--bodies`` adds each Jev
+request body, as sent, as one more scenario.
 """
 
 from __future__ import annotations
@@ -37,6 +39,9 @@ from pathlib import Path
 EPOCH = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
 KEY_ENV = "SCOPE_IDENTITY_TEST_KEY"
 ACTOR = "synthetic-operator"
+# Words that must never reach a thread or Jev: they sit on the CLI capture's event only.
+EVENT_ONLY_MARKS = {"said_in": "said-in-mark-aardvark", "channel": "channel-mark-narwhal",
+                    "carrier": "carrier-mark-pangolin"}
 
 
 class Clock:
@@ -106,8 +111,9 @@ class Transport:
 
 
 class Replay:
-    def __init__(self, work: Path):
+    def __init__(self, work: Path, stamps: bool = False):
         self.work = work
+        self.stamps = stamps
         self.data = work / "data"
         self.root = self.data / "synthetic"
         self.transport = Transport()
@@ -172,10 +178,13 @@ class Replay:
         self.hook("stop_capture_no_feedback", "stop-capture", session_id="seed-3",
                   operator_text="What time is the review?")
         operator = json.loads((self.root / "identity.json").read_text())["operator_id"]
+        stamp = {"extensions": {"org.imprint.scope": {"schema_version": "1.0.0", "payload": {
+            "scope_kind": "client", "client_id": "a-client", "resolved_by": "driver", **EVENT_ONLY_MARKS,
+        }}}} if self.stamps else {}
         envelope = build_capture_envelope(
             operator_id=operator, session_id="urn:imprint:session:00000000-0000-4000-8000-000000000001",
             node_id="primary", case_description="A synthetic draft", raw_operator_text="Prefer the shorter summary.",
-            call_type="prefer", capture_mechanism="explicit_cli", captured_by="driver",
+            call_type="prefer", capture_mechanism="explicit_cli", captured_by="driver", **stamp,
         )
         event = self.work / "event.json"
         event.write_text(json.dumps(envelope))
@@ -289,27 +298,28 @@ class Replay:
         self.record("files_on_disk", json.dumps(written, sort_keys=True))
 
     def rows(self) -> None:
-        """One row on every current record, of each kind in turn."""
+        """One row on every current record, of each kind in turn. A stamped capture's own row is replaced."""
         kinds = (
-            ("client", "a-client", "bfcm-2026", "specific", 1),
-            ("central", None, None, None, None),
-            ("core_owner", None, None, None, None),
-            ("held", None, None, None, None),
-            ("unresolved", None, None, None, None),
-            ("client", "other-client", None, "general", None),
+            ("client", "a-client", "bfcm-2026", "specific", 1, "marketing.zebracopy"),
+            ("central", None, None, None, None, "engineering.quokka"),
+            ("core_owner", None, None, None, None, "work.wombat"),
+            ("held", None, None, None, None, None),
+            ("unresolved", None, None, None, None, "design.okapi"),
+            ("client", "other-client", None, "general", None, None),
         )
         with sqlite3.connect(self.root / "imprint.db") as conn:
             nodes = [row[0] for row in conn.execute("SELECT node_id FROM nodes ORDER BY node_id")]
             for index, node in enumerate(nodes):
-                kind, client, project, delivery, rank = kinds[index % len(kinds)]
+                kind, client, project, delivery, rank, subject = kinds[index % len(kinds)]
                 conn.execute(
-                    "INSERT INTO record_scope (node_id, scope_kind, client_id, project_id, delivery, delivery_rank,"
-                    " overrides_json, resolved_by, event_id, stamped_at) VALUES (?,?,?,?,?,?,'[]','driver','driver',?)",
-                    (node, kind, client, project, delivery, rank, EPOCH.isoformat()),
+                    "INSERT OR REPLACE INTO record_scope (node_id, scope_kind, client_id, project_id, delivery,"
+                    " delivery_rank, subject, overrides_json, resolved_by, event_id, stamped_at)"
+                    " VALUES (?,?,?,?,?,?,?,'[]','driver','driver',?)",
+                    (node, kind, client, project, delivery, rank, subject, EPOCH.isoformat()),
                 )
 
 
-def replay(work: Path, rows: bool = False, bodies: bool = False) -> dict[str, str]:
+def replay(work: Path, rows: bool = False, bodies: bool = False, stamps: bool = False) -> dict[str, str]:
     os.environ.update({
         "HOME": str(work / "home"), "XDG_CONFIG_HOME": str(work / "xdg-config"),
         "XDG_DATA_HOME": str(work / "xdg-data"), "XDG_STATE_HOME": str(work / "xdg-state"),
@@ -318,7 +328,7 @@ def replay(work: Path, rows: bool = False, bodies: bool = False) -> dict[str, st
     })
     for name in ("IMPRINT_SELECTOR", "IMPRINT_DEFER_DELIVERY_COMMIT", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         os.environ.pop(name, None)
-    run = Replay(work)
+    run = Replay(work, stamps=stamps)
     seeded = run.seed()
     if rows:
         run.rows()
@@ -333,7 +343,8 @@ def replay(work: Path, rows: bool = False, bodies: bool = False) -> dict[str, st
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory(prefix="imprint-scope-identity-") as folder:
-        scenarios = replay(Path(folder), rows="--rows" in sys.argv, bodies="--bodies" in sys.argv)
+        scenarios = replay(Path(folder), rows="--rows" in sys.argv, bodies="--bodies" in sys.argv,
+                           stamps="--stamps" in sys.argv)
     if "--full" in sys.argv:
         print(json.dumps(scenarios, indent=1, sort_keys=True))
     else:

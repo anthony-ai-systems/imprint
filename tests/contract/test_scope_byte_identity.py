@@ -76,17 +76,34 @@ def handed(scenarios: dict[str, str]) -> dict[str, str]:
 
 def test_rows_on_every_record_change_no_hook_byte_and_no_jev_request():
     plain = replay(SOURCE, "--full", "--bodies")
-    stamped = replay(SOURCE, "--full", "--bodies", "--rows")
+    stamped = replay(SOURCE, "--full", "--bodies", "--rows", "--stamps")
 
     rows = json.loads(stamped["snapshot"])["record_scope"]
     assert len(rows) == 15  # every record the seed wrote; the later steps add three with no row
     assert {row["scope_kind"] for row in rows} == {"client", "central", "core_owner", "held", "unresolved"}
+    assert {row["subject"] for row in rows} == {
+        "marketing.zebracopy", "engineering.quokka", "work.wombat", "design.okapi", None,
+    }
     assert "record_scope" not in json.loads(plain["snapshot"])
     assert len(json.loads(plain["jev_request_bodies"])) == 6
     assert len(handed(plain)) == 22
 
     assert sorted(name for name in handed(plain) if plain[name] != stamped[name]) == sorted(PRINTS_SNAPSHOT)
     assert handed(stamped) == handed(plain)
+
+
+def test_a_subject_and_the_event_only_keys_reach_no_thread_and_no_jev_request():
+    """Each word is on a row or an event, and none is in anything a thread or Jev is handed."""
+    stamped = replay(SOURCE, "--full", "--bodies", "--rows", "--stamps")
+    subjects = ("zebracopy", "quokka", "wombat", "okapi")
+    event_only = ("said-in-mark-aardvark", "channel-mark-narwhal", "carrier-mark-pangolin")
+
+    assert all(mark in stamped["snapshot"] for mark in subjects)
+    assert all(mark in stamped["export_jsonld"] for mark in subjects + event_only)
+    assert all(mark not in stamped["snapshot"] for mark in event_only)
+    sent = handed(stamped)
+    assert sent and "jev_request_bodies" in sent
+    assert [(name, mark) for name, text in sent.items() for mark in subjects + event_only if mark in text] == []
 
 
 @pytest.fixture(scope="module")
