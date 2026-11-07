@@ -119,7 +119,7 @@ def _record_scope(row: dict) -> RecordScope:
     return RecordScope(
         scope_kind=row["scope_kind"], resolved_by=row["resolved_by"],
         client_id=row["client_id"], project_id=row["project_id"],
-        delivery=row["delivery"], delivery_rank=row["delivery_rank"],
+        delivery=row["delivery"], delivery_rank=row["delivery_rank"], subject=row["subject"],
         speaker=row["speaker"], endorser=row["endorser"],
         overrides=tuple(json.loads(row["overrides_json"])),
     )

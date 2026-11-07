@@ -77,7 +77,7 @@ def central_row(store: ImprintStore, node_id: str, event_id: str) -> None:
         conn.execute("BEGIN IMMEDIATE")
         write_scope_row(conn, {
             "node_id": node_id, "scope_kind": "central", "client_id": None, "project_id": None,
-            "delivery": "general", "delivery_rank": 1, "speaker": None, "endorser": None,
+            "delivery": "general", "delivery_rank": 1, "subject": None, "speaker": None, "endorser": None,
             "overrides_json": "[]", "resolved_by": "ratified", "event_id": event_id,
             "stamped_at": VALID_FROM,
         })
@@ -140,11 +140,11 @@ def test_a_stamp_lands_on_the_verdict_in_the_capture_event(tmp_path, capture_env
     assert len(rows_of(store)) == 1 and row["node_id"] == verdict_id
     assert row["event_id"] == envelope["input_event_id"]
     assert {key: row[key] for key in (
-        "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "speaker", "endorser",
+        "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "subject", "speaker", "endorser",
         "overrides_json", "resolved_by",
     )} == {
         "scope_kind": "client", "client_id": "example-client", "project_id": "example-project",
-        "delivery": "general", "delivery_rank": 3, "speaker": "a-team-member",
+        "delivery": "general", "delivery_rank": 3, "subject": None, "speaker": "a-team-member",
         "endorser": "the-operator", "overrides_json": "[]", "resolved_by": "thread_folder",
     }
     with store.connect() as conn:
@@ -186,6 +186,8 @@ def test_the_capture_pipeline_passes_extensions_through(tmp_path, capture_envelo
     {"scope_kind": "central", "client_id": None},
     {"speaker": "a-team-member"},
     {"overrides": ["urn:imprint:rule:00000000-0000-4000-8000-000000000000"]},
+    {"subject": "marketing"},
+    {"subject": None},
     {"scope_kind": "client", "client_id": None},
     {"scope_kind": "core_owner"},
     {"scope_kind": "unresolved", "client_id": None, "delivery": "general"},
@@ -466,6 +468,163 @@ def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
     assert rows_of(store) == []
 
 
+# Subject: written by scope set alone, checked in Python alone -------------
+
+
+def test_scope_set_writes_a_subject_that_history_shows_and_clear_removes(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    envelope = stamped(capture_envelope, project_id="a-project", delivery="general", delivery_rank=2)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    assert row_of(store, verdict_id)["subject"] is None
+
+    # A client row, so --subject reaches client rows and not only central ones.
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--subject", "marketing.video",
+                 "--by", ACTOR]) == 0
+    event_id = json.loads(capsys.readouterr().out)["event_id"]
+    row = row_of(store, verdict_id)
+    assert (row["subject"], row["event_id"], row["resolved_by"]) == ("marketing.video", event_id, "explicit")
+    assert (row["scope_kind"], row["client_id"], row["project_id"], row["delivery"], row["delivery_rank"]) == (
+        "client", "example-client", "a-project", "general", 2)
+
+    assert main(["--config", str(config), "history", verdict_id]) == 0
+    history = json.loads(capsys.readouterr().out)["history"]
+    assert history["scope"]["subject"] == "marketing.video"
+    change = history["dispositions"][-1]
+    assert (change["payload"]["prior_scope"]["subject"], change["payload"]["scope"]["subject"]) == (
+        None, "marketing.video")
+
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--delivery", "specific", "--by", ACTOR]) == 0
+    capsys.readouterr()
+    assert row_of(store, verdict_id)["subject"] == "marketing.video"
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--subject", "marketing",
+                 "--clear", "subject", "--by", ACTOR]) == 2
+    assert "both set and clear" in json.loads(capsys.readouterr().out)["error"]
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--clear", "subject", "--by", ACTOR]) == 0
+    capsys.readouterr()
+    assert row_of(store, verdict_id)["subject"] is None
+
+
+@pytest.mark.parametrize("scope, subject", [
+    ("central", "work"),
+    ("core_owner", "engineering.release"),
+    ("unresolved", "engineering"),
+    ("held", "design.layout"),
+    ("client:a-client", "marketing.copy"),
+], ids=repr)
+def test_scope_set_takes_a_subject_on_every_kind(tmp_path, capture_envelope, scope, subject):
+    """Heads are open on every kind but client: N13 keeps no list of them."""
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = _scoped(store, capture_envelope, "A rule.", scope)
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"subject": subject})
+    row = row_of(store, node_id)
+    assert (row["scope_kind"], row["subject"]) == (scope.split(":")[0], subject)
+
+
+@pytest.mark.parametrize("subject", [
+    "Marketing", "marketing.", ".video", "marketing..video", "marketing video", "", " marketing",
+    "marketing\n", "marketing-video", "marketing_video", "marketing.video2", "m\u00e4rketing", ".", 1,
+    True, ["marketing"],
+], ids=repr)
+def test_a_subject_out_of_shape_is_refused_on_any_kind(tmp_path, capture_envelope, subject):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope)
+    for kind, client_id in (("core_owner", None), ("client", "a-client"), ("held", None)):
+        with pytest.raises(ValidationError, match="subject must be lower case words joined by single dots"):
+            store.set_record_scope(node_id, actor_id=ACTOR, changes={
+                "scope_kind": kind, "client_id": client_id, "subject": subject,
+            })
+    assert row_of(store, node_id) is None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events WHERE event_type='scope_changed'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("subject", ["marketing", "marketing.video", "marketing.copy.headline", None], ids=repr)
+def test_a_client_row_takes_marketing_or_no_subject(tmp_path, capture_envelope, subject):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope)
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={
+        "scope_kind": "client", "client_id": "a-client", "subject": subject,
+    })
+    assert (row_of(store, node_id)["scope_kind"], row_of(store, node_id)["subject"]) == ("client", subject)
+
+
+@pytest.mark.parametrize("subject", [
+    "engineering", "engineering.release", "work", "work.x", "design", "marketer", "marketingvideo",
+], ids=repr)
+def test_a_client_row_refuses_any_head_but_marketing(tmp_path, capture_envelope, subject):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = rule(store, capture_envelope)
+    with pytest.raises(ValidationError, match="client record's subject is marketing"):
+        store.set_record_scope(node_id, actor_id=ACTOR, changes={
+            "scope_kind": "client", "client_id": "a-client", "subject": subject,
+        })
+    assert row_of(store, node_id) is None
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner", "subject": subject})
+    assert row_of(store, node_id)["subject"] == subject
+
+
+@pytest.mark.parametrize("scope, subject", [
+    ("core_owner", "engineering.x"), ("unresolved", "work"), ("held", "design"),
+], ids=repr)
+def test_a_kind_change_onto_client_meets_the_subject_already_there(tmp_path, capture_envelope, scope, subject):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    node_id = _scoped(store, capture_envelope, "A rule.", scope)
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"subject": subject})
+    before = row_of(store, node_id)
+    with pytest.raises(ValidationError, match="client record's subject is marketing"):
+        store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
+    assert row_of(store, node_id) == before
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={
+        "scope_kind": "client", "client_id": "a-client", "subject": "marketing.video",
+    })
+    assert (row_of(store, node_id)["scope_kind"], row_of(store, node_id)["subject"]) == ("client", "marketing.video")
+
+
+def test_a_central_row_with_a_subject_still_keeps_its_kind(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    store.apply_capture(capture_envelope)
+    target = central(store, capture_envelope)
+    store.set_record_scope(target, actor_id=ACTOR, changes={"subject": "engineering.x"})
+    with pytest.raises(ValidationError, match="keeps its kind"):
+        store.set_record_scope(target, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
+    row = row_of(store, target)
+    assert (row["scope_kind"], row["subject"]) == ("central", "engineering.x")
+
+
+def test_no_stamp_and_no_ontology_flag_carries_a_subject(tmp_path, capsys, capture_envelope):
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    with pytest.raises(ValidationError, match="unknown fields"):
+        store.apply_capture(stamped(capture_envelope, subject="marketing"))
+    store.apply_capture(capture_envelope)
+    with pytest.raises(ValidationError, match="unknown fields"):
+        rule(store, capture_envelope, scope={"scope_kind": "core_owner", "resolved_by": "explicit", "subject": "work"})
+    assert rows_of(store) == []
+    contract = _principle_contract(capture_envelope["operator_id"], capture_envelope["evidence"][0]["evidence_id"])
+    with pytest.raises(SystemExit):
+        main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, contract),
+              "--valid-from", VALID_FROM, "--scope-kind", "core_owner", "--scope-subject", "work"])
+    capsys.readouterr()
+    assert rows_of(store) == []
+
+
+def test_a_purge_takes_the_subject_with_the_row(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"subject": "marketing.quokkacopy"})
+    result = hard_purge(store, tmp_path, verdict_id, confirmation=verdict_id, sentinel="marketing.quokkacopy")
+    assert result["status"] == "purged", result
+    assert rows_of(store) == []
+    assert b"quokkacopy" not in store.path.read_bytes()
+
+
 def test_core_owner_is_a_kind_and_system_is_refused_by_name(tmp_path, capsys, capture_envelope):
     """The kind was renamed before any install, so ``system`` is an unknown kind on every surface."""
     config, store = configured(tmp_path, capture_envelope["operator_id"])
@@ -671,6 +830,7 @@ def test_a_successor_with_no_row_takes_the_targets_in_the_same_event(tmp_path, c
     old, new = rule(store, capture_envelope, "Old."), rule(store, capture_envelope, "New.")
     store.set_record_scope(old, actor_id=ACTOR, changes={
         "scope_kind": "client", "client_id": "a-client", "project_id": "a-project", "delivery": "general",
+        "subject": "marketing.video",
     })
     target = row_of(store, old)
     edge_id = _supersede(store, capture_envelope, new, old)
@@ -678,8 +838,9 @@ def test_a_successor_with_no_row_takes_the_targets_in_the_same_event(tmp_path, c
         event_id = conn.execute("SELECT created_event_id FROM edges WHERE edge_id=?", (edge_id,)).fetchone()[0]
     copied = row_of(store, new)
     assert copied["event_id"] == event_id
-    keep = ("scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides_json")
+    keep = ("scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "subject", "overrides_json")
     assert {key: copied[key] for key in keep} == {key: target[key] for key in keep}
+    assert copied["subject"] == "marketing.video"
     assert (target["resolved_by"], copied["resolved_by"]) == ("explicit", "inherited")
     with store.connect() as conn:
         event = json.loads(conn.execute("SELECT payload_json FROM events WHERE event_id=?", (event_id,)).fetchone()[0])
@@ -826,12 +987,14 @@ def test_the_row_joins_onto_its_record_and_only_its_record(tmp_path, capture_env
     store.apply_capture(envelope)
     plain = rule(store, envelope, "A rule with no row.")
     target = central(store, envelope)
-    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"overrides": [target]})
+    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={
+        "overrides": [target], "subject": "marketing.copy",
+    })
     records = {item.record_id: item for item in StoreRetrievalSource(store).retrieval_candidates("x")}
     assert records[envelope["verdict"]["verdict_id"]].scope == RecordScope(
         scope_kind="client", resolved_by="explicit", client_id="example-client", project_id="a-project",
-        delivery="general", delivery_rank=5, speaker="a-team-member", endorser="the-operator",
-        overrides=(target,),
+        delivery="general", delivery_rank=5, subject="marketing.copy", speaker="a-team-member",
+        endorser="the-operator", overrides=(target,),
     )
     assert records[plain].scope is None
     assert records[target].scope.scope_kind == "central"
@@ -853,6 +1016,7 @@ def test_rows_change_no_delivered_byte(tmp_path, capture_envelope):
     store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"scope_kind": "held"})
     store.set_record_scope(node_id, actor_id=ACTOR, changes={
         "scope_kind": "client", "client_id": "a-client", "delivery": "specific", "delivery_rank": 1,
+        "subject": "marketing.video",
     })
     after = delivered()
     assert after["snapshot_id"] != before["snapshot_id"]
@@ -873,7 +1037,11 @@ def test_the_snapshot_id_holds_on_an_empty_table_and_moves_at_the_first_stamp(tm
     assert stamped_id != empty
     assert [row["scope_kind"] for row in store.snapshot()["record_scope"]] == ["core_owner"]
     store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "held"})
-    assert _snapshot_id(store) != stamped_id
+    held_id = _snapshot_id(store)
+    assert held_id != stamped_id
+    store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"subject": "work"})
+    assert _snapshot_id(store) != held_id
+    assert [row["subject"] for row in store.snapshot()["record_scope"]] == ["work"]
 
 
 def _older_store(tmp_path: Path, envelope: dict) -> ImprintStore:
@@ -939,8 +1107,8 @@ def _write_directly(store: ImprintStore, **fields) -> None:
     """Past every Python check, as a direct writer would."""
     row = {
         "node_id": new_urn("rule"), "scope_kind": "core_owner", "client_id": None, "project_id": None,
-        "delivery": None, "delivery_rank": None, "speaker": None, "endorser": None, "overrides_json": "[]",
-        "resolved_by": "test", "event_id": "gone", "stamped_at": VALID_FROM, **fields,
+        "delivery": None, "delivery_rank": None, "subject": None, "speaker": None, "endorser": None,
+        "overrides_json": "[]", "resolved_by": "test", "event_id": "gone", "stamped_at": VALID_FROM, **fields,
     }
     with store.connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1009,13 +1177,32 @@ def test_the_delivery_rules_live_in_python_alone(tmp_path, fields):
     from imprint.store.scope import _require_shape
 
     value = {"scope_kind": "core_owner", "client_id": None, "project_id": None, "delivery": None,
-             "delivery_rank": None, **fields}
+             "delivery_rank": None, "subject": None, **fields}
     with pytest.raises(ValidationError):
         _require_shape(value["scope_kind"], value["client_id"], value["project_id"], value["delivery"],
-                       value["delivery_rank"])
+                       value["delivery_rank"], value["subject"])
     store = new_store(tmp_path)
     _write_directly(store, **fields)
     assert len(rows_of(store)) == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {"subject": "Not A Shape"},
+    {"subject": ""},
+    {"scope_kind": "client", "client_id": "a-client", "subject": "engineering"},
+], ids=repr)
+def test_the_subject_rules_live_in_python_alone(tmp_path, fields):
+    """The column has no CHECK, so its rules can still change. Python refuses each of these."""
+    from imprint.store.scope import _require_shape
+
+    value = {"scope_kind": "core_owner", "client_id": None, "project_id": None, "delivery": None,
+             "delivery_rank": None, "subject": None, **fields}
+    with pytest.raises(ValidationError, match="subject"):
+        _require_shape(value["scope_kind"], value["client_id"], value["project_id"], value["delivery"],
+                       value["delivery_rank"], value["subject"])
+    store = new_store(tmp_path)
+    _write_directly(store, **fields)
+    assert rows_of(store)[0]["subject"] == fields["subject"]
 
 
 @pytest.mark.parametrize("value", [
@@ -1276,11 +1463,14 @@ def test_rows_cross_an_export_and_an_import_whole(tmp_path, capture_envelope):
     store.apply_capture(envelope)
     target = central(store, envelope)
     closed = rule(store, envelope, "A closed rule.")
-    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"overrides": [target]})
-    store.set_record_scope(closed, actor_id=ACTOR, changes={"scope_kind": "held"})
+    store.set_record_scope(envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={
+        "overrides": [target], "subject": "marketing.copy",
+    })
+    store.set_record_scope(closed, actor_id=ACTOR, changes={"scope_kind": "held", "subject": "work"})
     store.tombstone_node(closed, reason="Withdrawn.")
     document = export_jsonld(store)
     assert document["imprint:recordScope"] == rows_of(store) and len(rows_of(store)) == 3
+    assert sorted(str(row["subject"]) for row in document["imprint:recordScope"]) == ["None", "marketing.copy", "work"]
 
     imported = _fresh(tmp_path)
     assert import_jsonld(imported, document) == document["imprint:semanticSha256"]
@@ -1375,7 +1565,12 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery_rank": 2**63}]), "rank"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": "Example-Client"}]), "client_id must"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "project_id": "a project"}]), "project_id must"),
-], ids=range(18))
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "subject": "Marketing"}]), "subject must"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "subject": "engineering"}]),
+     "client record's subject"),
+    (lambda doc: _reset_rows(doc, [{key: value for key, value in doc["imprint:recordScope"][0].items()
+                                    if key != "subject"}]), "invalid row"),
+], ids=range(21))
 def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
     _, document = _exported(tmp_path, capture_envelope)
     with pytest.raises(ValidationError, match=message):

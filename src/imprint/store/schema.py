@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS purge_receipts (
 -- after a rollback. CREATE TABLE IF NOT EXISTS cannot change a CHECK later, so the
 -- table checks only what is settled: the kind, one shape for a client or project
 -- id (store/scope.py ID_SHAPE), and overrides that are a JSON list. The delivery
--- tag and rank are checked in store/scope.py alone, so they can still change.
+-- tag, rank and subject are checked in store/scope.py alone, so they can still change.
 CREATE TABLE IF NOT EXISTS record_scope (
   node_id TEXT PRIMARY KEY,
   scope_kind TEXT NOT NULL CHECK(scope_kind IN ('client','central','core_owner','unresolved','held')),
@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS record_scope (
     AND project_id NOT GLOB '-*' AND project_id NOT GLOB '*-' AND project_id NOT GLOB '*--*')),
   delivery TEXT,
   delivery_rank INTEGER,
+  subject TEXT,
   speaker TEXT,
   endorser TEXT,
   overrides_json TEXT NOT NULL DEFAULT '[]'

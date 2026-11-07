@@ -419,7 +419,7 @@ def _parse_large_native_transcript(path_value: str, *, snapshot=None, host_origi
 
 _SCOPE_CLEARS = {
     "project": ("project_id", None), "delivery": ("delivery", None),
-    "rank": ("delivery_rank", None), "overrides": ("overrides", []),
+    "rank": ("delivery_rank", None), "subject": ("subject", None), "overrides": ("overrides", []),
 }
 
 
@@ -445,7 +445,8 @@ def _scope_changes(args: argparse.Namespace) -> dict[str, object]:
     changes = dict(_SCOPE_CLEARS[name] for name in args.clear)
     for key, value in (
         ("scope_kind", args.kind), ("client_id", args.client), ("project_id", args.project),
-        ("delivery", args.delivery), ("delivery_rank", args.rank), ("overrides", args.override),
+        ("delivery", args.delivery), ("delivery_rank", args.rank), ("subject", args.subject),
+        ("overrides", args.override),
     ):
         if value is not None:
             if key in changes:
@@ -607,9 +608,11 @@ def build_parser() -> argparse.ArgumentParser:
     scope_set.add_argument("--project")
     scope_set.add_argument("--delivery", help="general or specific")
     scope_set.add_argument("--rank", type=int)
+    scope_set.add_argument("--subject", help="lower case words joined by dots, such as marketing.video; "
+                                             "a client record takes marketing or none")
     scope_set.add_argument("--override", action="append", help="a central record this client rule wins over")
     scope_set.add_argument("--clear", action="append", default=[],
-                           choices=("project", "delivery", "rank", "overrides"))
+                           choices=("project", "delivery", "rank", "subject", "overrides"))
     scope_set.add_argument("--by", required=True)
 
     verdict = subs.add_parser("verdict", help="append later WHY or reinforcement evidence")

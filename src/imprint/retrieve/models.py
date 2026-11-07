@@ -37,6 +37,7 @@ class RecordScope:
     project_id: str | None = None
     delivery: str | None = None
     delivery_rank: int | None = None
+    subject: str | None = None
     speaker: str | None = None
     endorser: str | None = None
     overrides: tuple[str, ...] = ()

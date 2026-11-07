@@ -45,12 +45,12 @@ adapters, never required canonical stores.
 
 The `record_scope` table holds at most one row per retrievable record: whose it
 is (`client`, `central`, `core_owner`, `unresolved` or `held`), an optional client
-and project, a delivery tag and rank, and any `overrides`. The row is keyed by
+and project, a delivery tag and rank, a subject, and any `overrides`. The row is keyed by
 node, so a new version keeps it. A record with no row is legacy. A client or
 project id has one shape: lower case letters and digits joined by single hyphens,
 such as `north-wind`. Python refuses any other by name, and so does the table,
-which also refuses `overrides` that are not a JSON list. The delivery tag and rank
-are checked in Python only, so their rules can still change. This release
+which also refuses `overrides` that are not a JSON list. The delivery tag, rank and
+subject are checked in Python only, so their rules can still change. This release
 only carries scope: no delivery route reads a row, and with no row and no scope
 extension the output matches the previous release byte for byte. The store and
 record schema versions do not move, and an older build still opens the store. The
@@ -71,6 +71,14 @@ snapshot id moves at the first row, and then whenever a row changes.
   row sits beside the node's versions, a change adds no version. `imprint history`
   lists the event and shows the current row as `scope`, or no `scope` when there is
   no row.
+- **Subject.** A row may carry a `subject`: lower case words joined by single
+  dots, such as `marketing`, `marketing.video`, `engineering` or `work`. The head
+  before the first dot says which work the record is about, and the tail is open.
+  Only `imprint scope set --subject` writes one, on a row of any kind, and `--clear
+  subject` removes it. A capture stamp and the ontology flags cannot carry one. A
+  client row takes no subject, `marketing` or `marketing.<tail>`, so `engineering`,
+  `work` or any other head is refused there, and so is a change of kind that would
+  bring a row with such a subject to `client`. Nothing reads the subject yet.
 - **Other paths.** `ontology add-node`, `observation add` and `outcome add` take
   `--scope-kind`, `--scope-client` and `--scope-project`, and write no row without
   them. `imprint ratify apply` stamps a new node `unresolved`, except a Domain.

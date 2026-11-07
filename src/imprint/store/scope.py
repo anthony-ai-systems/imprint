@@ -24,6 +24,12 @@ DELIVERY_TAGS = frozenset({"general", "specific"})
 # One shape for a client or project id, here and in the table's CHECKs: lower
 # case letters and digits in runs joined by single hyphens, none at either end.
 ID_SHAPE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# A subject is lower case words joined by single dots, such as ``marketing.video``.
+# The head before the first dot says which work a record is about; the tail is
+# open. Python alone checks it: the table leaves the column unchecked.
+SUBJECT_SHAPE = re.compile(r"[a-z]+(?:\.[a-z]+)*")
+# A client's work is marketing, so a client row takes this head or no subject.
+CLIENT_SUBJECT_HEAD = "marketing"
 # A delivery tag goes only on these: they sit in the ``general`` section, and Jev
 # can be sent them.
 TAGGED_NODE_TYPES = frozenset({"Verdict", "Principle", "Rule"})
@@ -33,14 +39,15 @@ RESOLVED_EXPLICIT = "explicit"
 RESOLVED_INHERITED = "inherited"
 SCOPE_COLUMNS = (
     "node_id", "scope_kind", "client_id", "project_id", "delivery", "delivery_rank",
-    "speaker", "endorser", "overrides_json", "resolved_by", "event_id", "stamped_at",
+    "subject", "speaker", "endorser", "overrides_json", "resolved_by", "event_id", "stamped_at",
 )
 _STAMP_KEYS = frozenset({
     "scope_kind", "client_id", "project_id", "resolved_by", "candidate_client_ids",
     "speaker", "endorser", "delivery", "delivery_rank",
 })
+# A stamp never carries a subject: only ``imprint scope set`` writes one.
 SCOPE_CHANGE_KEYS = frozenset({
-    "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides",
+    "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "subject", "overrides",
 })
 
 
@@ -61,8 +68,10 @@ def _require_id(value: Any, field: str) -> None:
         )
 
 
-def _require_shape(kind: Any, client_id: Any, project_id: Any, delivery: Any, rank: Any) -> None:
-    """The table's CHECKs in Python, so a bad value is refused by name, and the delivery rules."""
+def _require_shape(
+    kind: Any, client_id: Any, project_id: Any, delivery: Any, rank: Any, subject: Any,
+) -> None:
+    """The table's CHECKs in Python, so a bad value is refused by name, and the delivery and subject rules."""
     if not isinstance(kind, str) or kind not in SCOPE_KINDS:
         raise ValidationError("unknown scope kind")
     if (kind == "client") != (client_id is not None):
@@ -78,6 +87,11 @@ def _require_shape(kind: Any, client_id: Any, project_id: Any, delivery: Any, ra
         isinstance(rank, bool) or not isinstance(rank, int) or not -(2**63) <= rank < 2**63
     ):
         raise ValidationError("delivery rank must be a 64-bit integer")
+    if subject is not None:
+        if not isinstance(subject, str) or SUBJECT_SHAPE.fullmatch(subject) is None:
+            raise ValidationError("scope subject must be lower case words joined by single dots")
+        if kind == "client" and subject.split(".", 1)[0] != CLIENT_SUBJECT_HEAD:
+            raise ValidationError("a client record's subject is marketing, marketing.<tail> or none")
 
 
 def validate_stamp(stamp: Any) -> dict[str, Any]:
@@ -93,6 +107,7 @@ def validate_stamp(stamp: Any) -> dict[str, Any]:
         raise ValidationError("a central scope is written only at ratification")
     _require_shape(
         value["scope_kind"], value["client_id"], value["project_id"], value["delivery"], value["delivery_rank"],
+        None,
     )
     _require_text(value["resolved_by"], "resolved_by", nullable=False)
     for field in ("speaker", "endorser"):
@@ -139,7 +154,9 @@ def require_fits_node(value: Mapping[str, Any], node_type: str, payload: Mapping
 def merge_change(prior: Mapping[str, Any] | None, changes: Mapping[str, Any]) -> dict[str, Any]:
     """The row ``imprint scope set`` leaves: only what it names moves."""
     if not changes or set(changes) - SCOPE_CHANGE_KEYS:
-        raise ValidationError("scope set must name a kind, client, project, delivery, rank or overrides")
+        raise ValidationError(
+            "scope set must name a kind, client, project, delivery, rank, subject or overrides"
+        )
     if changes.get("scope_kind") == "central":
         raise ValidationError("a central scope is written only at ratification")
     if prior is not None and prior["scope_kind"] == "central" and "scope_kind" in changes:
@@ -148,13 +165,15 @@ def merge_change(prior: Mapping[str, Any] | None, changes: Mapping[str, Any]) ->
         raise ValidationError("a record with no scope row needs a kind")
     value: dict[str, Any] = {
         "client_id": None, "project_id": None, "delivery": None, "delivery_rank": None,
-        "speaker": None, "endorser": None, "overrides": [],
+        "subject": None, "speaker": None, "endorser": None, "overrides": [],
         **(dict(prior) if prior else {}), **changes,
     }
     if "client_id" not in changes and value["scope_kind"] != "client":
         value["client_id"] = None
+    # The whole merged row is checked, so a kind change meets the subject already there.
     _require_shape(
         value["scope_kind"], value["client_id"], value["project_id"], value["delivery"], value["delivery_rank"],
+        value["subject"],
     )
     overrides = value["overrides"]
     if not isinstance(overrides, list):
@@ -169,7 +188,9 @@ def validate_row(row: Any) -> None:
     """Fail closed on one row a document carries, ``central`` included."""
     if not isinstance(row, dict) or set(row) != set(SCOPE_COLUMNS):
         raise ValidationError("invalid row in record scope")
-    _require_shape(row["scope_kind"], row["client_id"], row["project_id"], row["delivery"], row["delivery_rank"])
+    _require_shape(
+        row["scope_kind"], row["client_id"], row["project_id"], row["delivery"], row["delivery_rank"], row["subject"],
+    )
     for field in ("node_id", "resolved_by", "event_id", "stamped_at"):
         _require_text(row[field], field, nullable=False)
     for field in ("speaker", "endorser"):
@@ -219,11 +240,11 @@ def write_scope_row(conn: sqlite3.Connection, row: Mapping[str, Any], *, replace
 
 
 def stamp_row(node_id: str, stamp: Mapping[str, Any], *, event_id: str, now: str) -> dict[str, Any]:
-    """The row one validated stamp makes. Overrides never travel on a stamp."""
+    """The row one validated stamp makes. Overrides and a subject never travel on a stamp."""
     return {
         "node_id": node_id, "scope_kind": stamp["scope_kind"], "client_id": stamp["client_id"],
         "project_id": stamp["project_id"], "delivery": stamp["delivery"],
-        "delivery_rank": stamp["delivery_rank"], "speaker": stamp["speaker"],
+        "delivery_rank": stamp["delivery_rank"], "subject": None, "speaker": stamp["speaker"],
         "endorser": stamp["endorser"], "overrides_json": "[]",
         "resolved_by": stamp["resolved_by"], "event_id": event_id, "stamped_at": now,
     }

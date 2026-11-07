@@ -8,7 +8,10 @@
   `core_owner` marks a record about the operator's own systems. A
   capture can bring a row through the `org.imprint.scope` extension, `imprint scope
   set` changes one and appends a `scope_changed` event, and `imprint history` shows
-  both. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,
+  both. `imprint scope set --subject` gives a row of any kind a subject, lower case
+  words joined by single dots such as `marketing.video`, and `--clear subject`
+  removes it. A client row takes `marketing`, `marketing.<tail>` or no subject. No
+  capture stamp carries one. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,
   `--scope-client` and `--scope-project`. `imprint ratify apply` now stamps each new
   record except a Domain `unresolved`, so its first run writes the first row and
   moves the snapshot id once. Delivered text does not change. Rows cross JSON-LD

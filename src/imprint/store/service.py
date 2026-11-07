@@ -1746,7 +1746,7 @@ class ImprintStore:
             for override in changes.get("overrides", ()):
                 self._require_current_central(conn, override)
             scope = {key: value[key] for key in (
-                "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "overrides",
+                "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "subject", "overrides",
             )}
             event_payload = {
                 "node_id": node_id, "actor_id": actor_id, "prior_scope": prior_scope,
@@ -1761,7 +1761,7 @@ class ImprintStore:
             write_scope_row(conn, {
                 "node_id": node_id, "scope_kind": value["scope_kind"], "client_id": value["client_id"],
                 "project_id": value["project_id"], "delivery": value["delivery"],
-                "delivery_rank": value["delivery_rank"], "speaker": value["speaker"],
+                "delivery_rank": value["delivery_rank"], "subject": value["subject"], "speaker": value["speaker"],
                 "endorser": value["endorser"], "overrides_json": json.dumps(value["overrides"]),
                 "resolved_by": RESOLVED_EXPLICIT, "event_id": event_id, "stamped_at": now,
             }, replace=True)
