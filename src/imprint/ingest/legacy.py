@@ -14,6 +14,8 @@ from imprint.ontology.schema import canonical_bytes, make_urn, payload_sha256
 from imprint.store import ImprintStore
 from imprint.store.service import utc_now
 
+_UNRESOLVED_SCOPE = {"scope_kind": "unresolved", "resolved_by": "legacy_import"}
+
 
 def import_legacy_principles(
     store: ImprintStore,
@@ -22,9 +24,12 @@ def import_legacy_principles(
     operator_id: str,
     source_version: str,
     source_locator: str,
+    scope: dict[str, Any] | None = None,
 ) -> list[str]:
+    """Import flat principles. Their scope is ``unresolved`` unless ``scope`` names one."""
     if source_version not in {"1", "1.0", "2", "2.0", "2.0.0"}:
         raise ValidationError("only declared v1/v2 legacy formats are supported")
+    store.initialize()
     created = []
     for record in records:
         if not isinstance(record, dict) or set(record) - {"text", "extensions"}:
@@ -76,6 +81,7 @@ def import_legacy_principles(
             operator_id=operator_id,
             valid_from=imported_at,
             proposed_by="deterministic-legacy-importer",
+            scope=scope or _UNRESOLVED_SCOPE,
         )
         created.append(node_id)
     return created

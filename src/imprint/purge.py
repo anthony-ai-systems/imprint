@@ -16,6 +16,7 @@ from .paths import validate_data_root
 from .permissions import secure_directory, secure_file, secure_tree
 from .projections import jsonld_document, markdown_document
 from .store import ImprintStore
+from .store.scope import scope_table_exists
 from .store.service import utc_now
 
 
@@ -156,6 +157,23 @@ def _closure(conn: sqlite3.Connection, scope: str) -> tuple[set[str], set[str], 
     return nodes, edges, events, ingest_items, scope_class
 
 
+def _drop_scope_rows(conn: sqlite3.Connection, nodes: set[str]) -> None:
+    """Take purged ids out of the table and every override list, or the byte scan finds them."""
+    if not scope_table_exists(conn):
+        return
+    conn.execute(f"DELETE FROM record_scope WHERE node_id IN ({','.join('?' for _ in nodes)})", list(nodes))
+    for row in conn.execute(
+        "SELECT node_id,overrides_json FROM record_scope WHERE overrides_json<>'[]'"
+    ).fetchall():
+        overrides = json.loads(row["overrides_json"])
+        kept = [item for item in overrides if item not in nodes]
+        if kept != overrides:
+            conn.execute(
+                "UPDATE record_scope SET overrides_json=? WHERE node_id=?",
+                (json.dumps(kept), row["node_id"]),
+            )
+
+
 def preview_purge(store: ImprintStore, root: Path, scope: str) -> dict[str, Any]:
     root = validate_data_root(root)
     with store.connect() as conn:
@@ -257,6 +275,7 @@ def hard_purge(
             conn.execute(f"DELETE FROM ingest_rulings WHERE item_id IN ({item_marks})", list(ingest_items))
             conn.execute(f"DELETE FROM ingest_items WHERE item_id IN ({item_marks})", list(ingest_items))
         if nodes:
+            _drop_scope_rows(conn, nodes)
             conn.execute(f"DELETE FROM node_versions WHERE node_id IN ({node_marks})", list(nodes))
             conn.execute(f"DELETE FROM nodes WHERE node_id IN ({node_marks})", list(nodes))
         if events:

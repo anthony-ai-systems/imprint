@@ -678,6 +678,45 @@ def test_pattern_items_are_pinned_and_domain_items_are_not(tmp_path):
     assert receipt["items"][1]["pin_status"] == "not pinned: the reader does not bind Domain nodes"
 
 
+def test_a_v1_packet_stamps_unresolved_and_a_rejected_item_or_a_domain_gets_no_row(tmp_path):
+    batch = Batch(tmp_path)
+    one, _, _ = batch.evidence("Keep weekly status notes to five lines.")
+    two, _, _ = batch.evidence("Do not book reviews on Fridays.")
+    sha = batch.write_packet([
+        batch.item(1, "Keep weekly status notes short.", [one]),
+        batch.item(2, "Never book reviews on Fridays.", [two], node_type="Rule"),
+        batch.item(3, "Status reporting for internal reviews.", [one], node_type="Domain",
+                   domain_id="status-reporting", public_label="Status reporting"),
+    ])
+    batch.write_card(sha, batches=("9001.1 yes\n9001.2 no not a standing rule\n9001.3 yes",))
+
+    assert batch.run()["status"] == "applied"
+
+    principle = batch.node("Principle", sha, 1)
+    with batch.store.connect() as conn:
+        rows = [dict(row) for row in conn.execute("SELECT * FROM record_scope")]
+    assert [row["node_id"] for row in rows] == [principle]
+    assert (rows[0]["scope_kind"], rows[0]["client_id"], rows[0]["resolved_by"]) == (
+        "unresolved", None, "ratify_v1_packet")
+    assert rows[0]["delivery"] is None and rows[0]["overrides_json"] == "[]"
+
+
+def test_ratify_apply_adds_the_table_to_a_store_that_lacks_it(tmp_path):
+    batch = Batch(tmp_path)
+    sha = _three_item_batch(batch)
+    batch.write_card(sha, batches=(MIXED,))
+    with batch.store.connect() as conn:
+        conn.execute("DROP TABLE record_scope")
+
+    assert batch.run(dry_run=True)["status"] == "dry_run"
+    with batch.store.connect() as conn:
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='record_scope'").fetchone() is None
+
+    assert batch.run()["status"] == "applied"
+    with batch.store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM record_scope").fetchone()[0] == 1
+
+
 def test_dry_run_and_synced_receipt_roots_write_nothing(tmp_path, monkeypatch):
     batch = Batch(tmp_path)
     sha = _three_item_batch(batch)

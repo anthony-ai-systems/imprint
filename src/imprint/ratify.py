@@ -68,6 +68,8 @@ NODE_TYPES = frozenset({"Principle", "Belief", "Value", "Rule", "Domain", "Patte
 ITEM_KEYS = frozenset({"item", "owner", "node_type", "statement", "scope", "evidence_ids", "limits"})
 TYPE_KEYS = {"Pattern": frozenset({"case_ids"}), "Domain": frozenset({"domain_id", "public_label"})}
 ACTIONS = {"yes": "ratify", "no": "reject", "fix": "defer"}
+# A v1 packet names no scope kind. Its row says so, and a manifest pin decides from there.
+V1_PACKET_SCOPE = {"scope_kind": "unresolved", "resolved_by": "ratify_v1_packet"}
 FINAL_STATES = {"yes": "ratified", "no": "rejected", "fix": "deferred"}
 MECHANISM = "ratification_packet_proposal"
 MAX_ITEMS = 100
@@ -977,7 +979,9 @@ def _perform(store: ImprintStore, plan: ItemPlan, step: str, operator_id: str) -
             event_id = conn.execute("SELECT created_event_id FROM nodes WHERE node_id=?",
                                     (plan.node_id,)).fetchone()[0]
     elif step == "ratify":
-        event_id = store.ratify_node(plan.node_id, ratifier=operator_id, note=plan.review_text)
+        # A Domain is never retrieved, so it carries no scope.
+        scope = None if plan.item["node_type"] == "Domain" else V1_PACKET_SCOPE
+        event_id = store.ratify_node(plan.node_id, ratifier=operator_id, note=plan.review_text, scope=scope)
     elif step == "reject":
         event_id = store.reject_node(plan.node_id, rejector=operator_id, reason=plan.review_text)
     else:
@@ -1046,6 +1050,8 @@ def apply_packet(*, root: Path, packet_path: Path, out_root: Path, reader_path: 
     items: list[dict[str, Any]] = []
     error, status = None, None
     try:
+        # This path never opened the store through ``initialize``, and now it writes a scope row.
+        store.initialize()
         for plan in plans:
             for step in plan.steps:
                 performed.append(_perform(store, plan, step, operator_id))

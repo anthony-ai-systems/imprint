@@ -30,10 +30,15 @@ def node(node_id, node_type, payload, status, authority):
     }
 
 
+class NoRows(tuple):
+    def fetchone(self):
+        return None
+
+
 class EmptyConnection:
     def execute(self, statement):
-        assert "source_receipts" in statement
-        return ()
+        assert "source_receipts" in statement or "sqlite_master" in statement
+        return NoRows()
 
 
 class SemanticStore:

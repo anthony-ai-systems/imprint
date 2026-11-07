@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from typing import Sequence
 
 from imprint.ontology.direction import PARTITION_BY_TYPE
 from imprint.ontology.world import DECLARED_BUSINESS_TYPES, OBSERVED_BUSINESS_TYPES
 from imprint.store import ImprintStore
+from imprint.store.scope import read_scope_rows
 
 from .models import (
     BUSINESS_DECLARED_PARTITION,
@@ -15,6 +17,7 @@ from .models import (
     DIRECTION_COMPARISON_PARTITION,
     JUDGMENT_PARTITION,
     SELF_MODEL_PARTITION,
+    RecordScope,
     RetrievalRecord,
 )
 
@@ -112,6 +115,16 @@ def _disclosure(status: str, authority: str) -> str:
     }.get(status, "authority_unclassified")
 
 
+def _record_scope(row: dict) -> RecordScope:
+    return RecordScope(
+        scope_kind=row["scope_kind"], resolved_by=row["resolved_by"],
+        client_id=row["client_id"], project_id=row["project_id"],
+        delivery=row["delivery"], delivery_rank=row["delivery_rank"], subject=row["subject"],
+        speaker=row["speaker"], endorser=row["endorser"],
+        overrides=tuple(json.loads(row["overrides_json"])),
+    )
+
+
 class StoreRetrievalSource:
     """Expose only provenance-complete, current canonical records.
 
@@ -131,6 +144,7 @@ class StoreRetrievalSource:
         evidence_nodes = {item["node_id"] for item in nodes if item["node_type"] == "Evidence"}
         with self.store.connect() as conn:
             source_receipts = {row[0] for row in conn.execute("SELECT source_id FROM source_receipts")}
+            scopes = {row["node_id"]: _record_scope(row) for row in read_scope_rows(conn)}
         case_nodes = {item["node_id"] for item in nodes if item["node_type"] == "Case"}
         case_summary_by_id = {
             item["node_id"]: item["payload"]["description"]
@@ -203,5 +217,6 @@ class StoreRetrievalSource:
                 disclosure=_disclosure(status, authority),
                 judgment_statement=_judgment_statement(node["node_type"], payload),
                 capture_mechanism=provenance.get("mechanism") if status == "captured" and isinstance(provenance, dict) else None,
+                scope=scopes.get(node["node_id"]),
             ))
         return records
