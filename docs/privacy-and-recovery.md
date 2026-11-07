@@ -178,8 +178,8 @@ Purge deletes a record's scope row and takes its id out of every other record's
 `overrides`. A build from before the `record_scope` table does neither if you roll
 back to it. The purge still runs and leaves the row, with its client, project,
 subject and speaker. It reports `purged_with_residue` only when the purge scope is
-that record's own id. A purge by session, source or operator, or by a linked id such as
-the Case, reports `purged` with a clear scan. No command removes that row
+that record's own id. A purge by session, source or operator, or by a linked id such
+as the Case, reports `purged` with a clear scan. No command removes that row
 afterwards, and the export leaves it out.
 
 A `held` record's other candidate ids stay on its capture event until that record

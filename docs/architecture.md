@@ -43,13 +43,13 @@ adapters, never required canonical stores.
 
 ## Record scope
 
-The `record_scope` table holds at most one row per retrievable record: whose it
-is (`client`, `central`, `core_owner`, `unresolved` or `held`), an optional client
-and project, a delivery tag and rank, a subject, and any `overrides`. The row is keyed by
-node, so a new version keeps it. A record with no row is legacy. A client or
+The `record_scope` table holds at most one row per retrievable record: whose it is
+(`client`, `central`, `core_owner`, `unresolved` or `held`), an optional client and
+project, a delivery tag and rank, a subject, and any `overrides`. The row is keyed
+by node, so a new version keeps it. A record with no row is legacy. A client or
 project id has one shape: lower case letters and digits joined by single hyphens,
-such as `north-wind`. Python refuses any other by name, and so does the table,
-which also refuses `overrides` that are not a JSON list. The delivery tag, rank and
+such as `north-wind`. Python refuses any other by name, and so does the table, which
+also refuses `overrides` that are not a JSON list. The delivery tag, rank and
 subject are checked in Python only, so their rules can still change. This release
 only carries scope: no delivery route reads a row, and with no row and no scope
 extension the output matches the previous release byte for byte. The store and
@@ -59,9 +59,9 @@ snapshot id moves at the first row, and then whenever a row changes.
 - **Capture.** An envelope may carry the `org.imprint.scope` extension, as
   `{schema_version, payload}`. The compiler writes the row in the capture's own
   transaction and quarantines a spool whose stamp is invalid. A stamp cannot say
-  `central` and cannot carry `overrides` or a `subject`. Nothing adds the extension yet, so the
-  Stop hook, `imprint capture` and a `CapturePipeline.capture` caller that passes
-  no `extensions` all write legacy records.
+  `central` and cannot carry `overrides` or a `subject`. Nothing adds the extension
+  yet, so the Stop hook, `imprint capture` and a `CapturePipeline.capture` caller
+  that passes no `extensions` all write legacy records.
 - **A `held` stamp** can list `candidate_client_ids`. The list stays on the event,
   where `imprint history` shows it in `event_payload`, and has no column.
 - **`said_in`, `channel` and `carrier`** can go on any stamp: where the words were
@@ -91,16 +91,16 @@ snapshot id moves at the first row, and then whenever a row changes.
   them. `imprint ratify apply` stamps a new node `unresolved`, except a Domain.
   `import_legacy_principles` stamps `unresolved` unless given a scope.
   `imprint ingest keep` writes no row yet.
-- **Supersession.** A successor keeps its own row. With none, it takes a copy of
-  the target's row in the same event, unless the target is central: a central row
-  is never copied. The copy says `resolved_by: inherited`, and its event names the
-  record it came from as `target_id`. A successor may close a record only if it reaches the same
-  readers: a central record only by a central one, a client record only by one of
-  the same client, and a `core_owner` record only by a `core_owner` one. Every other pair
-  is refused, so one client's record cannot close another's and an unknown record
-  cannot close a central one. A record that is `unresolved`, `held` or has no row
-  has no settled readers yet, so any successor may close it. A client record adds
-  to a central one through `overrides` and never replaces it.
+- **Supersession.** A successor keeps its own row. With none, it takes a copy of the
+  target's row in the same event, unless the target is central: a central row is
+  never copied. The copy says `resolved_by: inherited`, and its event names the
+  record it came from as `target_id`. A successor may close a record only if it
+  reaches the same readers: a central record only by a central one, a client record
+  only by one of the same client, and a `core_owner` record only by a `core_owner`
+  one. Every other pair is refused, so one client's record cannot close another's
+  and an unknown record cannot close a central one. A record that is `unresolved`,
+  `held` or has no row has no settled readers yet, so any successor may close it. A
+  client record adds to a central one through `overrides` and never replaces it.
 - **Who writes `central`.** Nothing in this release does. `imprint scope set`, a
   capture stamp and the ontology flags all refuse it, and import accepts it only on
   a ratified record.
