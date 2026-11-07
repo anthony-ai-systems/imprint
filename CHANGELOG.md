@@ -4,6 +4,8 @@
 
 - Carry a scope on each record, with nothing reading it yet. A new `record_scope`
   table holds one row per retrievable record, and a record with none is legacy. A
+  row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and
+  `core_owner` marks a record about the operator's own systems. A
   capture can bring a row through the `org.imprint.scope` extension, `imprint scope
   set` changes one and appends a `scope_changed` event, and `imprint history` shows
   both. `ontology add-node`, `observation add` and `outcome add` take `--scope-kind`,

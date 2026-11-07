@@ -44,7 +44,7 @@ adapters, never required canonical stores.
 ## Record scope
 
 The `record_scope` table holds at most one row per retrievable record: whose it
-is (`client`, `central`, `system`, `unresolved` or `held`), an optional client
+is (`client`, `central`, `core_owner`, `unresolved` or `held`), an optional client
 and project, a delivery tag and rank, and any `overrides`. The row is keyed by
 node, so a new version keeps it. A record with no row is legacy. A client or
 project id has one shape: lower case letters and digits joined by single hyphens,
@@ -81,7 +81,7 @@ snapshot id moves at the first row, and then whenever a row changes.
   is never copied. The copy says `resolved_by: inherited`, and its event names the
   record it came from as `target_id`. A successor may close a record only if it reaches the same
   readers: a central record only by a central one, a client record only by one of
-  the same client, and a `system` record only by a `system` one. Every other pair
+  the same client, and a `core_owner` record only by a `core_owner` one. Every other pair
   is refused, so one client's record cannot close another's and an unknown record
   cannot close a central one. A record that is `unresolved`, `held` or has no row
   has no settled readers yet, so any successor may close it. A client record adds
@@ -94,7 +94,7 @@ snapshot id moves at the first row, and then whenever a row changes.
 - **Delivery contract, for the filter a later release adds.** No row, `unresolved`
   and `held` are unknown, and an unknown record is never treated as `central`. A
   client door receives only `central` records and `client` records with its own
-  exact client id. `system` marks a record about the operator's own systems and
+  exact client id. `core_owner` marks a record about the operator's own systems and
   tools rather than any client's work, so no client door receives it: it reaches
   only doors that are not a client's, and what else those doors receive is not
   settled here. The filter is an allow-list, never a list of what to drop: a record

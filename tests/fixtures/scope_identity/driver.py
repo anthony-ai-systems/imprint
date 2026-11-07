@@ -293,7 +293,7 @@ class Replay:
         kinds = (
             ("client", "a-client", "bfcm-2026", "specific", 1),
             ("central", None, None, None, None),
-            ("system", None, None, None, None),
+            ("core_owner", None, None, None, None),
             ("held", None, None, None, None),
             ("unresolved", None, None, None, None),
             ("client", "other-client", None, "general", None),

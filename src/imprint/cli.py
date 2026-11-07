@@ -424,7 +424,7 @@ _SCOPE_CLEARS = {
 
 
 def _add_scope_flags(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--scope-kind", help="client, system, unresolved or held")
+    command.add_argument("--scope-kind", help="client, core_owner, unresolved or held")
     command.add_argument("--scope-client")
     command.add_argument("--scope-project")
 
@@ -602,7 +602,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope_subs = scope.add_subparsers(dest="scope_action", required=True)
     scope_set = scope_subs.add_parser("set")
     scope_set.add_argument("node_id")
-    scope_set.add_argument("--kind", help="client, system, unresolved or held")
+    scope_set.add_argument("--kind", help="client, core_owner, unresolved or held")
     scope_set.add_argument("--client")
     scope_set.add_argument("--project")
     scope_set.add_argument("--delivery", help="general or specific")

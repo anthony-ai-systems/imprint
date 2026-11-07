@@ -187,11 +187,12 @@ def test_the_capture_pipeline_passes_extensions_through(tmp_path, capture_envelo
     {"speaker": "a-team-member"},
     {"overrides": ["urn:imprint:rule:00000000-0000-4000-8000-000000000000"]},
     {"scope_kind": "client", "client_id": None},
-    {"scope_kind": "system"},
+    {"scope_kind": "core_owner"},
     {"scope_kind": "unresolved", "client_id": None, "delivery": "general"},
-    {"scope_kind": "system", "client_id": None, "delivery": "general"},
+    {"scope_kind": "core_owner", "client_id": None, "delivery": "general"},
     {"scope_kind": "held", "client_id": None, "delivery": "specific"},
     {"scope_kind": "shared", "client_id": None},
+    {"scope_kind": "system", "client_id": None},
     {"resolved_by": None},
     {"delivery_rank": True},
     {"delivery_rank": "1"},
@@ -311,7 +312,7 @@ def test_scope_set_moves_only_what_it_names(tmp_path, capsys, capture_envelope):
                  "--clear", "project", "--by", ACTOR]) == 0
     row = row_of(store, verdict_id)
     assert (row["delivery"], row["delivery_rank"], row["project_id"]) == (None, None, None)
-    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system", "--by", ACTOR]) == 0
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "core_owner", "--by", ACTOR]) == 0
     assert row_of(store, verdict_id)["client_id"] is None
     capsys.readouterr()
 
@@ -339,9 +340,10 @@ def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_env
     ({}, "must name"),
     ({"scope_kind": "central"}, "only at ratification"),
     ({"scope_kind": "shared"}, "unknown scope kind"),
+    ({"scope_kind": "system"}, "unknown scope kind"),
     ({"scope_kind": "client"}, "client id"),
-    ({"scope_kind": "system", "client_id": "a-client"}, "client id"),
-    ({"scope_kind": "system", "delivery": "general"}, "delivery tag"),
+    ({"scope_kind": "core_owner", "client_id": "a-client"}, "client id"),
+    ({"scope_kind": "core_owner", "delivery": "general"}, "delivery tag"),
     ({"scope_kind": "unresolved", "delivery": "specific"}, "delivery tag"),
     ({"scope_kind": "held", "delivery": "general"}, "delivery tag"),
     ({"scope_kind": "client", "client_id": "a-client", "delivery": "broad"}, "unknown delivery"),
@@ -356,7 +358,7 @@ def test_scope_set_records_overrides_only_on_its_own_event(tmp_path, capture_env
     ({"scope_kind": "client", "client_id": " north-wind "}, "client_id must be lower case"),
     ({"scope_kind": "client", "client_id": "north--wind"}, "client_id must be lower case"),
     ({"scope_kind": "client", "client_id": "a-client", "project_id": "A Project"}, "project_id must be lower case"),
-    ({"scope_kind": "system", "project_id": "-a-project"}, "project_id must be lower case"),
+    ({"scope_kind": "core_owner", "project_id": "-a-project"}, "project_id must be lower case"),
 ], ids=repr)
 def test_scope_set_refusals_change_nothing(tmp_path, capture_envelope, changes, message):
     store = new_store(tmp_path)
@@ -380,7 +382,7 @@ def test_a_central_row_keeps_its_kind_but_can_be_retagged(tmp_path, capture_enve
     store = new_store(tmp_path)
     store.apply_capture(capture_envelope)
     target = central(store, capture_envelope)
-    for kind in ("client", "system", "held", "unresolved"):
+    for kind in ("client", "core_owner", "held", "unresolved"):
         with pytest.raises(ValidationError, match="keeps its kind"):
             store.set_record_scope(target, actor_id=ACTOR, changes={"scope_kind": kind, "client_id": None})
     store.set_record_scope(target, actor_id=ACTOR, changes={"delivery": "specific"})
@@ -398,7 +400,7 @@ def test_scope_set_refuses_an_override_that_is_not_a_current_central_record(tmp_
     store.tombstone_node(closed, reason="Withdrawn.")
     ratified = rule(store, envelope, "Ratified, with a row that is not central.")
     store.ratify_node(ratified, ratifier=ACTOR)
-    store.set_record_scope(ratified, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(ratified, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     unratified = rule(store, envelope, "Central row, never ratified.")
     central_row(store, unratified, "gone")
     for override in (plain, closed, verdict_id, ratified, unratified):
@@ -414,7 +416,7 @@ def test_scope_set_refuses_a_closed_record_and_an_unknown_one(tmp_path, capture_
     store.tombstone_node(verdict_id, reason="Withdrawn.")
     for node_id in (verdict_id, "urn:imprint:rule:00000000-0000-4000-8000-000000000000"):
         with pytest.raises(ValidationError, match="missing or not current"):
-            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
 
 
 def test_scope_set_refuses_a_record_that_is_never_retrieved(tmp_path, capture_envelope):
@@ -422,7 +424,7 @@ def test_scope_set_refuses_a_record_that_is_never_retrieved(tmp_path, capture_en
     store.apply_capture(capture_envelope)
     for node_id in (capture_envelope["case"]["case_id"], capture_envelope["evidence"][0]["evidence_id"]):
         with pytest.raises(ValidationError, match="not retrievable"):
-            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+            store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
 
 
 def test_scope_set_keeps_a_tag_to_the_three_taggable_types(tmp_path, capture_envelope):
@@ -446,7 +448,7 @@ def test_scope_set_keeps_a_client_off_a_record_with_a_domain_id(tmp_path, captur
     node_id = rule(store, capture_envelope, payload={"domain_id": "research"})
     with pytest.raises(ValidationError, match="domain_id"):
         store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "client", "client_id": "a-client"})
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
 
 
 def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
@@ -455,13 +457,28 @@ def test_scope_set_cli_says_what_it_refuses(tmp_path, capsys, capture_envelope):
     verdict_id = capture_envelope["verdict"]["verdict_id"]
     assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "central", "--by", ACTOR]) == 2
     assert "only at ratification" in json.loads(capsys.readouterr().out)["error"]
-    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system",
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "core_owner",
                  "--delivery", "specific", "--clear", "delivery", "--by", ACTOR]) == 2
     assert "both set and clear" in json.loads(capsys.readouterr().out)["error"]
-    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system",
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "core_owner",
                  "--rank", str(2**63), "--by", ACTOR]) == 2
     assert "rank" in json.loads(capsys.readouterr().out)["error"]
     assert rows_of(store) == []
+
+
+def test_core_owner_is_a_kind_and_system_is_refused_by_name(tmp_path, capsys, capture_envelope):
+    """The kind was renamed before any install, so ``system`` is an unknown kind on every surface."""
+    config, store = configured(tmp_path, capture_envelope["operator_id"])
+    verdict_id = capture_envelope["verdict"]["verdict_id"]
+    with pytest.raises(ValidationError, match="unknown scope kind"):
+        store.apply_capture(stamped(capture_envelope, scope_kind="system", client_id=None))
+    assert rows_of(store) == []
+    store.apply_capture(stamped(capture_envelope, scope_kind="core_owner", client_id=None, delivery="specific"))
+    assert (row_of(store, verdict_id)["scope_kind"], row_of(store, verdict_id)["delivery"]) == (
+        "core_owner", "specific")
+    assert main(["--config", str(config), "scope", "set", verdict_id, "--kind", "system", "--by", ACTOR]) == 2
+    assert "unknown scope kind" in json.loads(capsys.readouterr().out)["error"]
+    assert row_of(store, verdict_id)["scope_kind"] == "core_owner"
 
 
 # Purge ---------------------------------------------------------------------
@@ -531,7 +548,7 @@ def _load_review_helpers():
 def _typed_proposal(tmp_path, envelope):
     store, operator_id, _, contract = _load_review_helpers()._setup(tmp_path, envelope)
     node_id = contract["node_id"]
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     return store, operator_id, contract, node_id
 
 
@@ -555,7 +572,7 @@ def test_ratifying_in_place_keeps_the_row(tmp_path, capture_envelope):
     store = new_store(tmp_path)
     store.apply_capture(capture_envelope)
     node_id = rule(store, capture_envelope)
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     before = row_of(store, node_id)
     store.ratify_node(node_id, ratifier=ACTOR)
     assert row_of(store, node_id) == before
@@ -585,7 +602,7 @@ def test_deferring_keeps_the_row(tmp_path, capture_envelope):
     store = new_store(tmp_path)
     store.apply_capture(capture_envelope)
     node_id = rule(store, capture_envelope)
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     before = row_of(store, node_id)
     store.defer_node(node_id, reviewer=ACTOR, reason="Needs a second case.")
     assert row_of(store, node_id) == before
@@ -728,16 +745,16 @@ REFUSED_SUPERSESSIONS = [
     ("central", "client:a-client", "only a central record"),
     ("central", "unresolved", "only a central record"),
     ("central", "held", "only a central record"),
-    ("central", "system", "only a central record"),
+    ("central", "core_owner", "only a central record"),
     ("client:a-client", "client:b-client", "only a record of the same client"),
     ("client:a-client", "unresolved", "only a record of the same client"),
     ("client:a-client", "held", "only a record of the same client"),
-    ("client:a-client", "system", "only a record of the same client"),
+    ("client:a-client", "core_owner", "only a record of the same client"),
     ("client:a-client", "central", "only a record of the same client"),
-    ("system", "client:a-client", "only a system record"),
-    ("system", "unresolved", "only a system record"),
-    ("system", "held", "only a system record"),
-    ("system", "central", "only a system record"),
+    ("core_owner", "client:a-client", "only a core_owner record"),
+    ("core_owner", "unresolved", "only a core_owner record"),
+    ("core_owner", "held", "only a core_owner record"),
+    ("core_owner", "central", "only a core_owner record"),
 ]
 
 
@@ -760,9 +777,9 @@ def test_a_successor_that_reaches_other_readers_cannot_close_a_scoped_record(
 @pytest.mark.parametrize("target_scope, source_scope", [
     ("central", "central"),
     ("client:a-client", "client:a-client"),
-    ("system", "system"),
+    ("core_owner", "core_owner"),
     ("unresolved", "client:a-client"),
-    ("unresolved", "system"),
+    ("unresolved", "core_owner"),
     ("held", "client:a-client"),
     ("held", "unresolved"),
     ("none", "client:a-client"),
@@ -851,10 +868,10 @@ def test_the_snapshot_id_holds_on_an_empty_table_and_moves_at_the_first_stamp(tm
     assert set(store.snapshot()) == {"store_schema_version", "ontology_schema_version", "nodes", "edges"}
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM record_scope").fetchone()[0] == 0
-    store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     stamped_id = _snapshot_id(store)
     assert stamped_id != empty
-    assert [row["scope_kind"] for row in store.snapshot()["record_scope"]] == ["system"]
+    assert [row["scope_kind"] for row in store.snapshot()["record_scope"]] == ["core_owner"]
     store.set_record_scope(capture_envelope["verdict"]["verdict_id"], actor_id=ACTOR, changes={"scope_kind": "held"})
     assert _snapshot_id(store) != stamped_id
 
@@ -921,7 +938,7 @@ def test_the_first_initialize_adds_the_table_to_an_older_store(tmp_path, capture
 def _write_directly(store: ImprintStore, **fields) -> None:
     """Past every Python check, as a direct writer would."""
     row = {
-        "node_id": new_urn("rule"), "scope_kind": "system", "client_id": None, "project_id": None,
+        "node_id": new_urn("rule"), "scope_kind": "core_owner", "client_id": None, "project_id": None,
         "delivery": None, "delivery_rank": None, "speaker": None, "endorser": None, "overrides_json": "[]",
         "resolved_by": "test", "event_id": "gone", "stamped_at": VALID_FROM, **fields,
     }
@@ -932,6 +949,7 @@ def _write_directly(store: ImprintStore, **fields) -> None:
 
 @pytest.mark.parametrize("fields", [
     {"scope_kind": "shared"},
+    {"scope_kind": "system"},
     {"scope_kind": "client"},
     {"scope_kind": "held", "client_id": "a-client"},
     {"scope_kind": "client", "client_id": "North-Wind"},
@@ -959,7 +977,7 @@ def test_a_row_the_table_refuses_cannot_reach_retrieval(tmp_path, capture_envelo
     store = new_store(tmp_path)
     store.apply_capture(capture_envelope)
     node_id = rule(store, capture_envelope)
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     with store.connect() as conn, pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE record_scope SET overrides_json='not json' WHERE node_id=?", (node_id,))
     assert StoreRetrievalSource(store).retrieval_candidates("x")
@@ -990,7 +1008,7 @@ def test_the_delivery_rules_live_in_python_alone(tmp_path, fields):
     """No doc says yet what a delivery route does with a tag or rank, so the table leaves them open."""
     from imprint.store.scope import _require_shape
 
-    value = {"scope_kind": "system", "client_id": None, "project_id": None, "delivery": None,
+    value = {"scope_kind": "core_owner", "client_id": None, "project_id": None, "delivery": None,
              "delivery_rank": None, **fields}
     with pytest.raises(ValidationError):
         _require_shape(value["scope_kind"], value["client_id"], value["project_id"], value["delivery"],
@@ -1158,7 +1176,7 @@ def test_ontology_scope_flags_need_a_kind_and_a_retrievable_type(tmp_path, capsy
     assert "need --scope-kind" in json.loads(capsys.readouterr().out)["error"]
     domain = _principle_contract(capture_envelope["operator_id"], evidence_id, "Domain")
     assert main(["--config", str(config), "ontology", "add-node", "--input", _write_input(tmp_path, domain),
-                 "--valid-from", VALID_FROM, "--scope-kind", "system"]) == 2
+                 "--valid-from", VALID_FROM, "--scope-kind", "core_owner"]) == 2
     assert "not retrievable" in json.loads(capsys.readouterr().out)["error"]
 
 
@@ -1330,7 +1348,7 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     store.apply_capture(capture_envelope)
     node_id = rule(store, capture_envelope, payload={"domain_id": "research"})
     store.ratify_node(node_id, ratifier=ACTOR)
-    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "system"})
+    store.set_record_scope(node_id, actor_id=ACTOR, changes={"scope_kind": "core_owner"})
     document = export_jsonld(store)
     row = {**document["imprint:recordScope"][0], "scope_kind": kind, "client_id": client_id}
     with pytest.raises(ValidationError, match="domain_id"):
@@ -1345,6 +1363,8 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, doc["imprint:recordScope"] * 2), "repeated"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "node_id": "urn:imprint:rule:unknown"}]), "unknown"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": "shared"}]), "unknown scope kind"),
+    (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "scope_kind": "system", "client_id": None}]),
+     "unknown scope kind"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": None}]), "client id"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": "{"}]), "overrides"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "overrides_json": '{"a":1}'}]), "overrides"),
@@ -1355,7 +1375,7 @@ def test_import_refuses_a_client_or_central_row_on_a_record_with_a_domain_id(tmp
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "delivery_rank": 2**63}]), "rank"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "client_id": "Example-Client"}]), "client_id must"),
     (lambda doc: _reset_rows(doc, [{**doc["imprint:recordScope"][0], "project_id": "a project"}]), "project_id must"),
-], ids=range(17))
+], ids=range(18))
 def test_import_refuses_a_damaged_scope_block(tmp_path, capture_envelope, damage, message):
     _, document = _exported(tmp_path, capture_envelope)
     with pytest.raises(ValidationError, match=message):

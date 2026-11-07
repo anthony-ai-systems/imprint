@@ -80,7 +80,7 @@ def test_rows_on_every_record_change_no_hook_byte_and_no_jev_request():
 
     rows = json.loads(stamped["snapshot"])["record_scope"]
     assert len(rows) == 15  # every record the seed wrote; the later steps add three with no row
-    assert {row["scope_kind"] for row in rows} == {"client", "central", "system", "held", "unresolved"}
+    assert {row["scope_kind"] for row in rows} == {"client", "central", "core_owner", "held", "unresolved"}
     assert "record_scope" not in json.loads(plain["snapshot"])
     assert len(json.loads(plain["jev_request_bodies"])) == 6
     assert len(handed(plain)) == 22

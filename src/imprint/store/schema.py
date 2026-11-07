@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS purge_receipts (
 -- tag and rank are checked in store/scope.py alone, so they can still change.
 CREATE TABLE IF NOT EXISTS record_scope (
   node_id TEXT PRIMARY KEY,
-  scope_kind TEXT NOT NULL CHECK(scope_kind IN ('client','central','system','unresolved','held')),
+  scope_kind TEXT NOT NULL CHECK(scope_kind IN ('client','central','core_owner','unresolved','held')),
   client_id TEXT CHECK(client_id IS NULL OR (
     client_id <> '' AND client_id NOT GLOB '*[^a-z0-9-]*'
     AND client_id NOT GLOB '-*' AND client_id NOT GLOB '*-' AND client_id NOT GLOB '*--*')),

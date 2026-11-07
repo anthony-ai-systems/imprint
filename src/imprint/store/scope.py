@@ -17,7 +17,7 @@ from imprint.errors import ValidationError
 
 SCOPE_EXTENSION = "org.imprint.scope"
 SCOPE_EXTENSION_VERSION = "1.0.0"
-SCOPE_KINDS = frozenset({"client", "central", "system", "unresolved", "held"})
+SCOPE_KINDS = frozenset({"client", "central", "core_owner", "unresolved", "held"})
 # Delivery tags and ranks are checked here only, not by the table, so they can
 # still change: no doc yet says what a delivery route does with them.
 DELIVERY_TAGS = frozenset({"general", "specific"})
@@ -72,7 +72,7 @@ def _require_shape(kind: Any, client_id: Any, project_id: Any, delivery: Any, ra
     if delivery is not None:
         if not isinstance(delivery, str) or delivery not in DELIVERY_TAGS:
             raise ValidationError("unknown delivery tag")
-        if not (kind in {"client", "central"} or (kind == "system" and delivery == "specific")):
+        if not (kind in {"client", "central"} or (kind == "core_owner" and delivery == "specific")):
             raise ValidationError("this scope kind cannot carry that delivery tag")
     if rank is not None and (
         isinstance(rank, bool) or not isinstance(rank, int) or not -(2**63) <= rank < 2**63

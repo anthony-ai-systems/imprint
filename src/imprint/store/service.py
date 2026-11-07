@@ -799,9 +799,9 @@ class ImprintStore:
         Supersession closes a record for every thread, so a successor may close a
         record whose readers are known only when it reaches the same readers: a
         central record only by a central one, a client record only by one of the
-        same client, a system record only by a system one. Any other pair would
-        take the rule away from readers who had it. A client rule that means to win
-        over a central one uses ``overrides``. A central row is written only at
+        same client, a ``core_owner`` record only by a ``core_owner`` one. Any other
+        pair would take the rule away from readers who had it. A client rule that
+        means to win over a central one uses ``overrides``. A central row is written only at
         ratification, so it is never handed on, and a central record cannot be
         closed by one with no row. An ``unresolved`` or ``held`` record has no
         settled readers yet, so any successor may close it.
@@ -820,8 +820,8 @@ class ImprintStore:
             return {**target, "resolved_by": RESOLVED_INHERITED}
         if kind == "client" and (source["scope_kind"] != "client" or source["client_id"] != target["client_id"]):
             raise ValidationError("only a record of the same client can supersede a client record")
-        if kind == "system" and source["scope_kind"] != "system":
-            raise ValidationError("only a system record can supersede a system record")
+        if kind == "core_owner" and source["scope_kind"] != "core_owner":
+            raise ValidationError("only a core_owner record can supersede a core_owner record")
         return None
 
     def append_derived_node(
