@@ -74,7 +74,8 @@ snapshot id moves at the first row, and then whenever a row changes.
 - **`imprint scope set`** appends a `scope_changed` event and updates the row in
   one transaction, moving only what it names, and `resolved_by` becomes `explicit`.
   It is the only way out of `held`. It takes `--override` only for a current central
-  record, and `scope_changed` is the only event that carries overrides. Because a
+  record, and `scope_changed` is the only event that carries overrides, so purging
+  that central record deletes the event and leaves the row standing. Because a
   row sits beside the node's versions, a change adds no version. `imprint history`
   lists the event and shows the current row as `scope`, or no `scope` when there is
   no row.

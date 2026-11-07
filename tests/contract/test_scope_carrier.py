@@ -781,6 +781,37 @@ def test_a_purge_with_a_central_id_in_an_override_list_leaves_no_residue(tmp_pat
     assert doomed.encode() not in store.path.read_bytes()
 
 
+def test_a_central_purge_takes_the_overriding_scope_event_and_the_row_stands(tmp_path, capture_envelope):
+    store = new_store(tmp_path)
+    envelope = stamped(capture_envelope)
+    store.apply_capture(envelope)
+    verdict_id = envelope["verdict"]["verdict_id"]
+    doomed = central(store, envelope, "A central rule that goes.")
+
+    def scope_events() -> list[str]:
+        with store.connect() as conn:
+            return [row[0] for row in conn.execute(
+                "SELECT event_id FROM events WHERE event_type='scope_changed' AND payload_json LIKE ?",
+                (f"%{verdict_id}%",),
+            )]
+
+    store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"subject": "marketing.video"})
+    overriding = store.set_record_scope(verdict_id, actor_id=ACTOR, changes={"overrides": [doomed]})
+    before = row_of(store, verdict_id)
+    assert len(scope_events()) == 2 and before["event_id"] == overriding
+    result = hard_purge(store, tmp_path, doomed, confirmation=doomed)
+    assert result["status"] == "purged", result
+    after = row_of(store, verdict_id)
+    # The documented cost: the step that named the purged id goes, the row stands.
+    assert (after["scope_kind"], after["client_id"], after["subject"], after["resolved_by"]) == (
+        before["scope_kind"], before["client_id"], "marketing.video", "explicit",
+    )
+    assert json.loads(after["overrides_json"]) == []
+    remaining = scope_events()
+    assert len(remaining) == 1 and overriding not in remaining
+    assert after["event_id"] == overriding
+
+
 # Table 7: a new version keeps the row --------------------------------------
 
 

@@ -182,6 +182,11 @@ that record's own id. A purge by session, source or operator, or by a linked id 
 as the Case, reports `purged` with a clear scan. No command removes that row
 afterwards, and the export leaves it out.
 
+Purging a central record also deletes the `scope_changed` events of the records
+whose `overrides` named it, because those events name the purged id. Each such
+record keeps its row, with its kind, client, project and subject. Its history
+loses that step, and its row's `event_id` names an event that no longer exists.
+
 A `held` record's other candidate ids stay on its capture event until that record
 is purged, even after `imprint scope set` releases it.
 
