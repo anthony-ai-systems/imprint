@@ -145,6 +145,7 @@ imprint domain freeze research --by OPERATOR_ID
 imprint transition contradict NODE_A NODE_B --reason "incompatible" --evidence EVIDENCE_ID --by OPERATOR_ID
 imprint transition supersede REPLACEMENT_NODE PRIOR_NODE --reason "replaced" --evidence EVIDENCE_ID --by OPERATOR_ID
 imprint verdict add-reason VERDICT_ID --reason "stated reason" --by OPERATOR_ID
+imprint scope set NODE_ID --kind client --client CLIENT_ID --by OPERATOR_ID
 imprint ingest scan --input candidates.json
 imprint ingest keep ITEM_ID --why "why this belongs in the research floor"
 imprint export --format jsonld --output imprint-export.jsonld
@@ -171,6 +172,9 @@ Imported material is quarantined until `keep` or `kill`. Review and deletion are
 explicit operator actions. Run `--help` on any command for its closed arguments.
 `supersede` is directional: the first node is the replacement and the second is
 the prior head that leaves current retrieval. Both versions remain in history.
+A record can carry one scope row, which `imprint scope set` changes and `imprint
+history` shows. No delivery route reads it yet, so a row changes nothing a thread
+receives. See [the architecture notes](docs/architecture.md#record-scope).
 Proposal derivation creates reviewable candidates only; it never grants authority.
 Typed ontology inputs use ontology schema `3.1.0`; they fail closed on unknown
 fields, invalid authority, cross-operator relationships, and missing evidence.

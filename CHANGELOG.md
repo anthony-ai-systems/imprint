@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Carry a scope on each record, with nothing reading it yet. A new `record_scope`
+  table holds one row per retrievable record, and a record with none is legacy. A
+  row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and
+  `core_owner` marks a record about the operator's own systems. A capture can bring
+  a row through the `org.imprint.scope` extension, `imprint scope set` changes one
+  and appends a `scope_changed` event, and `imprint history` shows both. `imprint
+  scope set --subject` gives a row of any kind a subject, lower case words joined by
+  single dots such as `marketing.video`, and `--clear subject` removes it. A client
+  row takes `marketing`, `marketing.<tail>` or no subject. No capture stamp carries
+  one. A stamp may carry `said_in`, `channel` and `carrier`, each null or non-empty
+  text, which stay on the capture event and have no column, so a later build's stamp
+  is not refused after a rollback. `ontology add-node`, `observation add` and
+  `outcome add` take `--scope-kind`, `--scope-client` and `--scope-project`.
+  `imprint ratify apply` now stamps each new record except a Domain `unresolved`, so
+  its first run writes the first row and moves the snapshot id once. Delivered text
+  does not change. Rows cross JSON-LD under a new `imprint:recordScope` key, come
+  with a backup file, and go with a purge. A client or project id is lower case
+  letters and digits joined by single hyphens, and anything else is refused. With no
+  rows and no extension, output matches the previous release byte for byte, the
+  store and record schema versions stay 3.0.0, and an older build still opens the
+  store.
 - Add a client-work reader and carrier queue for Codex prompts, off by default.
   `imprint carrier codex` reads one prompt event on stdin, prints nothing and always
   exits 0. It does nothing until `org.imprint.client_carrier.queue` names a queue

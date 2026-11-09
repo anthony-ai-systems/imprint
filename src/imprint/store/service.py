@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from imprint.constants import ONTOLOGY_SCHEMA_VERSION, PRODUCT_VERSION, STORE_SCHEMA_VERSION
 from imprint.errors import ConflictError, ValidationError
@@ -20,6 +20,19 @@ from imprint.ontology.references import validate_payload_references
 from imprint.ontology.schema import canonical_bytes, make_urn, payload_sha256, require_urn
 from imprint.permissions import secure_directory, secure_file
 from .schema import SCHEMA_SQL
+from .scope import (
+    RESOLVED_EXPLICIT,
+    RESOLVED_INHERITED,
+    capture_stamp,
+    merge_change,
+    read_scope_row,
+    read_scope_rows,
+    require_fits_node,
+    scope_view,
+    stamp_row,
+    validate_stamp,
+    write_scope_row,
+)
 
 
 DERIVED_NODE_TYPES = frozenset({
@@ -458,6 +471,7 @@ class ImprintStore:
                     if prior[0] == event_hash:
                         return "duplicate"
                     raise ConflictError("same input_event_id has different bytes")
+                stamp = capture_stamp(envelope["extensions"])
                 conn.execute(
                     "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
                     (event_id, "captured", envelope["operator_id"], now, envelope["captured_at"],
@@ -486,6 +500,9 @@ class ImprintStore:
                     self._insert_edge(conn, "chose_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
                 for alt_id in verdict.get("rejected_alternative_ids", []):
                     self._insert_edge(conn, "rejected_alternative", verdict["verdict_id"], alt_id, envelope, event_id, now)
+                if stamp is not None:
+                    # The row goes on the Verdict: its Case, Call and Evidence are not retrievable.
+                    write_scope_row(conn, stamp_row(verdict["verdict_id"], stamp, event_id=event_id, now=now))
                 conn.execute(
                     "INSERT INTO consumed_inputs VALUES(?,?,?,?)", (event_id, event_hash, now, source_path)
                 )
@@ -527,6 +544,17 @@ class ImprintStore:
              )).decode(), json.dumps([x["evidence_id"] for x in envelope["evidence"]]),
              envelope["captured_at"], None, now, None, event_id, None),
         )
+
+    @staticmethod
+    def _node_stamp(
+        scope: Mapping[str, Any] | None, node_type: str, payload: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Validate an optional stamp for one node, before anything is written."""
+        if scope is None:
+            return None
+        stamp = validate_stamp(scope)
+        require_fits_node(stamp, node_type, payload)
+        return stamp
 
     def current_nodes(self, types: Iterable[str] | None = None) -> list[dict[str, Any]]:
         params: list[Any] = []
@@ -703,7 +731,7 @@ class ImprintStore:
             conn.execute("BEGIN IMMEDIATE")
             evidence_ids = self._require_evidence(conn, evidence_ids)
             endpoints = conn.execute("""
-              SELECT n.node_id,n.node_type,n.operator_id,nv.version_id,nv.event_id
+              SELECT n.node_id,n.node_type,n.operator_id,nv.version_id,nv.event_id,nv.payload_json
               FROM nodes n JOIN node_versions nv USING(node_id)
               WHERE n.node_id IN (?,?) AND nv.system_to IS NULL
             """, (source_id, target_id)).fetchall()
@@ -717,6 +745,13 @@ class ImprintStore:
                 raise ValidationError("transition endpoints must belong to the same operator")
             if self.expected_operator_id is not None and operator_id != self.expected_operator_id:
                 raise ValidationError("transition operator does not match configured identity")
+            inherited = None
+            if relation == "supersedes":
+                inherited = self._inherited_scope(
+                    read_scope_row(conn, source_id), read_scope_row(conn, target_id),
+                    node_type=by_id[source_id]["node_type"],
+                    payload=json.loads(by_id[source_id]["payload_json"]),
+                )
             payload = {
                 "relation": relation, "source_id": source_id, "target_id": target_id,
                 "reason": reason.strip(), "evidence_ids": evidence_ids, "actor_id": actor_id,
@@ -748,7 +783,46 @@ class ImprintStore:
                     SELECT edge_id FROM edges WHERE (source_id=? OR target_id=?) AND edge_id<>?
                   ) AND system_to IS NULL
                 """, (now, target_id, target_id, edge_id))
+            if inherited is not None:
+                write_scope_row(conn, {
+                    **inherited, "node_id": source_id, "event_id": event_id, "stamped_at": now,
+                })
         return edge_id
+
+    @staticmethod
+    def _inherited_scope(
+        source: Mapping[str, Any] | None, target: Mapping[str, Any] | None, *,
+        node_type: str, payload: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        """The row a successor takes from the record it closes, if it has none.
+
+        Supersession closes a record for every thread, so a successor may close a
+        record whose readers are known only when it reaches the same readers: a
+        central record only by a central one, a client record only by one of the
+        same client, a ``core_owner`` record only by a ``core_owner`` one. Any other
+        pair would take the rule away from readers who had it. A client rule that
+        means to win over a central one uses ``overrides``. A central row is written
+        only at ratification, so it is never handed on, and a central record cannot
+        be closed by one with no row. An ``unresolved`` or ``held`` record has no
+        settled readers yet, so any successor may close it.
+
+        A copied row says ``inherited``, not the target's own ``resolved_by``: its
+        ``event_id`` is the supersession event, whose ``target_id`` names the record
+        the row came from.
+        """
+        if target is None:
+            return None
+        kind = target["scope_kind"]
+        if kind == "central" and (source is None or source["scope_kind"] != "central"):
+            raise ValidationError("only a central record can supersede a central record")
+        if source is None:
+            require_fits_node(target, node_type, payload)
+            return {**target, "resolved_by": RESOLVED_INHERITED}
+        if kind == "client" and (source["scope_kind"] != "client" or source["client_id"] != target["client_id"]):
+            raise ValidationError("only a record of the same client can supersede a client record")
+        if kind == "core_owner" and source["scope_kind"] != "core_owner":
+            raise ValidationError("only a core_owner record can supersede a core_owner record")
+        return None
 
     def append_derived_node(
         self,
@@ -763,6 +837,7 @@ class ImprintStore:
         proposed_by: str,
         model: str | None = None,
         prompt_recipe: str | None = None,
+        scope: Mapping[str, Any] | None = None,
     ) -> str:
         """Append an extracted or inferred object after deterministic validation."""
         if self.expected_operator_id is not None and operator_id != self.expected_operator_id:
@@ -786,6 +861,9 @@ class ImprintStore:
             raise ValidationError("valid_from must be an RFC3339 timestamp") from exc
         if parsed_valid_from.tzinfo is None:
             raise ValidationError("valid_from must include timezone")
+        # This path has no payload contract, so the stamp is what keeps a
+        # domain_id off a client record.
+        stamp = self._node_stamp(scope, node_type, payload)
         node_id = make_urn(node_type.lower())
         event_id = make_urn("event")
         now = utc_now()
@@ -822,10 +900,18 @@ class ImprintStore:
                  )).decode(), json.dumps(evidence_ids), valid_from, None,
                  now, None, event_id, None),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return node_id
 
-    def append_semantic_node(self, contract: dict[str, Any], *, valid_from: str) -> str:
-        """Persist one fully typed semantic contract through the canonical writer."""
+    def append_semantic_node(
+        self, contract: dict[str, Any], *, valid_from: str, scope: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Persist one fully typed semantic contract through the canonical writer.
+
+        ``scope`` never reaches the creation event, because import compares that
+        event with the version it created.
+        """
         value = validate_node_contract(contract)
         try:
             parsed_valid_from = datetime.fromisoformat(valid_from.replace("Z", "+00:00"))
@@ -841,6 +927,7 @@ class ImprintStore:
         if node_type == "DirectionScore":
             raise ValidationError("DirectionScore is an analytical comparison and cannot be persisted")
         payload = value["payload"]
+        stamp = self._node_stamp(scope, node_type, payload)
         provenance = value["provenance"]
         evidence_ids = provenance["evidence_ids"]
         event_id = make_urn("event")
@@ -924,6 +1011,8 @@ class ImprintStore:
                  )).decode(), json.dumps(evidence_ids), valid_from, None,
                  now, None, event_id, None),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return node_id
 
     def append_semantic_relation(self, contract: dict[str, Any], *, valid_from: str) -> str:
@@ -1132,8 +1221,14 @@ class ImprintStore:
             )
         return "applied"
 
-    def ratify_node(self, node_id: str, *, ratifier: str, note: str = "") -> str:
-        """Promote an inferred/extracted object through an explicit append-only event."""
+    def ratify_node(
+        self, node_id: str, *, ratifier: str, note: str = "",
+        scope: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Promote an inferred/extracted object through an explicit append-only event.
+
+        ``scope`` lands in this step's transaction, and a row already on the node stands.
+        """
         if not isinstance(ratifier, str) or not ratifier.strip():
             raise ValidationError("ratifier identity is required")
         now = utc_now()
@@ -1159,6 +1254,7 @@ class ImprintStore:
                 self._require_configured_operator(current["operator_id"])
                 if ratifier != current["operator_id"]:
                     raise ValidationError("typed semantic authority may be ratified only by its operator")
+            stamp = self._node_stamp(scope, current["node_type"], json.loads(current["payload_json"]))
             next_payload_json = current["payload_json"]
             next_payload_sha256 = current["payload_sha256"]
             if current["node_type"] in {"SelfModelAssertion", "InterventionRule"}:
@@ -1197,6 +1293,8 @@ class ImprintStore:
                  )).decode(), current["evidence_json"], current["valid_from"],
                  current["valid_to"], now, None, event_id, current["version_id"]),
             )
+            if stamp is not None:
+                write_scope_row(conn, stamp_row(node_id, stamp, event_id=event_id, now=now))
         return event_id
 
     def correct_typed_node(
@@ -1585,7 +1683,8 @@ class ImprintStore:
               WHERE event_type IN (
                 'ratified','rejected','deferred','corrected','contested',
                 'consent_revoked','tombstoned','reason_added','reinforced',
-                'contradicts','supersedes','domain_selected','domain_frozen'
+                'contradicts','supersedes','domain_selected','domain_frozen',
+                'scope_changed'
               )
                 AND (payload_json LIKE ? OR payload_json LIKE ? OR payload_json LIKE ?)
               ORDER BY system_time,event_id
@@ -1593,6 +1692,7 @@ class ImprintStore:
                 f'%"node_id":"{node_id}"%', f'%"source_id":"{node_id}"%',
                 f'%"target_id":"{node_id}"%',
             )).fetchall()
+            scope = read_scope_row(conn, node_id)
         if not rows:
             raise ValidationError("node does not exist")
         versions: list[dict[str, Any]] = []
@@ -1603,7 +1703,7 @@ class ImprintStore:
             item["provenance"] = json.loads(item.pop("provenance_json"))
             item["evidence"] = json.loads(item.pop("evidence_json"))
             versions.append(item)
-        return {
+        history: dict[str, Any] = {
             "node_id": node_id,
             "versions": versions,
             "dispositions": [
@@ -1616,6 +1716,66 @@ class ImprintStore:
                 for row in dispositions
             ],
         }
+        if scope is not None:
+            history["scope"] = scope_view(scope)
+        return history
+
+    def set_record_scope(self, node_id: str, *, actor_id: str, changes: Mapping[str, Any]) -> str:
+        """Change one record's scope and say so, with no new version of the record.
+
+        This is the only release for a held row. It need not pick a candidate.
+        The event is the one place an override list is written down: a capture or
+        node event naming a central id would make that central rule's purge fail.
+        """
+        actor_id = self._require_actor(actor_id)
+        now = utc_now()
+        event_id = make_urn("event")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("""
+              SELECT n.operator_id,n.node_type,nv.* FROM nodes n JOIN node_versions nv USING(node_id)
+              WHERE n.node_id=? AND nv.system_to IS NULL
+            """, (node_id,)).fetchone()
+            if not current:
+                raise ValidationError("node is missing or not current")
+            self._require_configured_operator(current["operator_id"])
+            prior = read_scope_row(conn, node_id)
+            prior_scope = scope_view(prior) if prior else None
+            value = merge_change(prior_scope, changes)
+            require_fits_node(value, current["node_type"], json.loads(current["payload_json"]))
+            for override in changes.get("overrides", ()):
+                self._require_current_central(conn, override)
+            scope = {key: value[key] for key in (
+                "scope_kind", "client_id", "project_id", "delivery", "delivery_rank", "subject", "overrides",
+            )}
+            event_payload = {
+                "node_id": node_id, "actor_id": actor_id, "prior_scope": prior_scope,
+                "scope": scope, "resolved_by": RESOLVED_EXPLICIT,
+            }
+            conn.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)",
+                (event_id, "scope_changed", current["operator_id"], now, now,
+                 canonical_bytes(event_payload).decode(), payload_sha256(event_payload),
+                 current["event_id"], current["provenance_status"]),
+            )
+            write_scope_row(conn, {
+                "node_id": node_id, "scope_kind": value["scope_kind"], "client_id": value["client_id"],
+                "project_id": value["project_id"], "delivery": value["delivery"],
+                "delivery_rank": value["delivery_rank"], "subject": value["subject"], "speaker": value["speaker"],
+                "endorser": value["endorser"], "overrides_json": json.dumps(value["overrides"]),
+                "resolved_by": RESOLVED_EXPLICIT, "event_id": event_id, "stamped_at": now,
+            }, replace=True)
+        return event_id
+
+    @staticmethod
+    def _require_current_central(conn, node_id: str) -> None:
+        known = conn.execute("""
+          SELECT 1 FROM record_scope rs JOIN node_versions nv USING(node_id)
+          WHERE rs.node_id=? AND rs.scope_kind='central' AND nv.system_to IS NULL
+            AND nv.provenance_status='ratified' AND nv.authority_tier='ratified_knowledge'
+        """, (node_id,)).fetchone()
+        if not known:
+            raise ValidationError("an override must name a current central record")
 
     def add_reason(
         self,
@@ -1794,9 +1954,16 @@ class ImprintStore:
         return result
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        snapshot: dict[str, Any] = {
             "store_schema_version": STORE_SCHEMA_VERSION,
             "ontology_schema_version": ONTOLOGY_SCHEMA_VERSION,
             "nodes": self.current_nodes(),
             "edges": self.current_edges(),
         }
+        # Only when there are rows, so the snapshot id holds until the first
+        # stamp. After that a re-scope moves it, which invalidates caches.
+        with self.connect() as conn:
+            rows = read_scope_rows(conn)
+        if rows:
+            snapshot["record_scope"] = rows
+        return snapshot

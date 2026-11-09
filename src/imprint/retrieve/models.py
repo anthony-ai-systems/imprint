@@ -28,6 +28,22 @@ ONTOLOGY_PARTITIONS = frozenset({
 
 
 @dataclass(frozen=True)
+class RecordScope:
+    """One record's ``record_scope`` row, carried to the retrieval boundary."""
+
+    scope_kind: str
+    resolved_by: str
+    client_id: str | None = None
+    project_id: str | None = None
+    delivery: str | None = None
+    delivery_rank: int | None = None
+    subject: str | None = None
+    speaker: str | None = None
+    endorser: str | None = None
+    overrides: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RetrievalRecord:
     """One atomic candidate returned by a read-only store projection."""
 
@@ -68,6 +84,8 @@ class RetrievalRecord:
     judgment_statement: str | None = None
     # How a captured record arrived. None for anything else.
     capture_mechanism: str | None = None
+    # The record's row. None means none exists. No route reads this yet.
+    scope: RecordScope | None = None
 
 
 class RetrievalSource(Protocol):

@@ -123,6 +123,13 @@ For a portable logical snapshot:
 imprint export --format jsonld --output imprint-export.jsonld
 ```
 
+An export carries scope rows under `imprint:recordScope`, with their own digest
+in `imprint:recordScopeSha256`, and leaves both keys out when there are no rows.
+Import refuses a block that fails its digest, a `central` row on a record that is
+not ratified, and a `client` or `central` row on a record with a `domain_id`. An
+older build imports such an export and drops the rows, so every record reads as
+legacy there. A physical backup keeps rows with the file.
+
 Protect exports like the live bank. Before upgrades, make a physical backup and
 record its SHA-256. Additive migrations preserve historical versions, but a
 backup is the recovery boundary for hardware loss or operator error.
@@ -166,6 +173,22 @@ projections, scans the active root, and reports `purged_with_residue` with a
 nonzero exit if deletion committed but content remains. Backups and exports
 outside the active root are not discoverable and must be inventoried and deleted
 separately. Tombstone is the normal reversible removal from current retrieval.
+
+Purge deletes a record's scope row and takes its id out of every other record's
+`overrides`. A build from before the `record_scope` table does neither if you roll
+back to it. The purge still runs and leaves the row, with its client, project,
+subject and speaker. It reports `purged_with_residue` only when the purge scope is
+that record's own id. A purge by session, source or operator, or by a linked id such
+as the Case, reports `purged` with a clear scan. No command removes that row
+afterwards, and the export leaves it out.
+
+Purging a central record also deletes the `scope_changed` events of the records
+whose `overrides` named it, because those events name the purged id. Each such
+record keeps its row, with its kind, client, project and subject. Its history
+loses that step, and its row's `event_id` names an event that no longer exists.
+
+A `held` record's other candidate ids stay on its capture event until that record
+is purged, even after `imprint scope set` releases it.
 
 Revoking consent does not silently rewrite historical evidence. If a grant uses
 `delete_on_revoke`, the associated source IDs must be purged through the same
