@@ -19,6 +19,11 @@ from .paths import default_data_root, expand_home, home_directory, operator_root
 # there would have to be removed first.
 SHORT_LINES_PROMPT = "org.imprint.short_lines.prompt"
 SHORT_LINES_SESSION_START = "org.imprint.short_lines.session_start"
+# The client-work carrier step. Unset, it does nothing. The queue is a private file
+# of its own: never the store, never a spool, never in a session's folder.
+CLIENT_CARRIER_QUEUE = "org.imprint.client_carrier.queue"
+CLIENT_CARRIER_CLIENTS = "org.imprint.client_carrier.clients"
+_CLIENT_CARRIER_PATHS = (CLIENT_CARRIER_QUEUE, CLIENT_CARRIER_CLIENTS)
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -32,6 +37,9 @@ DEFAULTS = {
     # start is not filtered by client, so widening it widens what every session gets.
     SHORT_LINES_PROMPT: False,
     SHORT_LINES_SESSION_START: False,
+    # The queue file the carrier step appends to, and the client list it reads.
+    CLIENT_CARRIER_QUEUE: None,
+    CLIENT_CARRIER_CLIENTS: None,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -237,6 +245,19 @@ def _validate_config(data: dict[str, Any]) -> None:
     for field in ("compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START):
         if not isinstance(data.get(field), bool):
             raise ValidationError(f"{field} must be a boolean")
+    for field in _CLIENT_CARRIER_PATHS:
+        value = data.get(field)
+        if value is None:
+            continue
+        try:
+            absolute = (
+                isinstance(value, str) and bool(value.strip()) and "\x00" not in value
+                and Path(value).expanduser().is_absolute()
+            )
+        except RuntimeError:
+            absolute = False
+        if not absolute:
+            raise ValidationError(f"{field} must be null or an absolute path")
     if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:
         raise ValidationError("context_budget_bytes must be 4096..131072")
     if data["context_budget_bytes"] > 32768 and data["allow_higher_budget"] is not True:

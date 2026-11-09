@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add a client-work reader and carrier queue for Codex prompts, off by default.
+  `imprint carrier codex` reads one prompt event on stdin, prints nothing and always
+  exits 0. It does nothing until `org.imprint.client_carrier.queue` names a queue
+  file, and it names clients only from the list at
+  `org.imprint.client_carrier.clients`. For a prompt in a thread a person started,
+  two agreeing signals (starting folder, thread name prefix, a strong name pattern)
+  mark client work, one or disagreeing signals mark the client unknown, and none
+  writes nothing. A client person's first name only backs another signal for the
+  same client. Each row is a pointer with ids, a text hash, shape flags, the client
+  guess and its signals, what the card must ask, and no text. No hook is registered, the store is
+  never opened, and no existing output changes.
 - Treat a dead Jev as a fault. `imprint health` adds two degraded reasons, under
   `selector.mode: jev` only. `selector_key_unavailable` is raised at once, with no
   traffic, when the key check fails, and the check never reads the key.
