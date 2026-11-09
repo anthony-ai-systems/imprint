@@ -53,6 +53,12 @@ object and preserves unknown namespaced extensions.
   age: it sends records from every client, it does not read
   `selector.jev.stale_before`, and short lines let it send about three times as
   many of both.
+- `org.imprint.client_carrier.queue`: `null` (default) or an absolute path. The
+  file the client-work carrier step appends to; see Client-work carrier queue
+  below. Unset, the step does nothing.
+- `org.imprint.client_carrier.clients`: `null` (default) or an absolute path. The
+  client list the carrier step reads at run time. Unset or unreadable, it names no
+  client and writes nothing.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -432,6 +438,54 @@ them.
 
 Both keys are dotted, so an older build keeps them and reads nothing into them, and
 rolling back needs no change to the config.
+
+## Client-work carrier queue
+
+`imprint carrier codex` reads one Codex UserPromptSubmit event on stdin. It is fixed
+code: no model and no network. It prints nothing and always exits 0, so it can never
+block a prompt. It does nothing at all until `org.imprint.client_carrier.queue` is
+set. No hook calls it yet; registering one is a separate, deliberate step.
+
+When the queue is set, it appends one row for a prompt that is client work:
+
+- The thread must be one a person started. Codex's own thread record is read from
+  `$CODEX_HOME/state_5.sqlite` (default `~/.codex`), opened read-only with a short
+  wait for a lock. The record must say a user started it from the desktop app or the
+  CLI, with no spawn edge and no agent field. A subagent, automation, scripted run,
+  or unreadable record makes no row, and so does harness or automation text.
+- Up to three signals name a client, each from the client list: the starting folder
+  is inside one of the client's folders (the deepest match wins), the thread's name
+  starts with one of its prefixes, or the prompt matches one of its strong name
+  patterns. Two kinds of signal naming the same client mark client work for that
+  client. One signal, or signals naming different clients, mark the client unknown,
+  and nothing is guessed. No signal means it is not client work and nothing is
+  written. Weak patterns are recorded in the row but never count. Only rooms of kind
+  `client` or `client_rules_core_agents` are clients.
+- A client person's first name, as a whole word in its written case, is a backing
+  signal. It counts as a second, agreeing signal only beside another signal for the
+  same client (folder, prefix, or a strong pattern such as a domain or full name).
+  Alone, or with only a weak pattern, it makes nothing. A first name that people of
+  two rooms in the list share, or that belongs to a person who spans rooms, counts
+  for no room. A first name of another client than the other signals marks the
+  client unknown. A first name inside a name or address a pattern already matched
+  is not counted again.
+- Paste shape is recorded as flags (`colon_lead`, `rule_run`, `timestamp_lines`,
+  `slack_name_time`, `image_attachment`) and is never a client signal.
+
+The row is a pointer: `schema`, `thread_id`, `message_id` (the turn id), `text_sha256`,
+`time`, `shape_flags`, `client` (`status`, `guess`, `reason`, `signals`), `asks`,
+`loom_ids`, `image_paths`, `speaker_guess`, `channel`, `carrier` and `round`. It holds
+no word of the prompt. `asks` lists what a card must ask: `client` when the client is
+unknown, and `speaker` when the prompt has no feedback-shape flag, so whether it is a
+paste, a paraphrase or the person's own words is unknown. It is empty when nothing
+needs asking. The queue file is created with mode 0600 and is refused when it is a link,
+relative, in a cloud-synced folder (the home `Documents` and `Desktop` folders count,
+because iCloud can sync them whole), inside any git repository, or inside the session's
+starting folder, the operator's data root, the Codex home or the transcript's folder.
+The queue is never
+the store and never a spool, and nothing in it reaches retrieval.
+
+Both keys are dotted, so an older build keeps them and reads nothing into them.
 
 ## Environment overrides
 
