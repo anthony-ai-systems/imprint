@@ -9,7 +9,7 @@ only when every one of these holds, and otherwise refuses before the first call:
   ``probe`` (mode ``shadow`` or ``enforce``) with a daily cap that leaves room for
   all 24 calls today, and neither ``IMPRINT_DECIDE`` nor ``IMPRINT_SELECTOR`` turns
   it off;
-- a key is present where ``selector.jev`` says to look.
+- a key that each call would accept is where ``selector.jev`` says to look.
 
 It stops at the first call that does not come back answered, and never retries.
 
@@ -38,7 +38,7 @@ from typing import Any, Callable, Mapping, TextIO
 
 from imprint.config import load_config, resolved_operator_root
 from imprint.decide import ask, calls_today, choice, encode_request, noul, purpose_mode, score
-from imprint.retrieve.jev import JevSettings, api_key_present
+from imprint.retrieve.jev import JevSettings, resolve_api_key
 
 PURPOSE = "probe"
 MODEL = "jev-1.13.0"
@@ -144,11 +144,10 @@ def refusals(args: argparse.Namespace, calls: list[dict[str, Any]]) -> tuple[lis
         elif cap - used < len(calls):
             reasons.append(f"the probe daily_cap leaves {max(0, cap - used)} calls today, not {len(calls)}")
     try:
-        present = api_key_present(JevSettings.from_config(config["selector"]["jev"]))
+        # Read as each call reads it, so a key the sender would refuse is refused here.
+        resolve_api_key(JevSettings.from_config(config["selector"]["jev"]))
     except Exception:
-        present = False
-    if not present:
-        reasons.append("no key is present where selector.jev says to look")
+        reasons.append("no usable key is where selector.jev says to look")
     return reasons, config, root
 
 

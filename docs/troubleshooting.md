@@ -103,7 +103,8 @@ not a whole number from 0 to 100,000. It is off, and the config still loads.
 `tools/jev_probe/run_probe.py --send-approved-calls 24 --config PATH` prints a
 `refused` list and sends nothing until every condition holds: the count is 24, the
 config enables `probe` with a cap that leaves 24 calls today, no switch turns it off,
-and the key is present. Run it without flags to see the plan and request sizes.
+and a key each call would accept is where `selector.jev` says to look. Run it without
+flags to see the plan and request sizes.
 
 ## Cloud-sync root refused
 

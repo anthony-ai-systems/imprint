@@ -62,12 +62,12 @@ def ready(tmp_path, monkeypatch):
     return write_probe_config(tmp_path, {"probe": {"mode": "shadow", "daily_cap": 24}})
 
 
-def write_probe_config(tmp_path: Path, purposes: dict) -> Path:
+def write_probe_config(tmp_path: Path, purposes: dict, **jev: object) -> Path:
     path = tmp_path / "probe-config.json"
     path.write_text(json.dumps({
         "config_version": "3.0.0", "data_root": str(tmp_path / "data"), "operator_slug": "probe",
         "node_id": "primary", "compiler": True,
-        "selector": {"jev": {"api_key_env": KEY_ENV}}, DECIDE_PURPOSES_KEY: purposes,
+        "selector": {"jev": {"api_key_env": KEY_ENV, **jev}}, DECIDE_PURPOSES_KEY: purposes,
     }))
     return path
 
@@ -115,7 +115,8 @@ def test_by_default_it_prints_the_plan_and_sends_nothing(probe, tmp_path, ready)
 
 @pytest.mark.parametrize("take_away", [
     "flag_missing_count", "count_23", "count_25", "no_config", "probe_off", "probe_absent", "probe_unreadable",
-    "cap_short", "cap_spent", "no_key", "decide_switch", "selector_switch", "bad_config",
+    "cap_short", "cap_spent", "no_key", "bad_key_env", "blank_key_file", "decide_switch", "selector_switch",
+    "bad_config",
 ])
 def test_it_refuses_to_send_without_every_condition(probe, tmp_path, monkeypatch, ready, take_away):
     argv = ["--config", str(ready), "--send-approved-calls", "24"]
@@ -141,6 +142,14 @@ def test_it_refuses_to_send_without_every_condition(probe, tmp_path, monkeypatch
         assert _reserve(tmp_path / "data" / "probe", "probe", 24, _today(), time.monotonic() + 5, time.monotonic) is None
     elif take_away == "no_key":
         monkeypatch.delenv(KEY_ENV)
+    elif take_away == "bad_key_env":
+        monkeypatch.setenv(KEY_ENV, "not a usable key")
+    elif take_away == "blank_key_file":
+        monkeypatch.delenv(KEY_ENV)
+        key_file = tmp_path / "jev.key"
+        key_file.write_text("\n")
+        key_file.chmod(0o600)
+        write_probe_config(tmp_path, {"probe": {"mode": "shadow", "daily_cap": 24}}, api_key_file=str(key_file))
     elif take_away == "decide_switch":
         monkeypatch.setenv("IMPRINT_DECIDE", "off")
     elif take_away == "selector_switch":
