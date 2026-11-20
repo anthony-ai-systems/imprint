@@ -65,6 +65,47 @@ too: it reads `failed` with `answered` true. The reason clears on the first turn
 uses Jev's answer, or when the failures pass 24 hours. See Hook route log in
 `docs/configuration.md`.
 
+A Jev that fails on and off never makes a run of 3, so health stays green. Read
+`selector_failure_share` under `metrics`: its `share` is the part of the newest 50
+selections in the last day that failed, or `null` with fewer than 10. A share that
+stays high with no degraded reason is that pattern, and the route log's `detail` says
+which failure it is.
+
+## The agent got no judgments and no notice
+
+With `org.imprint.selector.failure_notice: true`, a prompt turn whose selection failed
+and that delivered nothing carries one line naming the reason, such as
+`(reason: timeout)`. If a turn got neither judgments nor that line, the turn did not
+fail selection: it found nothing relevant, had nothing to send, was a replay, ran under
+`shadow` or `deterministic`, or the hook itself died before it could print, which
+leaves a file in `logs/hook-failures`. The turn's line in `logs/hook-routes.jsonl`
+says which. With the key off, a failed turn emits empty context, as it always did.
+
+## A typed decision sends nothing
+
+`imprint.decide` sends only for a purpose that `org.imprint.decide.purposes` names
+with `mode` `shadow` or `enforce` and a `daily_cap` above 0. The result's `reason`
+says which check stopped it: `purpose_off` (not named, or `off`), `switched_off`
+(`IMPRINT_DECIDE` is set, or `IMPRINT_SELECTOR` turns the selector off, in the
+environment of the process that calls), `unknown_purpose`, `cap_reached` (today's
+UTC count in `logs/decide-calls.json` reached the cap) or `cap_unavailable` (that file
+is not one the module can trust, so delete it to start the day's count again, or
+another process held `logs/decide-calls.lock` until the call's deadline). A
+`missing_key`, an `invalid_request` or a call already out of time costs no call from
+the cap. The purpose's `logs/decide-<purpose>.jsonl` has one line per call that was not
+disabled.
+
+A purpose that `imprint health` counts under `metrics.decide_purposes.ignored` is named
+in a way this build cannot read: an unknown purpose (often a typo), a key other than
+`mode` and `daily_cap`, a mode other than `off`, `shadow` or `enforce`, or a cap that is
+not a whole number from 0 to 100,000. It is off, and the config still loads.
+
+`tools/jev_probe/run_probe.py --send-approved-calls 24 --config PATH` prints a
+`refused` list and sends nothing until every condition holds: the count is 24, the
+config enables `probe` with a cap that leaves 24 calls today, no switch turns it off,
+and a key each call would accept is where `selector.jev` says to look. Run it without
+flags to see the plan and request sizes.
+
 ## Cloud-sync root refused
 
 Move the data root to a local non-synchronized directory and update config. A

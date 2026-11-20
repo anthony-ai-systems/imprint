@@ -24,6 +24,22 @@ SHORT_LINES_SESSION_START = "org.imprint.short_lines.session_start"
 CLIENT_CARRIER_QUEUE = "org.imprint.client_carrier.queue"
 CLIENT_CARRIER_CLIENTS = "org.imprint.client_carrier.clients"
 _CLIENT_CARRIER_PATHS = (CLIENT_CARRIER_QUEUE, CLIENT_CARRIER_CLIENTS)
+# Say on the prompt turn itself that judgment selection failed and nothing was
+# delivered. Off, a failed turn emits the empty context it always has.
+SELECTION_FAILURE_NOTICE = "org.imprint.selector.failure_notice"
+# Typed Jev questions outside the selector. Each purpose that may send is named here
+# with its mode and daily call cap; one that is not named sends nothing. Enabling one
+# is an egress decision. The purposes are a closed list, so a typo cannot open one,
+# and an entry this build cannot read is off rather than a reason to refuse the config.
+DECIDE_PURPOSES_KEY = "org.imprint.decide.purposes"
+DECIDE_PURPOSES = (
+    "selector", "capture_classify", "event_match", "completion_check", "draft_check", "action_guard", "probe",
+)
+DECIDE_MODES = ("off", "shadow", "enforce")
+DECIDE_DAILY_CAP_LIMIT = 100000
+# Under the data root's logs folder: when a typed decision last sent bytes. Health
+# reads it without importing the decide package, which no hook may load.
+DECIDE_TRANSFER_MARKER = "decide-transfer.json"
 # Days with no capture, while the Stop hook kept running, before health degrades.
 # Unset, health never asks.
 CAPTURE_SILENCE_DAYS = "org.imprint.health.capture_silence_days"
@@ -44,6 +60,10 @@ DEFAULTS = {
     # The queue file the carrier step appends to, and the client list it reads.
     CLIENT_CARRIER_QUEUE: None,
     CLIENT_CARRIER_CLIENTS: None,
+    # One fixed line naming the failure, in place of empty context.
+    SELECTION_FAILURE_NOTICE: False,
+    # No purpose named, so the typed-decision module sends nothing.
+    DECIDE_PURPOSES_KEY: {},
     CAPTURE_SILENCE_DAYS: None,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
@@ -105,6 +125,12 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def selector_switched_off() -> bool:
+    """Whether ``IMPRINT_SELECTOR`` holds a value that turns the selector off."""
+    override = os.environ.get(SELECTOR_ENV, "").strip().lower()
+    return bool(override) and override not in _SELECTOR_ENV_KEEPS_CONFIG
+
+
 def effective_selector_mode(selector: Any) -> str:
     """Resolve the selector mode. The environment can only turn it off.
 
@@ -114,8 +140,7 @@ def effective_selector_mode(selector: Any) -> str:
     ``shadow`` leave the configured mode in force: no environment value can
     enable a network selector that the config leaves deterministic.
     """
-    override = os.environ.get(SELECTOR_ENV, "").strip().lower()
-    if override and override not in _SELECTOR_ENV_KEEPS_CONFIG:
+    if selector_switched_off():
         return "deterministic"
     mode = selector.get("mode") if isinstance(selector, dict) else None
     return mode if mode in {"jev", "shadow"} else "deterministic"
@@ -240,6 +265,55 @@ def _validate_selector(data: dict[str, Any]) -> None:
         raise ValidationError("selector jev log_decisions must be a boolean")
 
 
+def _decide_entry(name: Any, value: Any) -> tuple[str, int] | None:
+    """A named entry's mode and cap, or None when this build cannot read it.
+
+    Loading never fails on this key: every hook loads the config, and a purpose or a
+    field that a later build adds, or a typo, must not stop them. What cannot be read
+    is off, and since the purposes are a closed list here, nothing can open one.
+    """
+    if name not in DECIDE_PURPOSES or not isinstance(value, Mapping) or set(value) - {"mode", "daily_cap"}:
+        return None
+    mode, cap = value.get("mode", "off"), value.get("daily_cap", 0)
+    if mode not in DECIDE_MODES or not _is_int(cap) or not 0 <= cap <= DECIDE_DAILY_CAP_LIMIT:
+        return None
+    return mode, cap
+
+
+def decide_setting(config: Mapping[str, Any], purpose: str) -> tuple[str, int]:
+    """A purpose's configured mode and daily cap; ``("off", 0)`` when it is not named
+    or its entry is not one this build can read.
+
+    This reads the config alone and ignores the environment, which only the module
+    that sends consults.
+    """
+    purposes = config.get(DECIDE_PURPOSES_KEY)
+    if not isinstance(purposes, Mapping) or purpose not in purposes:
+        return "off", 0
+    return _decide_entry(purpose, purposes[purpose]) or ("off", 0)
+
+
+def decide_purposes_enabled(config: Mapping[str, Any]) -> tuple[str, ...]:
+    """The purposes the config lets send: a mode other than ``off`` and a cap above 0.
+
+    The environment can still turn them off; this is what the config allows.
+    """
+    enabled = []
+    for name in DECIDE_PURPOSES:
+        mode, cap = decide_setting(config, name)
+        if mode != "off" and cap > 0:
+            enabled.append(name)
+    return tuple(enabled)
+
+
+def decide_purposes_ignored(config: Mapping[str, Any]) -> int:
+    """How many named entries this build cannot read, and so treats as off."""
+    purposes = config.get(DECIDE_PURPOSES_KEY)
+    if not isinstance(purposes, Mapping):
+        return 0 if purposes in (None, {}) else 1
+    return sum(_decide_entry(name, value) is None for name, value in purposes.items())
+
+
 def _validate_config(data: dict[str, Any]) -> None:
     if not isinstance(data.get("config_version"), str) or data["config_version"] != DEFAULTS["config_version"]:
         raise ValidationError("unsupported config_version")
@@ -247,7 +321,10 @@ def _validate_config(data: dict[str, Any]) -> None:
         value = data.get(field)
         if not isinstance(value, str) or SAFE_LOCAL_ID.fullmatch(value) is None:
             raise ValidationError(f"{field} must be a safe lowercase identifier")
-    for field in ("compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START):
+    for field in (
+        "compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START,
+        SELECTION_FAILURE_NOTICE,
+    ):
         if not isinstance(data.get(field), bool):
             raise ValidationError(f"{field} must be a boolean")
     for field in _CLIENT_CARRIER_PATHS:

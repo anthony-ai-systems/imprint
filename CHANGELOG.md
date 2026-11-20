@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Add a typed-decision package, `imprint.decide`, with nothing switched on. It builds
+  Jev's Noul, Choice and Score questions, sends one bounded request under the
+  selector's own transport rules, and reads each answer defensively, never raising.
+  Every call names a purpose from a closed list, and a purpose sends only when
+  `org.imprint.decide.purposes` gives it a mode of `shadow` or `enforce` and a daily
+  cap above 0. The shipped value is `{}`, so nothing is sent, and `IMPRINT_DECIDE`
+  turns every purpose off. Each call that is not disabled writes a content-free line
+  to `logs/decide-<purpose>.jsonl`, and a counter under `logs` enforces the cap. An
+  entry the build cannot read (an unknown purpose or field, or a bad value) is off and
+  never stops the config loading. While a purpose is enabled, health's `network_state`
+  is never `offline`, and `metrics.decide_purposes` counts enabled and unreadable
+  entries; with none named, health is unchanged. The
+  selector does not use the package and no hook imports it. Also adds `imprint
+  selector-eval`, an offline report of the shortlist's recall and the rendered
+  picks' precision on labelled cases, with a synthetic fixture, and
+  `tools/jev_probe/run_probe.py`, which prints a 24-call synthetic plan and sends it
+  only with every approval condition met.
+- Let a failed selection say so, off by default. With
+  `org.imprint.selector.failure_notice: true`, a prompt turn under `selector.mode: jev`
+  whose selection failed and that delivered nothing else carries one fixed line,
+  `Imprint: judgment retrieval was unavailable this turn (reason: <reason>).`, where
+  the reason is the turn's closed `fallback_reason`. The hook output gains
+  `selector_notice` and the route line `notice`. Local domain records the fallback
+  still delivers go out with no line, and an empty pool, an answer with no picks,
+  `shadow` and `deterministic` never get one. With the key `false` or absent, no
+  byte a hook emits changes. Under `jev`, health also reports
+  `selector_failure_share`: the share of the newest 50 selections in the last day
+  that failed, `null` below 10. It raises no reason, and when health degrades does
+  not change.
 - Record where each Stop went. Every Stop now adds one content-free `stop_capture`
   line to `logs/hook-routes.jsonl`, under the same rotation as the other routes, on
   exactly one outcome: `captured`, `not_feedback`, `origin_unverified`, each other

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
 from .config import (
+    SELECTION_FAILURE_NOTICE,
     SELECTOR_STATE_LIMIT,
     SHORT_LINES_PROMPT,
     SHORT_LINES_SESSION_START,
@@ -30,6 +31,7 @@ from .errors import ImprintError, ValidationError
 from .hook_routes import ROUTE_DEFER_ENV, ROUTE_FIELD, ROUTES, HookTurn, stop_entry
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
+from .selection_notice import with_failure_notice
 from .store import ImprintStore
 from .store.scope import RESOLVED_EXPLICIT
 
@@ -727,6 +729,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     carrier.add_argument("host", choices=("codex",))
 
+    selector_eval = subs.add_parser(
+        "selector-eval",
+        help="score the selector's shortlist and pick policy on labelled cases and saved scores; offline",
+    )
+    selector_eval.add_argument("--cases", type=Path, required=True)
+    selector_eval.add_argument("--scores", type=Path, required=True)
+    selector_eval.add_argument("--shortlist", type=int)
+    selector_eval.add_argument("--budget", type=int)
+    selector_eval.add_argument("--score-floor", type=float)
+    selector_eval.add_argument("--top", type=int)
+    selector_eval.add_argument("--short-lines", action="store_true")
+
     subs.add_parser("delivery-commit", help=argparse.SUPPRESS)
 
     subs.add_parser("health", help="report content-free health as JSON")
@@ -763,6 +777,17 @@ def main(argv: list[str] | None = None) -> int:
             _write_json(_early_stop_line({"hook_schema_version": "1.0.0", "status": "skipped",
                                           "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
                                           else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"}))
+            return 0
+        if args.command == "selector-eval":
+            # Offline: reads two files, and no config, store or network.
+            from .decide.evaluate import run_selector_eval
+            settings = {
+                name: value for name, value in (
+                    ("shortlist", args.shortlist), ("budget", args.budget),
+                    ("score_floor", args.score_floor), ("top", args.top),
+                ) if value is not None
+            }
+            _write_json(run_selector_eval(args.cases, args.scores, short_lines=args.short_lines, **settings))
             return 0
         config = load_config(args.config)
         root = resolved_operator_root(config)
@@ -1349,13 +1374,14 @@ def main(argv: list[str] | None = None) -> int:
                         return 0
                 # Deterministic behavior, and the exact fallback for every
                 # selector failure: domain-only injection, or skip.
+                notice = config[SELECTION_FAILURE_NOTICE]
                 if domain is None:
-                    _write_json(turn.settle({
+                    _write_json(turn.settle(with_failure_notice({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": selection.diagnostic_code,
                         **selector_fields,
                         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""},
-                    }))
+                    }, enabled=notice)))
                     return 0
                 result = retrieve_payload(
                     store, root=root, session_id=session,
@@ -1364,7 +1390,7 @@ def main(argv: list[str] | None = None) -> int:
                     context=context, exclude_ids=exclude_ids,
                     short_lines=config[SHORT_LINES_PROMPT],
                 )
-                response = {
+                response = with_failure_notice({
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
                     "domain_id": domain,
@@ -1374,7 +1400,7 @@ def main(argv: list[str] | None = None) -> int:
                         "hookEventName": "UserPromptSubmit",
                         "additionalContext": result.get("payload", ""),
                     },
-                }
+                }, enabled=notice)
                 turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=domain)
                 if result.get("status") == "delivered":
                     _emit_retrieval_json(

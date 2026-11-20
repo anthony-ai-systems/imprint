@@ -20,12 +20,14 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from imprint.config import effective_selector_mode
 from imprint.log_files import append_capped, newest_lines
+from imprint.selection_notice import NOTICE_FIELD
 
 ROUTE_LOG_NAME = "hook-routes.jsonl"
 ROUTE_LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -68,6 +70,10 @@ _UNDELIVERED_PICKS = frozenset({"crowded_picks", "oversized_picks"})
 # Records were due on this turn and none could fit. Neither says anything about Jev,
 # and neither is the same as nothing being relevant.
 UNFIT_RECORDS = "oversized_records"
+# Health's share of failed selections reads at most this many of the newest, and says
+# nothing below the minimum, where one timeout would swing it.
+SELECTOR_SHARE_WINDOW = 50
+SELECTOR_SHARE_MIN_SAMPLE = 10
 
 
 def route_log_path(root: Path) -> Path:
@@ -204,6 +210,8 @@ def route_entry(
         "outcome": outcome,
         "route": route,
         "ts": _stamp(),
+        # Only a turn that carried the failure notice says so, so a line is otherwise unchanged.
+        **({"notice": True} if body.get(NOTICE_FIELD) else {}),
     }
 
 
@@ -280,6 +288,17 @@ class HookTurn:
             record_route(self._root, self._entry or failed_entry(self._action, "hook_exception", mode=self._mode))
 
 
+def _failure_share(selections: deque) -> dict[str, object]:
+    sample, failed = len(selections), sum(selections)
+    return {
+        "window": SELECTOR_SHARE_WINDOW,
+        "min_sample": SELECTOR_SHARE_MIN_SAMPLE,
+        "sample": sample,
+        "failed": failed,
+        "share": round(failed / sample, 4) if sample >= SELECTOR_SHARE_MIN_SAMPLE else None,
+    }
+
+
 def route_summary(
     root: Path, *, now: float | None = None, stop_window_seconds: int | None = None,
 ) -> dict[str, object]:
@@ -291,12 +310,17 @@ def route_summary(
     ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
 
+    The same selections, the newest ``SELECTOR_SHARE_WINDOW`` of them, give the share
+    that failed, which shows a Jev that fails on and off. It is only reported: what
+    degrades health is still the run alone.
+
     With ``stop_window_seconds``, it also counts, in that window and as far back as
     the tail it reads, the Stop lines that could have captured and those that did.
     """
     current = time.time() if now is None else now
     outcomes = {route: dict.fromkeys(_ROUTE_OUTCOMES[route], 0) for route in ROUTES.values()}
     failures = 0
+    selections: deque = deque(maxlen=SELECTOR_SHARE_WINDOW)
     stop_calls = 0
     stop_captures = 0
     for raw in newest_lines(route_log_path(root), ROUTE_LOG_TAIL_BYTES):
@@ -319,12 +343,18 @@ def route_summary(
             continue
         if entry.get("answered") is True and entry.get("method") == "jev":
             failures = 0
+            selections.append(False)
         elif (
             entry["outcome"] == "failed" and entry.get("method") == "deterministic_fallback"
             and entry.get("detail") != UNFIT_RECORDS
         ):
             failures += 1
-    summary: dict[str, object] = {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+            selections.append(True)
+    summary: dict[str, object] = {
+        "outcomes_24h": outcomes,
+        "selector_failures_in_a_row": failures,
+        "selector_failure_share": _failure_share(selections),
+    }
     if stop_window_seconds is not None:
         summary["stop_calls_in_window"] = stop_calls
         summary["stop_captures_in_window"] = stop_captures
@@ -338,6 +368,8 @@ __all__ = [
     "ROUTE_DEFER_ENV",
     "ROUTE_FIELD",
     "ROUTE_WINDOW_SECONDS",
+    "SELECTOR_SHARE_MIN_SAMPLE",
+    "SELECTOR_SHARE_WINDOW",
     "STOP_OUTCOMES",
     "STOP_ROUTE",
     "STOP_SKIP_OUTCOMES",
