@@ -9,7 +9,11 @@
   `org.imprint.decide.purposes` gives it a mode of `shadow` or `enforce` and a daily
   cap above 0. The shipped value is `{}`, so nothing is sent, and `IMPRINT_DECIDE`
   turns every purpose off. Each call that is not disabled writes a content-free line
-  to `logs/decide-<purpose>.jsonl`, and a counter under `logs` enforces the cap. The
+  to `logs/decide-<purpose>.jsonl`, and a counter under `logs` enforces the cap. An
+  entry the build cannot read (an unknown purpose or field, or a bad value) is off and
+  never stops the config loading. While a purpose is enabled, health's `network_state`
+  is never `offline`, and `metrics.decide_purposes` counts enabled and unreadable
+  entries; with none named, health is unchanged. The
   selector does not use the package and no hook imports it. Also adds `imprint
   selector-eval`, an offline report of the shortlist's recall and the rendered
   picks' precision on labelled cases, with a synthetic fixture, and

@@ -65,9 +65,16 @@ says which check stopped it: `purpose_off` (not named, or `off`), `switched_off`
 (`IMPRINT_DECIDE` is set, or `IMPRINT_SELECTOR` turns the selector off, in the
 environment of the process that calls), `unknown_purpose`, `cap_reached` (today's
 UTC count in `logs/decide-calls.json` reached the cap) or `cap_unavailable` (that file
-is not one the module can trust; delete it to start the day's count again). A
-`missing_key` or `invalid_request` costs no call from the cap. The purpose's
-`logs/decide-<purpose>.jsonl` has one line per call that was not disabled.
+is not one the module can trust, so delete it to start the day's count again, or
+another process held `logs/decide-calls.lock` until the call's deadline). A
+`missing_key`, an `invalid_request` or a call already out of time costs no call from
+the cap. The purpose's `logs/decide-<purpose>.jsonl` has one line per call that was not
+disabled.
+
+A purpose that `imprint health` counts under `metrics.decide_purposes.ignored` is named
+in a way this build cannot read: an unknown purpose (often a typo), a key other than
+`mode` and `daily_cap`, a mode other than `off`, `shadow` or `enforce`, or a cap that is
+not a whole number from 0 to 100,000. It is off, and the config still loads.
 
 `tools/jev_probe/run_probe.py --send-approved-calls 24 --config PATH` prints a
 `refused` list and sends nothing until every condition holds: the count is 24, the

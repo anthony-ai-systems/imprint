@@ -107,8 +107,15 @@ Each call that is not disabled writes one line to `logs/decide-<purpose>.jsonl`
 names and types, answer values and confidences, elapsed time, usage, echoed model and
 request size, and never the state, an instruction, a description or the key. Question
 and option names are lowercase identifiers chosen in code. `logs/decide-calls.json`
-holds today's call count per purpose and nothing else. Health's `network_state`
-describes the selector only; these logs are the record of what this module sent.
+holds today's call count per purpose and nothing else, and `logs/decide-transfer.json`
+holds the time a call last sent bytes. While any purpose is enabled, health's
+`network_state` is `idle` or `transferred`, never `offline`, whatever the selector's
+mode; with none named it describes the selector alone, as before. These logs are the
+record of what this module sent.
+
+A purpose entry this build cannot read (an unknown purpose, an unknown field, or a bad
+value) is off, and the config still loads, so a typo or a later build's setting can
+neither open a purpose nor stop the hooks. Health counts such entries.
 
 On POSIX the optional `api_key_file` must be a private regular file owned by
 the current user. On Windows, Imprint checks only that it is a regular file,

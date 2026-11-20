@@ -127,6 +127,7 @@ imprint spool prune
 imprint derive --submit proposal.json
 imprint derive --pending
 imprint retrieve --session SESSION_ID --prompt "current task"
+imprint selector-eval --cases CASES.json --scores SCORES.json
 imprint review list
 imprint review ratify NODE_ID --by OPERATOR_ID
 imprint review reject NODE_ID --by OPERATOR_ID --reason "not a real pattern"

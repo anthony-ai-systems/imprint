@@ -257,7 +257,8 @@ after Jev answered is one `fallback` line. At 5 MiB the file rotates once to
 Health reports `selector_mode`, `selector_key_present` (a boolean; the key file
 is checked but not read), `selector_endpoint_host`, `selector_last_success_ts`,
 `selector_fallbacks_24h`, and `network_state`: `offline` in deterministic mode,
-otherwise `idle` until a request is sent and `transferred` after one. Each
+otherwise `idle` until a request is sent and `transferred` after one. A typed-decision
+purpose that is enabled also keeps it from `offline`; see Typed decisions below. Each
 sent request also updates `<operator root>/logs/jev-selector-transfer.json`
 (private file mode), which holds only the last transfer and last success
 timestamps. It is written even when `log_decisions` is `false`, so turning the
@@ -402,7 +403,10 @@ both. It has four parts.
   range `choice` or `score`, or a `confidence` or probability that is present and not a
   number from 0 to 1, rejects that answer, a Choice naming an option the request did not
   send is rejected, and `probabilities` is read as an object or as an array in request
-  order.
+  order. Either way it is kept as sent, keyed by option name or by level number (`"0"`,
+  `"1"`, ... written plainly), and a level or option the reply leaves out stays out:
+  nothing is filled in. An answer that cannot be read is dropped on its own and never
+  costs the others in the reply.
 - One call, `ask(purpose, state, questions, config=..., root=...)`. `state` is text or a
   JSON object, at most 16,000 characters. It sends at most 1,000 questions and 1 MiB in
   one `POST` to `selector.jev.endpoint` with `selector.jev.model` (or a model the caller
@@ -422,10 +426,14 @@ both. It has four parts.
   change to the selector, which does not use it today.
 - A daily cap per purpose, kept locally in `logs/decide-calls.json` under the data root
   by UTC day. A call takes one from the cap just before it sends, after the request is
-  built and the key is found, so a refused request or a missing key costs nothing. A
-  counter that is not a small regular file of the expected shape fails closed with
-  `cap_unavailable`: delete it to start the day's count again. Calls from separate
-  processes take turns through a lock file on POSIX.
+  built, the key is found and the deadline is checked, so a refused request, a missing
+  key or a call already out of time costs nothing. A call whose deadline passes in the
+  moment between taking its count and sending is still counted, so the cap counts calls
+  taken, never fewer than calls sent. A counter that is not a small regular file of the
+  expected shape fails closed with `cap_unavailable`: delete it to start the day's count
+  again. Calls from separate processes take turns through `logs/decide-calls.lock` on
+  POSIX; a call never blocks on it, and one that cannot take the lock before its
+  deadline is `cap_unavailable` and sends nothing.
 
 `org.imprint.decide.purposes` maps a purpose to `{"mode": ..., "daily_cap": ...}`:
 
@@ -436,11 +444,25 @@ both. It has four parts.
 - `mode`: `off` (default when left out), `shadow` or `enforce`.
 - `daily_cap`: 0 to 100,000; 0 (default when left out) sends nothing.
 
-A purpose not named is `off`. An unknown purpose, any other key, or a value of the
-wrong type is refused when the config loads. `IMPRINT_DECIDE` set to any non-empty
-value turns every purpose off, and so does an `IMPRINT_SELECTOR` value that turns the
-selector off. No environment value turns one on. The key is dotted, so an older build
-keeps it and reads nothing into it.
+A purpose not named is `off`. The config never fails to load over this key, since every
+hook loads it: an entry this build cannot read is `off` instead. That covers a purpose
+it does not know (a later build's, or a typo), an entry with any key other than `mode`
+and `daily_cap`, and a mode or cap outside the values above; a value that is not an
+object turns every purpose off. The purposes are a closed list in code, so no spelling
+can open one. `imprint health` counts such entries as `decide_purposes.ignored`.
+`IMPRINT_DECIDE` set to any non-empty value turns every purpose off, and so does an
+`IMPRINT_SELECTOR` value that turns the selector off. No environment value turns one on.
+The key is dotted, so an older build keeps it and reads nothing into it.
+
+Health reports egress truthfully once a purpose can send. With any purpose enabled (a
+mode other than `off` and a cap above 0), `network_state` is never `offline`, even under
+a `deterministic` selector: it is `idle`, or `transferred` once a typed decision has sent
+bytes, which `ask` stamps in `logs/decide-transfer.json` (one timestamp, nothing else),
+and `last_transfer_age_seconds` is the newer of the selector's and the purposes'
+transfers. `metrics.decide_purposes` gives `enabled` and `ignored` counts. With no
+purpose named, health is exactly as before and `decide_purposes` is absent. Health
+reads the config only, so an environment switch that turns the purposes off does not
+change what it reports.
 
 Each call that is not `disabled` appends one line to `logs/decide-<purpose>.jsonl`
 (private file mode, rotated once at 5 MiB): `ts`, `purpose`, `mode`, `outcome`,
