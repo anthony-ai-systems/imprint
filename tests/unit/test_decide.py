@@ -365,6 +365,20 @@ def test_the_deadline_holds(tmp_path):
     assert time.monotonic() - begun < 0.9
 
 
+def test_the_deadline_covers_reading_the_reply(tmp_path, monkeypatch):
+    read = Noul.parse
+
+    def slow(self, answer):
+        time.sleep(1.0)
+        return read(self, answer)
+
+    monkeypatch.setattr(Noul, "parse", slow)
+    begun = time.monotonic()
+    result = call(tmp_path, Fake(), qs={"asks_refund": noul("Is it?")}, timeout_seconds=0.2)
+    assert (result.outcome, result.reason, result.answers, result.request_sent) == ("fallback", "timeout", {}, True)
+    assert time.monotonic() - begun < 0.9
+
+
 def test_the_default_transport_is_the_selectors_and_the_guard_stops_it(tmp_path):
     result = call(tmp_path, None, timeout_seconds=2)
     assert (result.outcome, result.reason, result.request_sent) == ("fallback", "http_error", True)

@@ -515,29 +515,35 @@ def ask(
             return finish("fallback", "timeout")
         request_bytes = len(encoded)
         request_sent = True
-        raw = _run_with_deadline(lambda: send(settings.endpoint, encoded, headers, remaining), remaining)
-        try:
-            value = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, RecursionError, AttributeError) as exc:
-            raise _BadResponse("response is not JSON") from exc
-        if not isinstance(value, dict) or not isinstance(value.get("answers"), dict):
-            raise _BadResponse("response answers must be an object")
-        replies = value["answers"]
-        answers: dict[str, Answer] = {}
-        shapes: dict[str, dict[str, str]] = {}
-        dropped: list[str] = []
-        for question_name, question in named.items():
-            reply = replies.get(question_name)
-            if question_name in replies:
-                shapes[question_name] = _shape(reply)
+
+        def exchange() -> tuple[dict[str, Any], dict[str, Answer], dict[str, dict[str, str]], list[str]]:
+            """Send, then read the reply, all inside the one deadline."""
+            raw = send(settings.endpoint, encoded, headers, remaining)
             try:
-                parsed = question.parse(reply) if reply is not None else None
-            except Exception:
-                parsed = None  # one answer that cannot be read never costs the others
-            if parsed is None:
-                dropped.append(question_name)
-            else:
-                answers[question_name] = parsed
+                value = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError, AttributeError) as exc:
+                raise _BadResponse("response is not JSON") from exc
+            if not isinstance(value, dict) or not isinstance(value.get("answers"), dict):
+                raise _BadResponse("response answers must be an object")
+            replies = value["answers"]
+            answers: dict[str, Answer] = {}
+            shapes: dict[str, dict[str, str]] = {}
+            dropped: list[str] = []
+            for question_name, question in named.items():
+                reply = replies.get(question_name)
+                if question_name in replies:
+                    shapes[question_name] = _shape(reply)
+                try:
+                    parsed = question.parse(reply) if reply is not None else None
+                except Exception:
+                    parsed = None  # one answer that cannot be read never costs the others
+                if parsed is None:
+                    dropped.append(question_name)
+                else:
+                    answers[question_name] = parsed
+            return value, answers, shapes, dropped
+
+        value, answers, shapes, dropped = _run_with_deadline(exchange, remaining)
         if not answers:
             return finish(
                 "fallback", "bad_response", dropped=tuple(dropped), shapes=shapes,
