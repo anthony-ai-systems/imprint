@@ -21,10 +21,12 @@ What is confirmed and what is not, against the live API:
 
 The public docs do not pin the shape of ``probabilities`` for Choice or Score, so
 both an object keyed by option name or level number and an array in request order
-are read. Parsing is defensive: a field the answer does not need is ignored, a
-required field that is missing or out of range rejects the answer, an optional
-field that is present must be valid or the answer is rejected too, and a Choice
-naming an option the request did not send is rejected.
+are read. Either way the answer holds a mapping (option name, or level number, to
+probability) with only the entries the reply gave: nothing is filled in. Parsing is
+defensive: a field the answer does not need is ignored, a required field that is
+missing or out of range rejects the answer, an optional field that is present must
+be valid or the answer is rejected too, and a Choice naming an option the request
+did not send is rejected.
 """
 
 from __future__ import annotations
@@ -59,6 +61,17 @@ def probability(value: Any) -> float | None:
     except (OverflowError, ValueError):
         return None
     return value if math.isfinite(value) and 0.0 <= value <= 1.0 else None
+
+
+def _level(key: Any, top: int) -> int | None:
+    """A level number written plainly (``"0"`` to ``top``), or None. ``isdigit`` alone
+    would pass superscripts and other scripts' digits, which ``int`` refuses or reads."""
+    if not isinstance(key, str) or not 0 < len(key) <= 4 or not key.isascii() or not key.isdigit():
+        return None
+    if key != str(int(key)):  # no leading zeros, so one level has one spelling
+        return None
+    level = int(key)
+    return level if level <= top else None
 
 
 def _optional_probability(answer: Mapping[str, Any], field: str) -> tuple[bool, float | None]:
@@ -96,13 +109,14 @@ class ChoiceAnswer:
 class ScoreAnswer:
     score: float
     confidence: float | None = None
-    probabilities: tuple[float, ...] | None = None
+    # Level number to probability, holding only the levels the reply gave.
+    probabilities: Mapping[int, float] | None = None
     type: str = "score"
 
     def values(self) -> dict[str, object]:
         value: dict[str, object] = {"score": round(self.score, 4), "confidence": _rounded(self.confidence)}
         if self.probabilities is not None:
-            value["probabilities"] = [round(p, 4) for p in self.probabilities]
+            value["probabilities"] = {str(level): round(p, 4) for level, p in sorted(self.probabilities.items())}
         return value
 
 
@@ -229,24 +243,23 @@ class Score:
         if not valid:
             return None
         raw = answer.get("probabilities")
-        probabilities: tuple[float, ...] | None = None
+        probabilities: dict[int, float] | None = None
         if isinstance(raw, list):
             if len(raw) != len(self.levels):
                 return None
             values = [probability(item) for item in raw]
             if any(item is None for item in values):
                 return None
-            probabilities = tuple(values)  # type: ignore[arg-type]
+            probabilities = dict(enumerate(values))  # type: ignore[arg-type]
         elif isinstance(raw, Mapping):
-            levels = [0.0] * len(self.levels)
+            # Kept as sent, like a Choice's: a level the reply leaves out stays out.
+            probabilities = {}
             for key, item in raw.items():
-                if not isinstance(key, str) or not key.isdigit() or int(key) > top:
-                    return None
+                level = _level(key, top)
                 p = probability(item)
-                if p is None:
+                if level is None or p is None:
                     return None
-                levels[int(key)] = p
-            probabilities = tuple(levels)
+                probabilities[level] = p
         elif raw is not None:
             return None
         return ScoreAnswer(value, confidence, probabilities)

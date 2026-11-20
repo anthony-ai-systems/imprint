@@ -201,7 +201,7 @@ def test_typed_answers_come_back_for_each_primitive(tmp_path):
     assert result.answers == {
         "asks_refund": NoulAnswer(0.81),
         "kind": ChoiceAnswer("refund", 0.7, {"refund": 0.8, "repair": 0.15, "other": 0.05}),
-        "temper": ScoreAnswer(1.6, 0.5, (0.1, 0.2, 0.7)),
+        "temper": ScoreAnswer(1.6, 0.5, {0: 0.1, 1: 0.2, 2: 0.7}),
     }
     assert (result.dropped, result.model_echoed, result.usage) == ((), "jev-1.13.0", {"input_tokens": 40, "output_tokens": 9})
     assert result.shapes["kind"] == {
@@ -215,7 +215,10 @@ def test_probabilities_in_request_order_or_by_level_number_are_read():
     ) == ChoiceAnswer("b", None, {"a": 0.25, "b": 0.75})
     assert Score("How?", ("Low.", "Mid.", "High.")).parse(
         {"type": "score", "score": 2, "probabilities": {"0": 0.1, "2": 0.9}},
-    ) == ScoreAnswer(2.0, None, (0.1, 0.0, 0.9))
+    ) == ScoreAnswer(2.0, None, {0: 0.1, 2: 0.9})
+    assert Score("How?", ("Low.", "Mid.", "High.")).parse(
+        {"type": "score", "score": 2, "probabilities": [0.1, 0.0, 0.9]},
+    ) == ScoreAnswer(2.0, None, {0: 0.1, 1: 0.0, 2: 0.9})
 
 
 NOUL = Noul("Is it so?")
@@ -259,6 +262,49 @@ def test_a_malformed_answer_is_rejected(question, answer):
 def test_unknown_fields_are_ignored():
     assert NOUL.parse({"type": "noul", "noul": 0.4, "confidence": "anything", "note": [1]}) == NoulAnswer(0.4)
     assert SCORE.parse({"type": "score", "score": 0.5, "legend": ["x"], "future": {}}) == ScoreAnswer(0.5)
+
+
+@pytest.mark.parametrize("key", ["²", "١", "01", "-1", " 1", "1.0", ""], ids=lambda _: "")
+def test_a_level_key_that_is_not_a_plain_level_number_is_rejected_not_raised(key):
+    assert SCORE.parse({"type": "score", "score": 1, "probabilities": {key: 0.5}}) is None
+
+
+def test_one_answer_that_cannot_be_read_never_costs_the_others(tmp_path):
+    def reply(name, question):
+        value = default_reply(name, question)
+        return {**value, "probabilities": {"²": 0.5}} if name == "temper" else value
+
+    result = call(tmp_path, Fake(reply))
+    assert (result.outcome, set(result.answers), result.dropped) == ("answered", {"asks_refund", "kind"}, ("temper",))
+
+
+class Exploding(Noul):
+    def parse(self, answer):
+        raise RuntimeError("synthetic parser fault")
+
+
+def test_a_parser_that_raises_drops_only_its_own_answer(tmp_path):
+    result = call(tmp_path, Fake(), qs={**questions(), "fragile": Exploding("Is it so?")})
+    assert (result.outcome, set(result.answers), result.dropped) == (
+        "answered", {"asks_refund", "kind", "temper"}, ("fragile",),
+    )
+
+
+def test_a_sparse_probability_object_is_kept_and_logged_as_sent(tmp_path):
+    def reply(name, question):
+        value = default_reply(name, question)
+        if name == "kind":
+            return {**value, "probabilities": {"refund": 0.8}}
+        if name == "temper":
+            return {**value, "probabilities": {"2": 0.7}}
+        return value
+
+    result = call(tmp_path, Fake(reply))
+    assert result.answers["kind"].probabilities == {"refund": 0.8}
+    assert result.answers["temper"].probabilities == {2: 0.7}
+    (line,) = log_lines(tmp_path)
+    assert line["answers"]["kind"]["probabilities"] == {"refund": 0.8}
+    assert line["answers"]["temper"]["probabilities"] == {"2": 0.7}
 
 
 def test_a_partial_answer_set_keeps_what_is_valid_and_names_the_rest(tmp_path):
@@ -510,7 +556,7 @@ def test_the_decision_log_is_content_free(tmp_path):
         "asks_refund": {"type": "noul", "noul": 0.81},
         "kind": {"type": "choice", "choice": "refund", "confidence": 0.7,
                  "probabilities": {"other": 0.05, "refund": 0.8, "repair": 0.15}},
-        "temper": {"type": "score", "score": 1.6, "confidence": 0.5, "probabilities": [0.1, 0.2, 0.7]},
+        "temper": {"type": "score", "score": 1.6, "confidence": 0.5, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}},
     }
     assert (answered["purpose"], answered["outcome"], answered["reason"], answered["request_sent"]) == (
         "probe", "answered", None, True,

@@ -423,7 +423,10 @@ def ask(
             reply = replies.get(question_name)
             if question_name in replies:
                 shapes[question_name] = _shape(reply)
-            parsed = question.parse(reply) if reply is not None else None
+            try:
+                parsed = question.parse(reply) if reply is not None else None
+            except Exception:
+                parsed = None  # one answer that cannot be read never costs the others
             if parsed is None:
                 dropped.append(question_name)
             else:
