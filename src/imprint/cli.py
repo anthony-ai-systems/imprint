@@ -1612,8 +1612,14 @@ def main(argv: list[str] | None = None) -> int:
         })
         return 2
     except BaseException:  # the SIGTERM handler's exit comes through here too
-        if turn is not None:
-            turn.abandon()
+        kept = turn.abandon() if turn is not None else {}
+        # Only a bridged Stop past its write has a line to hand over; the error
+        # itself still goes out as it would have.
+        if kept:
+            try:
+                _write_json(kept)
+            except Exception:
+                pass
         raise
     finally:
         if turn is not None:
