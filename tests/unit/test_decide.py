@@ -530,6 +530,35 @@ def test_a_counter_it_cannot_trust_fails_closed(tmp_path, content):
     assert calls_today(tmp_path / "op", "probe", day=DAY) is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock")
+def test_a_held_counter_lock_gives_up_inside_the_deadline(tmp_path):
+    import fcntl
+
+    logs = tmp_path / "op" / "logs"
+    logs.mkdir(parents=True)
+    fake = Fake()
+    results: list = []
+    with open(logs / "decide-calls.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        worker = threading.Thread(target=lambda: results.append(call(tmp_path, fake, timeout_seconds=0.3)), daemon=True)
+        worker.start()
+        worker.join(5)
+        stuck = worker.is_alive()
+    worker.join(5)
+    assert not stuck, "ask waited on the counter lock past its deadline"
+    (result,) = results
+    assert (result.outcome, result.reason, fake.calls) == ("capped", "cap_unavailable", [])
+    assert calls_today(tmp_path / "op", "probe", day=DAY) == 0
+
+
+def test_a_call_already_out_of_time_takes_nothing_from_the_cap(tmp_path):
+    ticks = iter([0.0])
+    fake = Fake()
+    result = call(tmp_path, fake, clock=lambda: next(ticks, 100.0))
+    assert (result.outcome, result.reason, fake.calls) == ("fallback", "timeout", [])
+    assert calls_today(tmp_path / "op", "probe", day=DAY) == 0
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
 def test_the_counter_and_log_are_private(tmp_path):
     call(tmp_path, Fake())

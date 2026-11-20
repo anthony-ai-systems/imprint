@@ -59,6 +59,7 @@ DECISION_LOG_MAX_BYTES = 5 * 1024 * 1024
 COUNTER_NAME = "decide-calls.json"
 COUNTER_LOCK_NAME = "decide-calls.lock"
 MAX_COUNTER_BYTES = 4096
+_LOCK_POLL_SECONDS = 0.01
 OUTCOMES = ("answered", "disabled", "capped", "fallback")
 REASONS = frozenset({
     # disabled
@@ -208,9 +209,18 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+class _LockBusy(Exception):
+    pass
+
+
 @contextlib.contextmanager
-def _locked(path: Path) -> Iterator[None]:
-    """Hold an exclusive lock on ``path`` where the platform has ``flock``."""
+def _locked(path: Path, deadline: float, clock: Callable[[], float]) -> Iterator[None]:
+    """Hold an exclusive lock on ``path`` where the platform has ``flock``.
+
+    It never blocks: it tries, and while another process holds the lock it tries
+    again until ``deadline`` on ``clock``, then gives up with ``_LockBusy``. So a
+    stalled holder cannot hold a call past its one deadline.
+    """
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
@@ -218,8 +228,15 @@ def _locked(path: Path) -> Iterator[None]:
             import fcntl
         except ImportError:  # Windows: calls from one process at a time are assumed
             fcntl = None
-        if fcntl is not None:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        while fcntl is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                left = deadline - clock()
+                if left <= 0:
+                    raise _LockBusy() from None
+                time.sleep(min(_LOCK_POLL_SECONDS, left))
         yield
     finally:
         os.close(descriptor)
@@ -264,15 +281,20 @@ def calls_today(root: Path, purpose: str, *, day: str | None = None) -> int | No
         return None
 
 
-def _reserve(root: Path, purpose: str, cap: int, day: str) -> str | None:
-    """Take one call from today's cap. None when taken, else the closed reason."""
+def _reserve(
+    root: Path, purpose: str, cap: int, day: str, deadline: float, clock: Callable[[], float],
+) -> str | None:
+    """Take one call from today's cap. None when taken, else the closed reason.
+
+    A lock still held by another process at ``deadline`` is ``cap_unavailable``.
+    """
     if cap <= 0:
         return "cap_reached"
     try:
         path = counter_path(root)
         if not path.parent.is_dir():
             secure_directory(path.parent)
-        with _locked(path.parent / COUNTER_LOCK_NAME):
+        with _locked(path.parent / COUNTER_LOCK_NAME, deadline, clock):
             calls = _read_counter(path, day)
             if calls.get(purpose, 0) >= cap:
                 return "cap_reached"
@@ -394,7 +416,12 @@ def ask(
             key = resolve_api_key(settings)
         except _KeyUnavailable as exc:
             return finish("fallback", exc.reason)
-        refused = _reserve(root, name, cap, day or _today())
+        # Out of time before the cap is touched costs nothing from it. Past this point
+        # the call is counted, even if the deadline then passes before it sends: the
+        # cap counts calls taken, which is never fewer than calls sent.
+        if deadline - clock() <= 0:
+            return finish("fallback", "timeout")
+        refused = _reserve(root, name, cap, day or _today(), deadline, clock)
         if refused is not None:
             return finish("capped", refused)
         remaining = deadline - clock()

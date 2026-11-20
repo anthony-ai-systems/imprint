@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -113,8 +114,8 @@ def test_by_default_it_prints_the_plan_and_sends_nothing(probe, tmp_path, ready)
 
 
 @pytest.mark.parametrize("take_away", [
-    "flag_missing_count", "count_23", "count_25", "no_config", "probe_off", "probe_absent", "cap_short",
-    "cap_spent", "no_key", "decide_switch", "selector_switch", "bad_config",
+    "flag_missing_count", "count_23", "count_25", "no_config", "probe_off", "probe_absent", "probe_unreadable",
+    "cap_short", "cap_spent", "no_key", "decide_switch", "selector_switch", "bad_config",
 ])
 def test_it_refuses_to_send_without_every_condition(probe, tmp_path, monkeypatch, ready, take_away):
     argv = ["--config", str(ready), "--send-approved-calls", "24"]
@@ -130,12 +131,14 @@ def test_it_refuses_to_send_without_every_condition(probe, tmp_path, monkeypatch
         write_probe_config(tmp_path, {"probe": {"mode": "off", "daily_cap": 24}})
     elif take_away == "probe_absent":
         write_probe_config(tmp_path, {"event_match": {"mode": "shadow", "daily_cap": 24}})
+    elif take_away == "probe_unreadable":
+        write_probe_config(tmp_path, {"probe": {"mode": "shadow", "daily_cap": 24, "endpoint": "https://elsewhere.invalid"}})
     elif take_away == "cap_short":
         write_probe_config(tmp_path, {"probe": {"mode": "shadow", "daily_cap": 23}})
     elif take_away == "cap_spent":
         from imprint.decide.client import _reserve, _today
 
-        assert _reserve(tmp_path / "data" / "probe", "probe", 24, _today()) is None
+        assert _reserve(tmp_path / "data" / "probe", "probe", 24, _today(), time.monotonic() + 5, time.monotonic) is None
     elif take_away == "no_key":
         monkeypatch.delenv(KEY_ENV)
     elif take_away == "decide_switch":
