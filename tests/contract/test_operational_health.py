@@ -308,7 +308,8 @@ def test_definite_integrity_failure_after_connection_still_degrades(tmp_path):
 
 
 @pytest.mark.parametrize("reason", [
-    "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
+    "t3_entrypoint_unknown", "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed",
+    "transcript_refused",
 ])
 def test_a_skip_that_means_capture_has_stopped_degrades_health(tmp_path, reason):
     report = _health_with_skip_log(tmp_path, _skip_line(reason, 60))

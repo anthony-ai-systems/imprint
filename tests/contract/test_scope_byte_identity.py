@@ -57,8 +57,14 @@ def test_every_scenario_is_there():
     assert len(GOLDEN) == SCENARIOS
 
 
+# Health counts a T3 prompt refused only for its entrypoint among the capture skips,
+# so its report changes by design and nothing else does.
+# test_only_the_designed_changes_differ_from_main shows what changed in it.
+CHANGED_BY_DESIGN = ["health"]
+
+
 def test_no_rows_and_no_extension_replay_mains_bytes():
-    assert different(replay(SOURCE), GOLDEN) == []
+    assert different(replay(SOURCE), GOLDEN) == CHANGED_BY_DESIGN
 
 
 # Every step whose output a thread or the Jev service is handed, and the Jev request bodies.
@@ -165,6 +171,23 @@ def rows_of(store: ImprintStore) -> list[dict]:
 
 def test_the_golden_is_mains_own_output(main_source):
     assert different(replay(main_source), GOLDEN) == []
+
+
+def _health(scenario: str) -> dict:
+    """The printed report. The driver writes a bare <disk> over values the disk decides."""
+    return json.loads(scenario.split("\n", 1)[1].rsplit("\n--\n", 1)[0].replace("<disk>", '"<disk>"'))
+
+
+def _health_as_main_had_it(scenario: str) -> dict:
+    report = _health(scenario)
+    assert report["metrics"]["capture_skips_24h"].pop("t3_entrypoint_unknown") == 0
+    return report
+
+
+def test_only_the_designed_changes_differ_from_main(main_source):
+    ours, mains = replay(SOURCE, "--full"), replay(main_source, "--full")
+    assert different(ours, mains) == CHANGED_BY_DESIGN
+    assert _health_as_main_had_it(ours["health"]) == _health(mains["health"])
 
 
 def test_main_opens_a_store_with_rows_and_leaves_them(tmp_path, main_source, capture_envelope):

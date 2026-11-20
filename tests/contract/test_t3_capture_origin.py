@@ -1450,3 +1450,77 @@ def test_a_current_row_with_no_matching_human_record_is_refused(tmp_path, home, 
     assert [json.loads(line)["reason"] for line in _skip_log(root)] == [reason]
     assert not _spooled(root)
 
+
+# -- an entrypoint T3 has not shipped yet --------------------------------------------
+
+@pytest.mark.parametrize("entrypoint", [
+    "t3-future", "sdk-cli", "cli", "T3-CODE", " t3-code", "", None, 7, ["t3-code"], {"name": "t3-code"},
+])
+def test_a_person_s_prompt_refused_only_for_its_entrypoint_says_so(tmp_path, entrypoint):
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK)))
+    entry = _current_entry(entrypoint=entrypoint)
+    verdict = classify_with_host(entry, FEEDBACK, origin)
+    assert (verdict.is_operator, verdict.basis) == (False, "unverified")
+    assert origin.skip_reason == "t3_entrypoint_unknown"
+
+
+def test_a_prompt_with_no_entrypoint_at_all_says_so_too(tmp_path):
+    entry = _current_entry()
+    del entry["entrypoint"]
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK)))
+    assert classify_with_host(entry, FEEDBACK, origin).is_operator is False
+    assert origin.skip_reason == "t3_entrypoint_unknown"
+
+
+def test_stop_hook_logs_an_unknown_entrypoint_with_no_content(tmp_path):
+    entry = _current_entry(entrypoint="t3-future")
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, entry), _t3_home(tmp_path, _message(FEEDBACK)))
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == {
+        "hook_schema_version": "1.0.0", "status": "skipped",
+        "reason": "t3_entrypoint_unknown", "provenance_basis": "unverified",
+    }
+    (line,) = _skip_log(root)
+    assert set(json.loads(line)) == {"reason", "timestamp"}
+    assert json.loads(line)["reason"] == "t3_entrypoint_unknown"
+    assert not _spooled(root)
+
+
+@pytest.mark.parametrize("home", [
+    {"messages": (_message(FEEDBACK, by="agent", source="mcp"),)},
+    {"messages": (_message(FEEDBACK, scheduledTaskId="task-1"),)},
+    {"messages": (_message(WAKE, by="agent", source="server"),), "text": WAKE},
+    {"messages": (_message("Different words entirely."),)},
+    {"messages": (_message(FEEDBACK),), "providers": (_provider_thread("session-other"),)},
+    {"messages": (_message(FEEDBACK),), "threads": "scratch"},
+    {"messages": (_message(FEEDBACK, source="mcp"),)},
+], ids=["agent", "scheduled", "wake", "other_words", "other_session", "scratch", "marked_window"])
+def test_an_unknown_entrypoint_with_more_than_one_fault_stays_an_ordinary_skip(tmp_path, home):
+    options = {}
+    if "providers" in home:
+        options["providers"] = home["providers"]
+    if home.get("threads") == "scratch":
+        options["threads"] = _in_folder(_scratch_chat(tmp_path))
+    text = home.get("text", FEEDBACK)
+    entry = _current_entry(text, entrypoint="t3-future")
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, entry), _t3_home(tmp_path, *home["messages"], **options))
+    assert json.loads(run.stdout)["reason"] == "unverified_provenance"
+    assert _skip_log(root) == []
+    assert not _spooled(root)
+
+
+def test_an_unknown_entrypoint_never_overturns_a_declared_refusal(tmp_path):
+    entry = _current_entry(entrypoint="t3-future", promptSource="system", origin={"kind": "task-notification"})
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK)))
+    assert classify_with_host(entry, FEEDBACK, origin).basis == "origin"
+    assert origin.skip_reason is None
+
+
+def test_health_degrades_on_an_unknown_entrypoint(tmp_path):
+    entry = _current_entry(entrypoint="t3-future")
+    _, root = _stop_hook(tmp_path, _current_exchange(tmp_path, entry), _t3_home(tmp_path, _message(FEEDBACK)))
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    report = health_report(root, store, {"compiler": "imprint-hook"})
+    assert "t3_entrypoint_unknown" in report["degraded_reasons"]
+    assert report["metrics"]["capture_skips_24h"]["t3_entrypoint_unknown"] == 1

@@ -7,10 +7,11 @@ HEALTH_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_RECORD_MAJOR = 3
 SUPPORTED_HOOK_MAJOR = 1
 # A transcript refused or malformed used to surface as a hook failure. T3 session
-# references going unreadable stops all T3 capture. Any one of these needs someone
-# to look.
+# references going unreadable, or a T3 entrypoint no build knows, stops all T3
+# capture. Any one of these needs someone to look.
 _DEGRADING_CAPTURE_SKIPS = (
-    "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
+    "t3_entrypoint_unknown", "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed",
+    "transcript_refused",
 )
 # A live service can time out once. This many failed selections in a row, with no
 # reply from Jev between them, means it is down or selection cannot reach it. The
