@@ -16,7 +16,8 @@ object and preserves unknown namespaced extensions.
   reads T3's local thread, project, message and provider-thread records to verify who
   wrote a T3 prompt. Prompts in threads T3 keeps in its scratch folder, its "No
   project" chats, are not credited. A record it cannot read is reported as
-  `t3_record_unavailable`. See
+  `t3_record_unavailable`, and a person's prompt refused only because its entrypoint
+  is not one T3 has shipped (`sdk-ts` or `t3-code`) as `t3_entrypoint_unknown`. See
   `docs/contracts/capture-origin.md`. Stop capture runs only where Imprint's
   hooks are registered, so a host with its own Claude config directory needs
   them registered there with `manage_hooks.py`; see Hook registration below.

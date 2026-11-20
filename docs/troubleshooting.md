@@ -29,6 +29,13 @@ counted: `hook_failure_count` is every file, split into
 `hook_failure_recent_count` and `hook_failure_old_count`. Health never deletes
 one. `imprint spool prune` is the only thing that does, and it is never automatic.
 
+`t3_entrypoint_unknown` means a prompt T3 records as typed by a person was refused
+only because its transcript entry names an entrypoint this build does not know. T3
+renamed its entrypoint once already, from `sdk-ts` to `t3-code`, and every T3 prompt
+was refused until a build knew the new name. Install a build that names the new
+entrypoint in `T3_ENTRYPOINTS`. The turns refused before then are not retried. See
+`docs/contracts/capture-origin.md`.
+
 `selector_key_unavailable` means the store is on `selector.mode: jev` and the key
 check failed, so every turn falls back to deterministic delivery. Set the key in the
 variable `selector.jev.api_key_env` names, or make `selector.jev.api_key_file` a

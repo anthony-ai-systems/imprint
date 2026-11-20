@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Capture T3 prompts again. T3 renamed the entrypoint on its Claude prompts from
+  `sdk-ts` to `t3-code` in early November 2026, and with `t3_capture_origin: true`
+  every T3 prompt has since been refused as `unverified_provenance`, with nothing
+  logged. Both names are now accepted, from one set, `T3_ENTRYPOINTS`. T3's record of
+  a human author is checked exactly as before, so wakes, task notifications,
+  scheduled tasks, scratch threads and prompts with no matching human record are
+  still refused. A person's prompt that T3's records would have credited, refused
+  only because its entrypoint is not in that set, now returns
+  `t3_entrypoint_unknown`, is logged to `logs/capture-skips.jsonl` with no content,
+  is counted in `capture_skips_24h` and degrades health, so the next rename shows at
+  once. Turns refused before this build are not retried.
 - Carry a scope on each record, with nothing reading it yet. A new `record_scope`
   table holds one row per retrievable record, and a record with none is legacy. A
   row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and
