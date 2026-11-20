@@ -24,8 +24,9 @@ _ROUTED_ACTIONS = frozenset({"session-start", "user-prompt-submit", "stop-captur
 class _RouteLine:
     """Where one hook turn came to, written once however the bridge leaves it.
 
-    The hook hands over its line. Anything else that ends the turn is a failure,
-    and only this process can see it, so the hook writes no line of its own.
+    The hook hands over its line, and so does a failed Stop that had written its
+    envelope. Anything else that ends the turn is a failure, and only this process
+    can see it, so the hook writes no line of its own.
     """
 
     def __init__(self, action: str):
@@ -106,6 +107,23 @@ def _persist_failure(action: str, process: subprocess.CompletedProcess[str]) -> 
         secure_file(path)
     except Exception:
         pass
+
+
+def _kept_line(action: str, stdout: str):
+    """The captured line a failed Stop hands over once its envelope is written.
+
+    A failed hook's word is taken for nothing else.
+    """
+    if action != "stop-capture":
+        return None
+    try:
+        body = json.loads(stdout) if stdout else None
+    except (ValueError, RecursionError):
+        return None
+    entry = body.get("_imprint_route") if isinstance(body, dict) else None
+    if isinstance(entry, dict) and entry.get("route") == "stop_capture" and entry.get("outcome") == "captured":
+        return entry
+    return None
 
 
 def _failure(action: str, error: str, line: _RouteLine, *, stop_hook_active: bool = False) -> int:
@@ -189,6 +207,7 @@ def _run(action: str, line: _RouteLine) -> int:
         valid_degraded_health = isinstance(body, dict) and body.get("status") == "degraded"
     if process.returncode and not valid_degraded_health:
         _persist_failure(action, process)
+        line.entry = _kept_line(action, process.stdout)
         return _failure(action, "hook_action_failed", line, stop_hook_active=stop_hook_active)
     if process.stdout:
         if body is None:
