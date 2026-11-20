@@ -552,13 +552,18 @@ def test_a_held_counter_lock_gives_up_inside_the_deadline(tmp_path):
     logs.mkdir(parents=True)
     fake = Fake()
     results: list = []
+    deadline, allowance = 0.3, 1.2
     with open(logs / "decide-calls.lock", "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
-        worker = threading.Thread(target=lambda: results.append(call(tmp_path, fake, timeout_seconds=0.3)), daemon=True)
+        worker = threading.Thread(
+            target=lambda: results.append(call(tmp_path, fake, timeout_seconds=deadline)), daemon=True,
+        )
         worker.start()
-        worker.join(5)
+        # The lock stays held through this wait, so a worker that is done by its end
+        # gave up on the lock itself, within its deadline and a scheduling allowance.
+        worker.join(deadline + allowance)
         stuck = worker.is_alive()
-    worker.join(5)
+    worker.join(5)  # cleanup only, after the lock is let go
     assert not stuck, "ask waited on the counter lock past its deadline"
     (result,) = results
     assert (result.outcome, result.reason, fake.calls) == ("capped", "cap_unavailable", [])
