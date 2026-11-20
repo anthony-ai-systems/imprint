@@ -60,6 +60,11 @@ object and preserves unknown namespaced extensions.
 - `org.imprint.client_carrier.clients`: `null` (default) or an absolute path. The
   client list the carrier step reads at run time. Unset or unreadable, it names no
   client and writes nothing.
+- `org.imprint.health.capture_silence_days`: `null` (default) or a whole number of
+  days, 1 to 365. When set, `imprint health` degrades with `capture_silent` when no
+  capture has landed in that many days while the Stop hook ran at least 10 times in
+  them; see Capture silence below. Unset, health never asks, and adds none of the
+  `capture_silence_` fields.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -266,13 +271,13 @@ route log below can.
 ## Hook route log
 
 Each turn of the two hooks that deliver memory, session start and the prompt hook,
-appends one line to `<operator root>/logs/hook-routes.jsonl` (private file mode).
-This happens on every selector mode, whatever `log_decisions` says, and it never
-changes what a hook delivers. At 5 MiB the file rotates once to
-`hook-routes.jsonl.1`. The stop and health hooks deliver no memory and write no
+appends one line to `<operator root>/logs/hook-routes.jsonl` (private file mode),
+and so does each Stop; see Stop lines below. This happens on every selector mode,
+whatever `log_decisions` says, and it never changes what a hook delivers or prints.
+At 5 MiB the file rotates once to `hook-routes.jsonl.1`. The health hook writes no
 line, and `imprint retrieve` is not a hook, so it writes none either.
 
-Each turn lands on exactly one `outcome`:
+Each turn of a memory hook lands on exactly one `outcome`:
 
 - `delivered`: bytes went out, and nothing below applies.
 - `nothing_relevant`: the turn had nothing to deliver. No matched domain, no picks
@@ -295,8 +300,8 @@ A failed selection stays `failed`, and a scratch turn stays `scratch_skip`, even
 when the deterministic path then delivers its domain, so a dead Jev on a matched
 domain does not read as `delivered`. `bytes` says what went out either way.
 
-A line holds `ts`, `route` (`session_start` or `user_prompt_submit`), `outcome`,
-`detail`, `bytes`, `mode` (the selector mode in force), `method` and `answered`.
+A line holds `ts`, `route` (`session_start`, `user_prompt_submit` or `stop_capture`),
+`outcome`, `detail`, `bytes`, `mode` (the selector mode in force), `method` and `answered`.
 `method` is the hook output's `selector_method`, `deterministic` on a turn that
 reports none, which includes every session start, or null when the hook could not say
 how the turn went. `answered` is true only when Jev replied on that turn, and it stays
@@ -338,6 +343,70 @@ them.
   which `hook_failures_present` reports. Damaged log lines count as nothing. Only an
   unbroken run raises this reason, so a Jev that fails on and off shows only in
   `selector_fallbacks_24h` and `hook_route_outcomes_24h`.
+
+## Stop lines
+
+A Stop that captures nothing looks the same from outside whether nobody gave feedback
+or every prompt was refused. So each Stop appends one `stop_capture` line to the same
+file, under the same rotation, and lands on exactly one `outcome`:
+
+- `captured`: the capture's envelope was written. `detail` is `compiled` when it was
+  compiled in the same call and `spool_only` when the compiler is off.
+- `not_feedback`: the detector did not read the operator's words as feedback, or
+  nothing of the operator's was left once pastes and quotes were removed.
+- `origin_unverified`: the newest prompt came by a transport that does not say who
+  wrote it, and nothing vouched for it. This is the receipt's `unverified_provenance`.
+- Each other reason the Stop receipt can give, under its own name: `machine_origin`,
+  `synthetic_transcript_entry`, `no_operator_message`, `operator_turn_expired`,
+  `operator_turn_already_captured`, `feedback_text_unavailable`,
+  `operator_text_oversized`, `transcript_unavailable`, `transcript_refused`,
+  `transcript_malformed`, `transcript_tail_exhausted`, `t3_record_unavailable`,
+  `t3_session_ref_unreadable`, `t3_session_unmatched`, `t3_prompt_unmatched`,
+  `t3_marked_window`, `t3_scratch_thread` and `t3_entrypoint_unknown`.
+  `docs/contracts/capture-origin.md` says what each means.
+- `failed`: the capture raised, or the hook timed out, crashed, gave output it could
+  not use, reported no line or could not start, as on the other routes. `detail` is
+  the error code: `hook_exception` when the hook ran on its own, otherwise the
+  bridge's, such as `hook_action_failed`. Input a retry cannot change is `failed`
+  with `hook_input_invalid`, as it is on the other routes, and so is any receipt
+  reason not listed above, with `unknown_reason`, so one added later cannot pass as
+  a skip.
+
+For a skip, `detail` is the receipt's `provenance_basis` where it gives one, such as
+`unverified`, `structure`, `origin` or `transport`, and otherwise null. A Stop line
+always has `bytes` 0, `method` null and `answered` false. Its `mode` is the selector
+mode in force, except on a Stop that `IMPRINT_CAPTURE_ORIGIN` marks, which is skipped
+before the config is read: under the hook bridge its line has `mode` null, and run
+on its own, outside the bridge, it writes no line at all. A Stop line holds no prompt,
+no statement, no session and no path. What the Stop prints is unchanged.
+
+`hook_route_outcomes_24h.stop_capture` counts the last day of these lines by outcome,
+beside the other routes. `capture_newest_age_seconds` is the age of the newest
+capture envelope in the spool, or -1 when there is none. Every spool file is a
+capture, from the Stop hook or `imprint capture`, so this is the age of the newest
+capture that landed, whether or not it has compiled. `imprint spool prune` removes
+old acknowledged envelopes, so after a prune it can read older or -1.
+
+## Capture silence
+
+With `org.imprint.health.capture_silence_days` set to a number of days, `imprint
+health` adds the degraded reason `capture_silent` when both hold:
+
+- no capture has landed in that many days: `capture_newest_age_seconds` is -1 or
+  older than the window, and
+- the Stop hook wrote at least 10 lines in the same window
+  (`capture_silence_min_stops`), whatever their outcome.
+
+A store nobody used in the window is quiet, not silent, so it is not degraded. Every
+Stop line counts, `machine_origin` included, because a marker set where people type
+would stop all capture too. So on a store that only automation reaches, leave the key
+unset. The window is read from the newest 2 MiB of the route log, current and rotated
+file, so on a busy store a long window counts only what that tail holds, which is
+always far more than 10 lines. Health then also reports `capture_silence_days`,
+`capture_silence_stop_calls` (the Stop lines in the window) and
+`capture_silence_min_stops`. With the key unset none of these appear and the reason
+is never raised. Stop lines exist only from the build that writes them, so the
+reason cannot be raised by Stops from before it.
 
 ## Short lines
 

@@ -36,6 +36,19 @@ was refused until a build knew the new name. Install a build that names the new
 entrypoint in `T3_ENTRYPOINTS`. The turns refused before then are not retried. See
 `docs/contracts/capture-origin.md`.
 
+`capture_silent` appears only when `org.imprint.health.capture_silence_days` is set.
+It means no capture has landed in that many days while the Stop hook ran at least
+`capture_silence_min_stops` times. Read `hook_route_outcomes_24h.stop_capture`
+and the `stop_capture` lines in `logs/hook-routes.jsonl`. Mostly `not_feedback`
+means the hook works and nothing it saw read as feedback. Mostly `origin_unverified`
+or one `t3_` reason means prompts are being refused, and `capture_skips_24h` and
+`docs/contracts/capture-origin.md` say why. Mostly `machine_origin` means
+`IMPRINT_CAPTURE_ORIGIN` is set where people type, or the store sees only
+automation, where the key should stay unset. `failed` lines leave files in
+`logs/hook-failures`. If the Stop hook writes no lines at all, it is not registered
+or not running: see Hook registration in `docs/configuration.md`, and note that the
+reason needs Stop lines, so a hook that never runs cannot raise it.
+
 `selector_key_unavailable` means the store is on `selector.mode: jev` and the key
 check failed, so every turn falls back to deterministic delivery. Set the key in the
 variable `selector.jev.api_key_env` names, or make `selector.jev.api_key_file` a

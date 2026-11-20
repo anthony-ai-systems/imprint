@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Record where each Stop went. Every Stop now adds one content-free `stop_capture`
+  line to `logs/hook-routes.jsonl`, under the same rotation as the other routes, on
+  exactly one outcome: `captured`, `not_feedback`, `origin_unverified`, each other
+  reason the Stop receipt gives under its own name, or `failed`. A receipt reason a
+  later build adds without naming it reads `failed`. Health reports the last day as
+  `hook_route_outcomes_24h.stop_capture`, beside the other routes, and gains
+  `capture_newest_age_seconds`, the age of the newest capture envelope. A new key,
+  `org.imprint.health.capture_silence_days`, unset by default, makes health degrade
+  with `capture_silent` when no capture has landed in that many days while the Stop
+  hook ran at least 10 times in them. Unset, it changes nothing. What the Stop hook
+  prints to the host does not change. A Stop marked by `IMPRINT_CAPTURE_ORIGIN` still
+  reads no config, so run outside the hook bridge it writes no line. The
+  byte-identity replay now expects the route log on disk and the health report to
+  differ from main, and shows those are the only changes.
 - Capture T3 prompts again. T3 renamed the entrypoint on its Claude prompts from
   `sdk-ts` to `t3-code` in early November 2026, and with `t3_capture_origin: true`
   every T3 prompt has since been refused as `unverified_provenance`, with nothing
