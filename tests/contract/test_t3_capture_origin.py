@@ -1509,6 +1509,23 @@ def test_an_unknown_entrypoint_with_more_than_one_fault_stays_an_ordinary_skip(t
     assert not _spooled(root)
 
 
+def test_an_unknown_entrypoint_whose_records_cannot_be_read_is_an_ordinary_skip(tmp_path):
+    """A run that only inherited the thread variable must not report T3 unreadable."""
+    absent = {T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp_path / "absent")}
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry(entrypoint="sdk-cli")), absent)
+    assert json.loads(run.stdout)["reason"] == "unverified_provenance"
+    assert _skip_log(root) == []
+    assert not _spooled(root)
+
+
+def test_a_failed_look_for_an_unknown_entrypoint_leaves_a_later_read_to_say_so(tmp_path):
+    origin = t3_host_origin(ON, SESSION, {T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp_path / "absent")})
+    assert classify_with_host(_current_entry(entrypoint="sdk-cli"), FEEDBACK, origin).is_operator is False
+    assert (origin.read_failed, origin.skip_reason) == (False, None)
+    assert classify_with_host(_current_entry(), FEEDBACK, origin).is_operator is False
+    assert (origin.read_failed, origin.skip_reason) == (True, "t3_record_unavailable")
+
+
 def test_an_unknown_entrypoint_never_overturns_a_declared_refusal(tmp_path):
     entry = _current_entry(entrypoint="t3-future", promptSource="system", origin={"kind": "task-notification"})
     origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK)))
