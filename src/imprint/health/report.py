@@ -17,6 +17,8 @@ _DEGRADING_CAPTURE_SKIPS = (
 # reply from Jev between them, means it is down or selection cannot reach it. The
 # window is the hook route log's.
 SELECTOR_FAILURE_LIMIT = 3
+# The routes whose turns can select, and so whose lines can show a selection ran.
+_SELECTING_ROUTES = ("session_start", "user_prompt_submit")
 # With org.imprint.health.capture_silence_days set, a window with no capture says
 # nothing unless the Stop hook ran at least this often in it: an idle store is quiet.
 CAPTURE_SILENCE_MIN_STOPS = 10
@@ -114,8 +116,12 @@ class HealthReport:
 
 def _route_evidence(values: HealthInputs) -> str:
     """Every fallback writes a route line, so a log with none beside them took none,
-    and its run of failures is not evidence that there were none."""
-    lines = sum(count for counts in values.hook_route_outcomes_24h.values() for count in counts.values())
+    and its run of failures is not evidence that there were none. A Stop never
+    selects, so its lines say nothing about that."""
+    lines = sum(
+        count for route in _SELECTING_ROUTES
+        for count in values.hook_route_outcomes_24h.get(route, {}).values()
+    )
     blind = values.selector_mode == "jev" and not lines and values.selector_fallbacks_24h >= SELECTOR_FAILURE_LIMIT
     return "unavailable" if blind else "operator_logs_hook_routes_tail"
 

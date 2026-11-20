@@ -451,12 +451,18 @@ def fallbacks(root, count: int) -> None:
 TAIL = "operator_logs_hook_routes_tail"
 
 
+# A Stop never selects, so its line is no evidence about selection either way.
+STOP_LINE = line(route="stop_capture", outcome="captured", detail="compiled", method=None)
+
+
 @pytest.mark.parametrize("count, mode, entries, evidence", [
     (SELECTOR_FAILURE_LIMIT, "jev", (), "unavailable"),
     (SELECTOR_FAILURE_LIMIT - 1, "jev", (), TAIL),
     (SELECTOR_FAILURE_LIMIT, "jev", (line(),), TAIL),
     (SELECTOR_FAILURE_LIMIT, "shadow", (), TAIL),
-], ids=["no_lines", "under_the_limit", "the_log_has_lines", "not_on_jev"])
+    (SELECTOR_FAILURE_LIMIT, "jev", (STOP_LINE, STOP_LINE), "unavailable"),
+    (SELECTOR_FAILURE_LIMIT, "jev", (STOP_LINE, line()), TAIL),
+], ids=["no_lines", "under_the_limit", "the_log_has_lines", "not_on_jev", "only_stop_lines", "stop_and_prompt_lines"])
 def test_fallbacks_with_no_route_lines_say_the_log_is_not_evidence(tmp_path, count, mode, entries, evidence):
     root = tmp_path / "operator"
     root.mkdir()
