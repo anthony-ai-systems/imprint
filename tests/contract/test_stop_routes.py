@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -309,6 +310,58 @@ def test_a_capture_that_fails_before_its_envelope_is_written_hands_the_bridge_no
     assert lines(tmp_path) == []
 
 
+# A failure the hook does not handle, such as a raw sqlite error from the store or the
+# SIGTERM handler's exit, re-raises and prints nothing of its own, but after the write
+# the turn is captured all the same.
+UNHANDLED = {
+    "sqlite": lambda: sqlite3.OperationalError("synthetic"),
+    "runtime": lambda: RuntimeError("synthetic"),
+    "sigterm": lambda: SystemExit(143),
+}
+
+
+def _raw_stop(tmp_path, monkeypatch, capsys, error) -> str:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(json.dumps(
+        {"session_id": "s", "transcript_path": transcript_of(tmp_path, typed())},
+    )))
+    with pytest.raises(type(error)) as raised:
+        cli.main(["--config", str(write_config(tmp_path)), "hook", "stop-capture"])
+    assert raised.value is error
+    return capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", UNHANDLED)
+def test_an_unhandled_failure_after_the_write_is_still_captured(tmp_path, monkeypatch, capsys, kind):
+    error = UNHANDLED[kind]()
+    monkeypatch.setattr(cli, "compile_spools", _failing(error))
+    assert _raw_stop(tmp_path, monkeypatch, capsys, error) == ""
+    assert len(_spooled(tmp_path)) == 1
+    assert (one_line(tmp_path)["outcome"], one_line(tmp_path)["detail"]) == ("captured", "spool_only")
+
+
+@pytest.mark.parametrize("kind", UNHANDLED)
+def test_an_unhandled_failure_after_the_write_hands_the_bridge_a_captured_line(tmp_path, monkeypatch, capsys, kind):
+    error = UNHANDLED[kind]()
+    monkeypatch.setenv(ROUTE_DEFER_ENV, "1")
+    monkeypatch.setattr(cli, "compile_spools", _failing(error))
+    out = _raw_stop(tmp_path, monkeypatch, capsys, error)
+    body = json.loads(out) if out else {}
+    assert set(body) == {"_imprint_route"}
+    assert (body["_imprint_route"]["outcome"], body["_imprint_route"]["detail"]) == ("captured", "spool_only")
+    assert len(_spooled(tmp_path)) == 1
+    assert lines(tmp_path) == []
+
+
+@pytest.mark.parametrize("kind", UNHANDLED)
+def test_an_unhandled_failure_before_the_write_hands_the_bridge_no_line(tmp_path, monkeypatch, capsys, kind):
+    error = UNHANDLED[kind]()
+    monkeypatch.setenv(ROUTE_DEFER_ENV, "1")
+    monkeypatch.setattr(cli, "write_envelope", _failing(error))
+    assert _raw_stop(tmp_path, monkeypatch, capsys, error) == ""
+    assert _spooled(tmp_path) == []
+    assert lines(tmp_path) == []
+
+
 def test_an_event_of_the_wrong_kind_is_one_failed_line(tmp_path, monkeypatch, capsys):
     code, _ = stop(tmp_path, monkeypatch, capsys, {"session_id": "s", "hook_event_name": "SessionStart"})
     assert code == 2
@@ -425,6 +478,23 @@ def test_a_failed_stop_is_taken_at_its_word_only_for_a_capture(tmp_path, bridged
     _child(bridged, monkeypatch, stdout=json.dumps({"status": "error", "_imprint_route": line}), code=2)
     assert _run(bridged, monkeypatch) == 2
     assert [(line["outcome"], line["detail"]) for line in lines(tmp_path)] == [("failed", "hook_action_failed")]
+
+
+def test_an_unhandled_failure_after_the_write_reaches_the_bridge_as_captured(tmp_path, bridged, monkeypatch, capsys):
+    _child(bridged, monkeypatch, code=1)
+    assert _run(bridged, monkeypatch) == 2
+    plain = capsys.readouterr()
+    monkeypatch.setenv(ROUTE_DEFER_ENV, "1")
+    error = sqlite3.OperationalError("synthetic")
+    monkeypatch.setattr(cli, "compile_spools", _failing(error))
+    out = _raw_stop(tmp_path, monkeypatch, capsys, error)
+    monkeypatch.delenv(ROUTE_DEFER_ENV)
+    _child(bridged, monkeypatch, stdout=out, code=1)
+    assert _run(bridged, monkeypatch) == 2
+    assert capsys.readouterr() == plain
+    assert [(line["outcome"], line["detail"]) for line in lines(tmp_path)] == [
+        ("failed", "hook_action_failed"), ("captured", "spool_only"),
+    ]
 
 
 @pytest.mark.parametrize("raises, error", [
