@@ -105,7 +105,11 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
             if not isinstance(summary, str):
                 raise ValidationError(f"case {case_id} candidate {candidate_id} case_summary must be text")
         gold = case.get("gold")
-        if not isinstance(gold, list) or any(item not in ids for item in gold) or len(set(gold)) != len(gold):
+        if (
+            not isinstance(gold, list)
+            or any(not isinstance(item, str) or item not in ids for item in gold)
+            or len(set(gold)) != len(gold)
+        ):
             raise ValidationError(f"case {case_id} gold must list its own candidate ids once each")
     return cases
 
