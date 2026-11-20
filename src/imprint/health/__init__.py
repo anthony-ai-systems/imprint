@@ -293,8 +293,17 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         selector = selector_health(root, config.get("selector"))
     except Exception:
         selector_key_checked = False
+    from imprint.config import CAPTURE_SILENCE_DAYS, CAPTURE_SILENCE_DAYS_MAX
     from imprint.hook_routes import route_summary
-    hook_routes = route_summary(root, now=now)
+    silence_days = config.get(CAPTURE_SILENCE_DAYS)
+    if not (
+        isinstance(silence_days, int) and not isinstance(silence_days, bool)
+        and 1 <= silence_days <= CAPTURE_SILENCE_DAYS_MAX
+    ):
+        silence_days = None
+    hook_routes = route_summary(
+        root, now=now, stop_window_seconds=None if silence_days is None else silence_days * 86400,
+    )
     t3_homes = None
     if config.get("t3_capture_origin") is True:
         from .t3_homes import t3_home_report
@@ -351,6 +360,8 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         hook_route_outcomes_24h=hook_routes["outcomes_24h"],
         # Every spool file is a capture envelope, so the newest one is the newest capture.
         capture_newest_age_seconds=_latest_age(spool_files, now),
+        capture_silence_days=silence_days,
+        capture_silence_stop_calls=int(hook_routes.get("stop_calls_in_window", 0)),
     ))
     result = report.as_dict()
     # CLI contract uses healthy/degraded while the invariant engine remains green/red.

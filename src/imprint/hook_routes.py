@@ -248,7 +248,9 @@ class HookTurn:
             record_route(self._root, self._entry or failed_entry(self._action, "hook_exception", mode=self._mode))
 
 
-def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
+def route_summary(
+    root: Path, *, now: float | None = None, stop_window_seconds: int | None = None,
+) -> dict[str, object]:
     """Last-day outcome counts per route, and the run of failed selections the log ends on.
 
     A turn that used Jev's answer ends a run. A failed selection adds to one, even if it
@@ -256,17 +258,27 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     way. Any other turn says nothing about selection, so it neither adds to a run nor
     ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
+
+    With ``stop_window_seconds``, it also counts the Stop lines of any outcome in that
+    window, as far back as the tail it reads.
     """
     current = time.time() if now is None else now
     outcomes = {route: dict.fromkeys(_ROUTE_OUTCOMES[route], 0) for route in ROUTES.values()}
     failures = 0
+    stop_calls = 0
     for raw in newest_lines(route_log_path(root), ROUTE_LOG_TAIL_BYTES):
         try:
             entry = json.loads(raw)
             age = current - datetime.fromisoformat(entry["ts"].replace("Z", "+00:00")).timestamp()
+            route, outcome = entry["route"], entry["outcome"]
+            if (
+                stop_window_seconds is not None and route == STOP_ROUTE
+                and outcome in STOP_OUTCOMES and 0 <= age <= stop_window_seconds
+            ):
+                stop_calls += 1
             if not 0 <= age <= ROUTE_WINDOW_SECONDS:
                 continue
-            outcomes[entry["route"]][entry["outcome"]] += 1
+            outcomes[route][outcome] += 1
         except (AttributeError, KeyError, OSError, OverflowError, RecursionError, TypeError, ValueError):
             continue
         if entry.get("mode") != "jev":
@@ -278,7 +290,10 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
             and entry.get("detail") != UNFIT_RECORDS
         ):
             failures += 1
-    return {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+    summary: dict[str, object] = {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+    if stop_window_seconds is not None:
+        summary["stop_calls_in_window"] = stop_calls
+    return summary
 
 
 __all__ = [

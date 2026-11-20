@@ -17,6 +17,9 @@ _DEGRADING_CAPTURE_SKIPS = (
 # reply from Jev between them, means it is down or selection cannot reach it. The
 # window is the hook route log's.
 SELECTOR_FAILURE_LIMIT = 3
+# With org.imprint.health.capture_silence_days set, a window with no capture says
+# nothing unless the Stop hook ran at least this often in it: an idle store is quiet.
+CAPTURE_SILENCE_MIN_STOPS = 10
 
 
 @dataclass(frozen=True)
@@ -81,6 +84,17 @@ class HealthInputs:
     hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     # -1 when no capture envelope is in the spool.
     capture_newest_age_seconds: int = -1
+    # None leaves the silence signal off. The calls are Stop route lines in that many days.
+    capture_silence_days: int | None = None
+    capture_silence_stop_calls: int = 0
+
+
+def _capture_silent(values: HealthInputs) -> bool:
+    """Whether the Stop hook kept running and no capture landed in the window."""
+    if values.capture_silence_days is None or values.capture_silence_stop_calls < CAPTURE_SILENCE_MIN_STOPS:
+        return False
+    newest = values.capture_newest_age_seconds
+    return newest < 0 or newest > values.capture_silence_days * 86400
 
 
 @dataclass(frozen=True)
@@ -183,6 +197,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
             reasons.append("selector_key_unavailable")
         if values.selector_failures_in_a_row >= SELECTOR_FAILURE_LIMIT:
             reasons.append("selector_failures_repeated")
+    if _capture_silent(values):
+        reasons.append("capture_silent")
 
     metrics: dict[str, int | bool | str] = {
         "compiler_count": values.compiler_count,
@@ -248,6 +264,10 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
     }
     if values.t3_homes is not None:
         metrics["t3_homes"] = dict(values.t3_homes)
+    if values.capture_silence_days is not None:
+        metrics["capture_silence_days"] = values.capture_silence_days
+        metrics["capture_silence_stop_calls"] = max(0, values.capture_silence_stop_calls)
+        metrics["capture_silence_min_stops"] = CAPTURE_SILENCE_MIN_STOPS
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
         status="red" if reasons else "green",

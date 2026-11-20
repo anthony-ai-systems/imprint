@@ -24,6 +24,10 @@ SHORT_LINES_SESSION_START = "org.imprint.short_lines.session_start"
 CLIENT_CARRIER_QUEUE = "org.imprint.client_carrier.queue"
 CLIENT_CARRIER_CLIENTS = "org.imprint.client_carrier.clients"
 _CLIENT_CARRIER_PATHS = (CLIENT_CARRIER_QUEUE, CLIENT_CARRIER_CLIENTS)
+# Days with no capture, while the Stop hook kept running, before health degrades.
+# Unset, health never asks.
+CAPTURE_SILENCE_DAYS = "org.imprint.health.capture_silence_days"
+CAPTURE_SILENCE_DAYS_MAX = 365
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -40,6 +44,7 @@ DEFAULTS = {
     # The queue file the carrier step appends to, and the client list it reads.
     CLIENT_CARRIER_QUEUE: None,
     CLIENT_CARRIER_CLIENTS: None,
+    CAPTURE_SILENCE_DAYS: None,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -258,6 +263,9 @@ def _validate_config(data: dict[str, Any]) -> None:
             absolute = False
         if not absolute:
             raise ValidationError(f"{field} must be null or an absolute path")
+    silence = data.get(CAPTURE_SILENCE_DAYS)
+    if silence is not None and (not _is_int(silence) or not 1 <= silence <= CAPTURE_SILENCE_DAYS_MAX):
+        raise ValidationError(f"{CAPTURE_SILENCE_DAYS} must be null or 1..{CAPTURE_SILENCE_DAYS_MAX}")
     if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:
         raise ValidationError("context_budget_bytes must be 4096..131072")
     if data["context_budget_bytes"] > 32768 and data["allow_higher_budget"] is not True:

@@ -18,8 +18,10 @@ import pytest
 import imprint.hook_routes as routes
 from imprint import cli
 from imprint.capture import marks, provenance, schema, t3_origin, transcript
-from imprint.errors import ImprintError
+from imprint.config import CAPTURE_SILENCE_DAYS, parse_config
+from imprint.errors import ImprintError, ValidationError
 from imprint.health import health_report
+from imprint.health.report import CAPTURE_SILENCE_MIN_STOPS, HealthInputs, evaluate_health
 from imprint.hook_routes import (
     ROUTE_DEFER_ENV,
     STOP_OUTCOMES,
@@ -405,7 +407,9 @@ def test_stop_lines_share_the_file_and_its_rotation(tmp_path, monkeypatch):
         record_route(tmp_path, route_entry("stop_capture", {"status": "skipped", "reason": "not_explicit_feedback"}, mode=None))
     path = route_log_path(tmp_path)
     assert [len(path.with_name(name).read_text().splitlines()) for name in ("hook-routes.jsonl.1", path.name)] == [2, 1]
-    assert route_summary(tmp_path)["outcomes_24h"]["stop_capture"]["not_feedback"] == 3
+    summary = route_summary(tmp_path, stop_window_seconds=DAY)
+    assert summary["outcomes_24h"]["stop_capture"]["not_feedback"] == 3
+    assert summary["stop_calls_in_window"] == 3
 
 
 # -- health ----------------------------------------------------------------------------
@@ -465,3 +469,81 @@ def test_a_real_capture_is_the_newest_capture(tmp_path, monkeypatch, capsys):
     report = health_report(root, ImprintStore(root / "imprint.db"), {"compiler": True})
     assert 0 <= report["metrics"]["capture_newest_age_seconds"] < 60
     assert report["metrics"]["hook_route_outcomes_24h"]["stop_capture"]["captured"] == 1
+
+
+QUIET = [_stop_line() for _ in range(CAPTURE_SILENCE_MIN_STOPS * 5)]
+
+
+def test_with_the_key_unset_a_quiet_store_is_not_degraded(tmp_path):
+    report = _report(tmp_path, *QUIET)
+    assert "capture_silent" not in report["degraded_reasons"]
+    assert not any(key.startswith("capture_silence") for key in report["metrics"])
+
+
+def test_the_key_is_off_by_default():
+    assert parse_config({})[CAPTURE_SILENCE_DAYS] is None
+
+
+@pytest.mark.parametrize("value", [None, 1, 30, 365])
+def test_the_key_takes_null_or_a_number_of_days(value):
+    assert parse_config({CAPTURE_SILENCE_DAYS: value})[CAPTURE_SILENCE_DAYS] == value
+
+
+@pytest.mark.parametrize("value", [0, -1, 366, True, False, 1.5, "3", [3], {"days": 3}])
+def test_the_key_refuses_anything_else(value):
+    with pytest.raises(ValidationError, match="capture_silence_days"):
+        parse_config({CAPTURE_SILENCE_DAYS: value})
+
+
+@pytest.mark.parametrize("value", [0, True, "3", 1000])
+def test_health_reads_a_value_the_config_would_refuse_as_off(tmp_path, value):
+    report = _report(tmp_path, *QUIET, **{CAPTURE_SILENCE_DAYS: value})
+    assert "capture_silent" not in report["degraded_reasons"]
+    assert "capture_silence_days" not in report["metrics"]
+
+
+def test_stops_and_no_capture_in_the_window_degrade_health(tmp_path):
+    report = _report(tmp_path, *[_stop_line()] * CAPTURE_SILENCE_MIN_STOPS, **{CAPTURE_SILENCE_DAYS: 2})
+    assert "capture_silent" in report["degraded_reasons"]
+    metrics = report["metrics"]
+    assert (metrics["capture_silence_days"], metrics["capture_silence_stop_calls"], metrics["capture_silence_min_stops"]) == (
+        2, CAPTURE_SILENCE_MIN_STOPS, CAPTURE_SILENCE_MIN_STOPS,
+    )
+
+
+@pytest.mark.parametrize("entries, spool_ages, silent", [
+    ([_stop_line()] * (CAPTURE_SILENCE_MIN_STOPS - 1), (), False),
+    ([_stop_line()] * CAPTURE_SILENCE_MIN_STOPS, (3600,), False),
+    ([_stop_line()] * CAPTURE_SILENCE_MIN_STOPS, (3 * DAY,), True),
+    ([_stop_line(age=3 * DAY)] * CAPTURE_SILENCE_MIN_STOPS, (), False),
+    ([_stop_line(age=1.5 * DAY)] * CAPTURE_SILENCE_MIN_STOPS, (), True),
+    ([_stop_line(route="user_prompt_submit", outcome="delivered")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
+    ([_stop_line(outcome="not_an_outcome")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
+    ([_stop_line("machine_origin")] * CAPTURE_SILENCE_MIN_STOPS, (), True),
+], ids=["too_few_stops", "recent_capture", "old_capture", "stops_before_the_window", "stops_past_a_day",
+        "other_routes", "damaged_outcome", "machine_stops"])
+def test_the_silence_signal(tmp_path, entries, spool_ages, silent):
+    report = _report(tmp_path, *entries, spool_ages=spool_ages, **{CAPTURE_SILENCE_DAYS: 2})
+    assert ("capture_silent" in report["degraded_reasons"]) is silent
+
+
+def test_damaged_lines_count_as_no_stop(tmp_path):
+    raw = "not json\n" + json.dumps({"route": "stop_capture", "outcome": "captured"}) + "\n"
+    report = _report(tmp_path, *[_stop_line()] * (CAPTURE_SILENCE_MIN_STOPS - 1), raw=raw, **{CAPTURE_SILENCE_DAYS: 2})
+    assert report["metrics"]["capture_silence_stop_calls"] == CAPTURE_SILENCE_MIN_STOPS - 1
+    assert "capture_silent" not in report["degraded_reasons"]
+
+
+@pytest.mark.parametrize("values, silent", [
+    ({}, False),
+    ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS}, True),
+    ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS,
+      "capture_newest_age_seconds": DAY}, False),
+    ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS,
+      "capture_newest_age_seconds": DAY + 1}, True),
+    ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS - 1}, False),
+    ({"capture_silence_stop_calls": 1000}, False),
+])
+def test_the_rule(values, silent):
+    report = evaluate_health(HealthInputs(compiler_count=1, database_ok=True, migrations_ok=True, **values))
+    assert ("capture_silent" in report.degraded_reasons) is silent
