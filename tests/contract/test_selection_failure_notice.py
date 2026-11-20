@@ -22,7 +22,8 @@ from imprint.config import DEFAULTS, SELECTION_FAILURE_NOTICE, parse_config
 from imprint.errors import ValidationError
 from imprint.health import health_report
 from imprint.hook_routes import (
-    SELECTOR_SHARE_MIN_SAMPLE, SELECTOR_SHARE_WINDOW, record_route, route_log_path, route_summary,
+    SELECTOR_SHARE_MIN_SAMPLE, SELECTOR_SHARE_WINDOW, failed_entry, record_route, route_log_path, route_summary,
+    stop_entry,
 )
 from imprint.retrieve import jev
 from imprint.retrieve.models import RetrievalRecord
@@ -345,6 +346,24 @@ def test_only_selections_count(tmp_path):
     ]
     value = share(tmp_path, *others, *[answered() for _ in range(SELECTOR_SHARE_MIN_SAMPLE)])
     assert (value["sample"], value["failed"], value["share"]) == (SELECTOR_SHARE_MIN_SAMPLE, 0, 0.0)
+
+
+def test_stop_lines_are_not_selections(tmp_path):
+    """A Stop never selects. Its lines share the log and the selector mode, and add
+    nothing to the share nor end a run, failed or captured."""
+    stops = [
+        {**entry, "ts": stamp(60, NOW)} for entry in (
+            stop_entry({"status": "queued", "canonical_status": "compiled"}, mode="jev"),
+            stop_entry({"status": "skipped", "reason": "not_explicit_feedback"}, mode="jev"),
+            stop_entry({"status": "skipped", "reason": "hook_input_invalid"}, mode="jev"),
+            failed_entry("stop-capture", "hook_exception", mode="jev"),
+        )
+    ]
+    for entry in (failed(), *stops, failed(), *stops):
+        record_route(tmp_path, entry)
+    summary = route_summary(tmp_path, now=NOW)
+    value = summary["selector_failure_share"]
+    assert (value["sample"], value["failed"], summary["selector_failures_in_a_row"]) == (2, 2, 2)
 
 
 def test_a_failure_after_a_reply_counts_as_failed(tmp_path):
