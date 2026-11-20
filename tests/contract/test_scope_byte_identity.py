@@ -2,7 +2,8 @@
 
 ``fixtures/scope_identity/golden.json`` holds one hash per scenario, made by running
 ``driver.py`` on ec5fc59. The tests that run ec5fc59 itself need that commit, so a
-shallow checkout skips them and keeps the golden and the committed export.
+shallow checkout skips them and keeps the golden, ``GOLDEN_NOW`` and the committed
+export.
 """
 
 from __future__ import annotations
@@ -61,12 +62,20 @@ def test_every_scenario_is_there():
 # Every Stop writes a route line, which health counts beside the age of the newest
 # capture. So the route log on disk and the health report change by design, and
 # nothing else does. test_only_the_designed_changes_differ_from_main shows what
-# changed in them.
-CHANGED_BY_DESIGN = ["files_on_disk", "health"]
+# changed in them, when ec5fc59 is in the checkout. Without it, these hashes from
+# driver.py on this build still pin both scenarios' bytes. A change to either must
+# be remade here on purpose.
+GOLDEN_NOW = {
+    "files_on_disk": "fccc30537b3167323cb89d3f5622444fe7a558bcc80762b118240eecad6d9c40",
+    "health": "daf3195fa460db448d4341b27e474d7eea24ccb8fbfeae1e980554f3081f2a5f",
+}
+CHANGED_BY_DESIGN = sorted(GOLDEN_NOW)
 
 
 def test_no_rows_and_no_extension_replay_mains_bytes():
-    assert different(replay(SOURCE), GOLDEN) == CHANGED_BY_DESIGN
+    ours = replay(SOURCE)
+    assert different(ours, GOLDEN) == CHANGED_BY_DESIGN
+    assert {name: ours[name] for name in CHANGED_BY_DESIGN} == GOLDEN_NOW
 
 
 # Every step whose output a thread or the Jev service is handed, and the Jev request bodies.
