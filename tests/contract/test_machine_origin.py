@@ -62,7 +62,11 @@ def test_isolated_capture_writes_only_for_verified_human(tmp_path, transport, or
     assert body.get("reason", body["status"]) == expected
     if expected != "queued":
         assert not list(data.rglob("*.db"))
-        assert not list(data.rglob("*.jsonl"))
+        # A machine skip reads no config and leaves nothing. Any other Stop leaves only
+        # its route line, which holds no words.
+        logs = list(data.rglob("*.jsonl"))
+        assert [path.name for path in logs] == ([] if transport else ["hook-routes.jsonl"])
+        assert all("A human may quote" not in path.read_text() for path in logs)
 
 
 def test_bridge_passes_machine_origin_to_cli():

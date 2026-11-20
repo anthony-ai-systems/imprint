@@ -40,6 +40,10 @@ DECIDE_DAILY_CAP_LIMIT = 100000
 # Under the data root's logs folder: when a typed decision last sent bytes. Health
 # reads it without importing the decide package, which no hook may load.
 DECIDE_TRANSFER_MARKER = "decide-transfer.json"
+# Days with no capture, while the Stop hook kept running, before health degrades.
+# Unset, health never asks.
+CAPTURE_SILENCE_DAYS = "org.imprint.health.capture_silence_days"
+CAPTURE_SILENCE_DAYS_MAX = 365
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -60,6 +64,7 @@ DEFAULTS = {
     SELECTION_FAILURE_NOTICE: False,
     # No purpose named, so the typed-decision module sends nothing.
     DECIDE_PURPOSES_KEY: {},
+    CAPTURE_SILENCE_DAYS: None,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -335,6 +340,9 @@ def _validate_config(data: dict[str, Any]) -> None:
             absolute = False
         if not absolute:
             raise ValidationError(f"{field} must be null or an absolute path")
+    silence = data.get(CAPTURE_SILENCE_DAYS)
+    if silence is not None and (not _is_int(silence) or not 1 <= silence <= CAPTURE_SILENCE_DAYS_MAX):
+        raise ValidationError(f"{CAPTURE_SILENCE_DAYS} must be null or 1..{CAPTURE_SILENCE_DAYS_MAX}")
     if not _is_int(data.get("context_budget_bytes")) or not 4096 <= data["context_budget_bytes"] <= 131072:
         raise ValidationError("context_budget_bytes must be 4096..131072")
     if data["context_budget_bytes"] > 32768 and data["allow_higher_budget"] is not True:

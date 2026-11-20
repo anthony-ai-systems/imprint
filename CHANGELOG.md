@@ -31,6 +31,33 @@
   `selector_failure_share`: the share of the newest 50 selections in the last day
   that failed, `null` below 10. It raises no reason, and when health degrades does
   not change.
+- Record where each Stop went. Every Stop now adds one content-free `stop_capture`
+  line to `logs/hook-routes.jsonl`, under the same rotation as the other routes, on
+  exactly one outcome: `captured`, `not_feedback`, `origin_unverified`, each other
+  reason the Stop receipt gives under its own name, or `failed`. A receipt reason a
+  later build adds without naming it reads `failed`. Health reports the last day as
+  `hook_route_outcomes_24h.stop_capture`, beside the other routes, and gains
+  `capture_newest_age_seconds`, the age of the newest capture envelope. A new key,
+  `org.imprint.health.capture_silence_days`, unset by default, makes health degrade
+  with `capture_silent` when no capture has landed in that many days while the Stop
+  hook ran at least 10 times in them on turns that could have captured, which leaves
+  out `machine_origin` and `t3_scratch_thread`. A `captured` Stop line in the window
+  counts as a capture even after a prune. Unset, it changes nothing. What the Stop hook
+  prints to the host does not change. A Stop marked by `IMPRINT_CAPTURE_ORIGIN` still
+  reads no config, so run outside the hook bridge it writes no line. The
+  byte-identity replay now expects the route log on disk and the health report to
+  differ from main, and shows those are the only changes.
+- Capture T3 prompts again. T3 renamed the entrypoint on its Claude prompts from
+  `sdk-ts` to `t3-code` in early November 2026, and with `t3_capture_origin: true`
+  every T3 prompt has since been refused as `unverified_provenance`, with nothing
+  logged. Both names are now accepted, from one set, `T3_ENTRYPOINTS`. T3's record of
+  a human author is checked exactly as before, so wakes, task notifications,
+  scheduled tasks, scratch threads and prompts with no matching human record are
+  still refused. A person's prompt that T3's records would have credited, refused
+  only because its entrypoint is not in that set, now returns
+  `t3_entrypoint_unknown`, is logged to `logs/capture-skips.jsonl` with no content,
+  is counted in `capture_skips_24h` and degrades health, so the next rename shows at
+  once. Turns refused before this build are not retried.
 - Carry a scope on each record, with nothing reading it yet. A new `record_scope`
   table holds one row per retrievable record, and a record with none is legacy. A
   row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and

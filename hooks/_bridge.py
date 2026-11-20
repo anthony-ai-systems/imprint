@@ -16,11 +16,13 @@ _EVENT_NAMES = {
     "user-prompt-submit": "UserPromptSubmit",
     "health-check": "SessionStart",
 }
-_DELIVERING_ACTIONS = frozenset({"session-start", "user-prompt-submit"})
+# The two hooks that deliver memory, and the Stop hook, which captures it. The
+# health hook writes no route line.
+_ROUTED_ACTIONS = frozenset({"session-start", "user-prompt-submit", "stop-capture"})
 
 
 class _RouteLine:
-    """Where one delivering turn came to, written once however the bridge leaves it.
+    """Where one hook turn came to, written once however the bridge leaves it.
 
     The hook hands over its line. Anything else that ends the turn is a failure,
     and only this process can see it, so the hook writes no line of its own.
@@ -30,7 +32,7 @@ class _RouteLine:
         self.action = action
         self.entry = None
         self.error = "hook_route_unreported"
-        self.written = action not in _DELIVERING_ACTIONS
+        self.written = action not in _ROUTED_ACTIONS
 
     def write(self) -> None:
         if self.written:

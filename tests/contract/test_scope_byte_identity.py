@@ -2,7 +2,8 @@
 
 ``fixtures/scope_identity/golden.json`` holds one hash per scenario, made by running
 ``driver.py`` on ec5fc59. The tests that run ec5fc59 itself need that commit, so a
-shallow checkout skips them and keeps the golden and the committed export.
+shallow checkout skips them and keeps the golden, ``GOLDEN_NOW`` and the committed
+export.
 """
 
 from __future__ import annotations
@@ -57,8 +58,24 @@ def test_every_scenario_is_there():
     assert len(GOLDEN) == SCENARIOS
 
 
+# Health counts a T3 prompt refused only for its entrypoint among the capture skips.
+# Every Stop writes a route line, which health counts beside the age of the newest
+# capture. So the route log on disk and the health report change by design, and
+# nothing else does. test_only_the_designed_changes_differ_from_main shows what
+# changed in them, when ec5fc59 is in the checkout. Without it, these hashes from
+# driver.py on this build still pin both scenarios' bytes. A change to either must
+# be remade here on purpose.
+GOLDEN_NOW = {
+    "files_on_disk": "fccc30537b3167323cb89d3f5622444fe7a558bcc80762b118240eecad6d9c40",
+    "health": "daf3195fa460db448d4341b27e474d7eea24ccb8fbfeae1e980554f3081f2a5f",
+}
+CHANGED_BY_DESIGN = sorted(GOLDEN_NOW)
+
+
 def test_no_rows_and_no_extension_replay_mains_bytes():
-    assert different(replay(SOURCE), GOLDEN) == []
+    ours = replay(SOURCE)
+    assert different(ours, GOLDEN) == CHANGED_BY_DESIGN
+    assert {name: ours[name] for name in CHANGED_BY_DESIGN} == GOLDEN_NOW
 
 
 # Every step whose output a thread or the Jev service is handed, and the Jev request bodies.
@@ -165,6 +182,46 @@ def rows_of(store: ImprintStore) -> list[dict]:
 
 def test_the_golden_is_mains_own_output(main_source):
     assert different(replay(main_source), GOLDEN) == []
+
+
+def _health(scenario: str) -> dict:
+    """The printed report. The driver writes a bare <disk> over values the disk decides."""
+    return json.loads(scenario.split("\n", 1)[1].rsplit("\n--\n", 1)[0].replace("<disk>", '"<disk>"'))
+
+
+def _health_as_main_had_it(scenario: str) -> dict:
+    report = _health(scenario)
+    assert report["metrics"]["capture_skips_24h"].pop("t3_entrypoint_unknown") == 0
+    assert report["metrics"].pop("capture_newest_age_seconds") == "<disk>"
+    report["metrics"]["hook_route_outcomes_24h"].pop("stop_capture")
+    return report
+
+
+def _route_lines(files_on_disk: str) -> list[dict]:
+    return [
+        json.loads(line) for name, text in json.loads(files_on_disk).items()
+        if name.endswith("hook-routes.jsonl") for line in text.splitlines()
+    ]
+
+
+def _files_as_main_had_them(files_on_disk: str) -> dict:
+    files = json.loads(files_on_disk)
+    for name, text in files.items():
+        if name.endswith("hook-routes.jsonl"):
+            files[name] = "".join(
+                line for line in text.splitlines(keepends=True) if json.loads(line)["route"] != "stop_capture"
+            )
+    return files
+
+
+def test_only_the_designed_changes_differ_from_main(main_source):
+    ours, mains = replay(SOURCE, "--full"), replay(main_source, "--full")
+    assert different(ours, mains) == CHANGED_BY_DESIGN
+    assert _health_as_main_had_it(ours["health"]) == _health(mains["health"])
+    assert _files_as_main_had_them(ours["files_on_disk"]) == json.loads(mains["files_on_disk"])
+    stops = [line for line in _route_lines(ours["files_on_disk"]) if line["route"] == "stop_capture"]
+    assert [line["outcome"] for line in stops] == ["captured", "captured", "not_feedback"]
+    assert _health(ours["health"])["metrics"]["hook_route_outcomes_24h"]["stop_capture"]["captured"] == 2
 
 
 def test_main_opens_a_store_with_rows_and_leaves_them(tmp_path, main_source, capture_envelope):

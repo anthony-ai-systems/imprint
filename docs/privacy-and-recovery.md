@@ -80,9 +80,9 @@ other than `jev` or `shadow`) disables it immediately. The local decision log
 content-free counts (request size, records and bytes per delivery stage), never
 prompt or judgment text; `logs/jev-selector-transfer.json` holds only the last
 transfer and success timestamps. `logs/hook-routes.jsonl`, written on every selector
-mode, holds one line per delivering hook turn with the time, route, outcome, a closed
-code, a byte count, the selector mode, the selection method and whether Jev replied,
-and no prompt, statement, record id, domain or session.
+mode, holds one line per delivering hook turn and per Stop with the time, route,
+outcome, a closed code, a byte count, the selector mode, the selection method and
+whether Jev replied, and no prompt, statement, record id, domain, session or path.
 
 A failure notice (`org.imprint.selector.failure_notice`) is local: it adds one fixed
 line to the hook's own output and sends nothing.
