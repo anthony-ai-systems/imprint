@@ -803,6 +803,23 @@ def test_a_failed_send_still_counts_as_a_transfer(tmp_path):
     assert health_metrics(tmp_path, purposes)["network_state"] == "transferred"
 
 
+def test_the_transfer_is_on_record_before_the_reply_is_awaited(tmp_path):
+    from imprint.decide.client import transfer_marker_path
+
+    marker = transfer_marker_path(tmp_path / "op")
+    seen: list[bool] = []
+
+    def interrupted(endpoint, body, headers, timeout):
+        seen.append(marker.exists())
+        raise KeyboardInterrupt  # the process is stopped while it waits for the reply
+
+    with pytest.raises(KeyboardInterrupt):
+        call(tmp_path, interrupted)
+    assert seen == [True] and marker.exists()
+    purposes = {"probe": {"mode": "shadow", "daily_cap": 10}}
+    assert health_metrics(tmp_path, purposes)["network_state"] == "transferred"
+
+
 def test_health_counts_entries_it_cannot_read_and_does_not_enable_them(tmp_path):
     metrics = health_metrics(tmp_path, {
         "mind_reading": {"mode": "enforce", "daily_cap": 1},

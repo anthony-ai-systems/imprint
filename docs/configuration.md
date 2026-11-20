@@ -464,8 +464,9 @@ The key is dotted, so an older build keeps it and reads nothing into it.
 Health reports egress truthfully once a purpose can send. With any purpose enabled (a
 mode other than `off` and a cap above 0), `network_state` is never `offline`, even under
 a `deterministic` selector: it is `idle`, or `transferred` once a typed decision has sent
-bytes, which `ask` stamps in `logs/decide-transfer.json` (one timestamp, nothing else),
-and `last_transfer_age_seconds` is the newer of the selector's and the purposes'
+bytes, which `ask` stamps in `logs/decide-transfer.json` (one timestamp, nothing else)
+as the request starts, before it waits for the reply, and `last_transfer_age_seconds`
+is the newer of the selector's and the purposes'
 transfers. `metrics.decide_purposes` gives `enabled` and `ignored` counts. With no
 purpose named, health is exactly as before and `decide_purposes` is absent. Health
 reads the config only, so an environment switch that turns the purposes off does not

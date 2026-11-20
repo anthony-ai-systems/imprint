@@ -108,7 +108,7 @@ names and types, answer values and confidences, elapsed time, usage, echoed mode
 request size, and never the state, an instruction, a description or the key. Question
 and option names are lowercase identifiers chosen in code. `logs/decide-calls.json`
 holds today's call count per purpose and nothing else, and `logs/decide-transfer.json`
-holds the time a call last sent bytes. While any purpose is enabled, health's
+holds the time a call last started sending bytes. While any purpose is enabled, health's
 `network_state` is `idle` or `transferred`, never `offline`, whatever the selector's
 mode; with none named it describes the selector alone, as before. These logs are the
 record of what this module sent.

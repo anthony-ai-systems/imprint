@@ -2,8 +2,8 @@
 
 ``ask`` never raises. A purpose that is off makes no request and touches no file:
 it returns a ``disabled`` result. Otherwise every call writes one content-free line
-to its purpose's decision log, whatever came of it, and a call that sent bytes
-stamps a small marker that health reads to say the network was used.
+to its purpose's decision log, whatever came of it, and a call about to send bytes
+first stamps a small marker that health reads to say the network was used.
 
 The transport rules are the selector's own, imported from ``imprint.retrieve.jev``
 rather than copied, so the two cannot drift: the key comes from the variable or the
@@ -469,8 +469,6 @@ def ask(
             purpose=name, mode=mode, outcome=outcome, reason=reason, elapsed_ms=elapsed,
             request_bytes=request_bytes, request_sent=request_sent, **values,
         )
-        if request_sent:
-            _record_transfer(root)
         _log(root, result, questions)
         return result
 
@@ -500,8 +498,7 @@ def ask(
         refused = _reserve(root, name, cap, day, deadline, clock)
         if refused is not None:
             return finish("capped", refused)
-        remaining = deadline - clock()
-        if remaining <= 0:
+        if deadline - clock() <= 0:
             return finish("fallback", "timeout")
         headers = {
             "Authorization": f"Bearer {key}",
@@ -509,6 +506,13 @@ def ask(
             "User-Agent": f"imprint-local/{__version__}",
         }
         send = transport or _jev.http_post  # looked up per call, so a test's fake applies
+        # On record before the request starts, so a process stopped while it waits for
+        # the reply still leaves the transfer for health. If the deadline passes while
+        # it is written, nothing is sent: the marker can over-report, never under-report.
+        _record_transfer(root)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return finish("fallback", "timeout")
         request_bytes = len(encoded)
         request_sent = True
         raw = _run_with_deadline(lambda: send(settings.endpoint, encoded, headers, remaining), remaining)
