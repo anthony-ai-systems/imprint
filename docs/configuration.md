@@ -59,6 +59,9 @@ object and preserves unknown namespaced extensions.
 - `org.imprint.client_carrier.clients`: `null` (default) or an absolute path. The
   client list the carrier step reads at run time. Unset or unreadable, it names no
   client and writes nothing.
+- `org.imprint.selector.failure_notice`: `false` (default) or `true`. When `true`, a
+  prompt turn whose Jev selection failed and that delivered nothing else carries one
+  line saying so; see Failure notice below.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -304,6 +307,9 @@ selector outcome, the domain diagnostic, the hook bridge's error, or
 `oversized_records`. A line never holds a prompt, a statement, a record id, a domain
 or a session.
 
+A turn that carried the failure notice (see Failure notice below) adds `"notice": true`,
+and its `bytes` count the notice. No other line has the key.
+
 Health reports the last day as `hook_route_outcomes_24h`, per route and outcome.
 `hook_route_evidence` reads `unavailable` when a `jev` store has
 `selector_failure_limit` or more fallbacks in the decision log and no route line in
@@ -337,6 +343,34 @@ them.
   which `hook_failures_present` reports. Damaged log lines count as nothing. Only an
   unbroken run raises this reason, so a Jev that fails on and off shows only in
   `selector_fallbacks_24h` and `hook_route_outcomes_24h`.
+
+## Failure notice
+
+With the selector on `jev`, a prompt turn whose selection fails falls back to the
+deterministic answer. With no matched domain that is empty context, so the agent
+cannot tell nothing relevant from memory being down. With
+`org.imprint.selector.failure_notice: true`, such a turn carries this one line
+instead:
+
+```text
+Imprint: judgment retrieval was unavailable this turn (reason: timeout).
+```
+
+The reason is the turn's `fallback_reason`, one of `missing_key`, `key_file_unsafe`,
+`timeout`, `http_error`, `bad_response` or `exception`. The line holds nothing else:
+no prompt, statement, record or path. The hook output also gains
+`"selector_notice": "selection_failed"`, and the route line `"notice": true`.
+
+- The line goes out only when nothing else does. A matched domain whose records the
+  fallback still delivers carries those records and no line. A domain the session
+  already has, so the fallback delivers nothing, carries the line.
+- `no_candidates` is an empty pool, not a failure, and gets no line. Neither does a
+  turn Jev answered with no picks, a replay, a T3 scratch turn, or any turn under
+  `shadow` or `deterministic`, which deliver the deterministic answer by design.
+- A hook that timed out or crashed before it could print is outside this: the bridge
+  emits empty context, as before, and leaves a file in `logs/hook-failures`.
+- With the key `false` or absent, every byte a hook emits and every route line is
+  unchanged. The key is dotted, so an older build keeps it and reads nothing into it.
 
 ## Short lines
 

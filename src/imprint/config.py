@@ -24,6 +24,9 @@ SHORT_LINES_SESSION_START = "org.imprint.short_lines.session_start"
 CLIENT_CARRIER_QUEUE = "org.imprint.client_carrier.queue"
 CLIENT_CARRIER_CLIENTS = "org.imprint.client_carrier.clients"
 _CLIENT_CARRIER_PATHS = (CLIENT_CARRIER_QUEUE, CLIENT_CARRIER_CLIENTS)
+# Say on the prompt turn itself that judgment selection failed and nothing was
+# delivered. Off, a failed turn emits the empty context it always has.
+SELECTION_FAILURE_NOTICE = "org.imprint.selector.failure_notice"
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -40,6 +43,8 @@ DEFAULTS = {
     # The queue file the carrier step appends to, and the client list it reads.
     CLIENT_CARRIER_QUEUE: None,
     CLIENT_CARRIER_CLIENTS: None,
+    # One fixed line naming the failure, in place of empty context.
+    SELECTION_FAILURE_NOTICE: False,
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -242,7 +247,10 @@ def _validate_config(data: dict[str, Any]) -> None:
         value = data.get(field)
         if not isinstance(value, str) or SAFE_LOCAL_ID.fullmatch(value) is None:
             raise ValidationError(f"{field} must be a safe lowercase identifier")
-    for field in ("compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START):
+    for field in (
+        "compiler", "allow_higher_budget", "t3_capture_origin", SHORT_LINES_PROMPT, SHORT_LINES_SESSION_START,
+        SELECTION_FAILURE_NOTICE,
+    ):
         if not isinstance(data.get(field), bool):
             raise ValidationError(f"{field} must be a boolean")
     for field in _CLIENT_CARRIER_PATHS:

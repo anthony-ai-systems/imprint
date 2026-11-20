@@ -41,6 +41,16 @@ too: it reads `failed` with `answered` true. The reason clears on the first turn
 uses Jev's answer, or when the failures pass 24 hours. See Hook route log in
 `docs/configuration.md`.
 
+## The agent got no judgments and no notice
+
+With `org.imprint.selector.failure_notice: true`, a prompt turn whose selection failed
+and that delivered nothing carries one line naming the reason, such as
+`(reason: timeout)`. If a turn got neither judgments nor that line, the turn did not
+fail selection: it found nothing relevant, had nothing to send, was a replay, ran under
+`shadow` or `deterministic`, or the hook itself died before it could print, which
+leaves a file in `logs/hook-failures`. The turn's line in `logs/hook-routes.jsonl`
+says which. With the key off, a failed turn emits empty context, as it always did.
+
 ## Cloud-sync root refused
 
 Move the data root to a local non-synchronized directory and update config. A

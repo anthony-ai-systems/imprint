@@ -24,6 +24,7 @@ from typing import Any, Mapping
 
 from imprint.config import effective_selector_mode
 from imprint.log_files import append_capped, newest_lines
+from imprint.selection_notice import NOTICE_FIELD
 
 ROUTE_LOG_NAME = "hook-routes.jsonl"
 ROUTE_LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -133,6 +134,8 @@ def route_entry(
         "outcome": outcome,
         "route": route,
         "ts": _stamp(),
+        # Only a turn that carried the failure notice says so, so a line is otherwise unchanged.
+        **({"notice": True} if body.get(NOTICE_FIELD) else {}),
     }
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .compiler import compile_spools, write_envelope
 from .config import (
+    SELECTION_FAILURE_NOTICE,
     SELECTOR_STATE_LIMIT,
     SHORT_LINES_PROMPT,
     SHORT_LINES_SESSION_START,
@@ -30,6 +31,7 @@ from .errors import ImprintError, ValidationError
 from .hook_routes import ROUTES, HookTurn
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
+from .selection_notice import with_failure_notice
 from .store import ImprintStore
 from .store.scope import RESOLVED_EXPLICIT
 
@@ -1331,13 +1333,14 @@ def main(argv: list[str] | None = None) -> int:
                         return 0
                 # Deterministic behavior, and the exact fallback for every
                 # selector failure: domain-only injection, or skip.
+                notice = config[SELECTION_FAILURE_NOTICE]
                 if domain is None:
-                    _write_json(turn.settle({
+                    _write_json(turn.settle(with_failure_notice({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": selection.diagnostic_code,
                         **selector_fields,
                         "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ""},
-                    }))
+                    }, enabled=notice)))
                     return 0
                 result = retrieve_payload(
                     store, root=root, session_id=session,
@@ -1346,7 +1349,7 @@ def main(argv: list[str] | None = None) -> int:
                     context=context, exclude_ids=exclude_ids,
                     short_lines=config[SHORT_LINES_PROMPT],
                 )
-                response = {
+                response = with_failure_notice({
                     "hook_schema_version": "1.0.0",
                     "status": result["status"],
                     "domain_id": domain,
@@ -1356,7 +1359,7 @@ def main(argv: list[str] | None = None) -> int:
                         "hookEventName": "UserPromptSubmit",
                         "additionalContext": result.get("payload", ""),
                     },
-                }
+                }, enabled=notice)
                 turn.delivery = _delivery_behind(result, root=root, session_id=session, domain_id=domain)
                 if result.get("status") == "delivered":
                     _emit_retrieval_json(

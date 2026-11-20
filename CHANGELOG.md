@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Let a failed selection say so, off by default. With
+  `org.imprint.selector.failure_notice: true`, a prompt turn under `selector.mode: jev`
+  whose selection failed and that delivered nothing else carries one fixed line,
+  `Imprint: judgment retrieval was unavailable this turn (reason: <reason>).`, where
+  the reason is the turn's closed `fallback_reason`. The hook output gains
+  `selector_notice` and the route line `notice`. Local domain records the fallback
+  still delivers go out with no line, and an empty pool, an answer with no picks,
+  `shadow` and `deterministic` never get one. With the key `false` or absent, no
+  byte a hook emits changes.
 - Carry a scope on each record, with nothing reading it yet. A new `record_scope`
   table holds one row per retrievable record, and a record with none is legacy. A
   row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and
