@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Add a typed-decision package, `imprint.decide`, with nothing switched on. It builds
+  Jev's Noul, Choice and Score questions, sends one bounded request under the
+  selector's own transport rules, and reads each answer defensively, never raising.
+  Every call names a purpose from a closed list, and a purpose sends only when
+  `org.imprint.decide.purposes` gives it a mode of `shadow` or `enforce` and a daily
+  cap above 0. The shipped value is `{}`, so nothing is sent, and `IMPRINT_DECIDE`
+  turns every purpose off. Each call that is not disabled writes a content-free line
+  to `logs/decide-<purpose>.jsonl`, and a counter under `logs` enforces the cap. The
+  selector does not use the package and no hook imports it. Also adds `imprint
+  selector-eval`, an offline report of the shortlist's recall and the rendered
+  picks' precision on labelled cases, with a synthetic fixture, and
+  `tools/jev_probe/run_probe.py`, which prints a 24-call synthetic plan and sends it
+  only with every approval condition met.
 - Let a failed selection say so, off by default. With
   `org.imprint.selector.failure_notice: true`, a prompt turn under `selector.mode: jev`
   whose selection failed and that delivered nothing else carries one fixed line,

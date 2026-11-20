@@ -62,6 +62,8 @@ object and preserves unknown namespaced extensions.
 - `org.imprint.selector.failure_notice`: `false` (default) or `true`. When `true`, a
   prompt turn whose Jev selection failed and that delivered nothing else carries one
   line saying so; see Failure notice below.
+- `org.imprint.decide.purposes`: `{}` (default). Lets named purposes ask Jev typed
+  questions outside the selector; see Typed decisions below. Empty, nothing is sent.
 
 The release artifact includes `config.example.json`. Replace its placeholder
 absolute path before using it.
@@ -381,6 +383,108 @@ no prompt, statement, record or path. The hook output also gains
 - With the key `false` or absent, every byte a hook emits and every route line is
   unchanged. The key is dotted, so an older build keeps it and reads nothing into it.
 
+## Typed decisions
+
+`imprint.decide` is a small package for asking Jev more than relevance. Nothing in it
+is switched on, the live selector does not use it, and no hook imports it; a test holds
+both. It has four parts.
+
+- Question builders for the three documented primitives. `noul(instructions)` asks a
+  yes or no question and its answer is the probability of yes. `choice(instructions,
+  {name: description, ...})` asks for one of 1 to 255 named options, in the order given.
+  `score(instructions, [level, ...])` asks for a place on 1 to 10 ordered levels, the
+  first being level 0. Instructions are 1 to 4,000 characters and each description or
+  level 1 to 1,000. Question and option names are lowercase identifiers
+  (`[a-z][a-z0-9_]{0,63}`) chosen in code, so the log can carry them. The Noul shapes are
+  the selector's, confirmed against the live API. The Choice and Score shapes come from
+  TypeSafe's public documents only and are unverified against the live API, so answers
+  are read defensively: fields the answer does not need are ignored, a missing or out of
+  range `choice` or `score`, or a `confidence` or probability that is present and not a
+  number from 0 to 1, rejects that answer, a Choice naming an option the request did not
+  send is rejected, and `probabilities` is read as an object or as an array in request
+  order.
+- One call, `ask(purpose, state, questions, config=..., root=...)`. `state` is text or a
+  JSON object, at most 16,000 characters. It sends at most 1,000 questions and 1 MiB in
+  one `POST` to `selector.jev.endpoint` with `selector.jev.model` (or a model the caller
+  pins) and the same key, under the selector's transport rules: no redirects, a bounded
+  response, and one deadline (`selector.jev.timeout_seconds`, or the caller's, at most
+  30 seconds) over key resolution, the request and parsing. It never raises and never
+  retries. Its `outcome` is `answered`, `disabled`, `capped` or `fallback`, and its
+  `reason` is one of `unknown_purpose`, `switched_off`, `purpose_off`, `cap_reached`,
+  `cap_unavailable`, `invalid_request`, `missing_key`, `key_file_unsafe`, `timeout`,
+  `http_error`, `bad_response` or `exception`. A reply with some valid answers is
+  `answered`, with the rest named in `dropped`. A reply with none is `bad_response`.
+- A purpose registry. Every call names one of `selector`, `capture_classify`,
+  `event_match`, `completion_check`, `draft_check`, `action_guard` and `probe`. Each has
+  a mode: `off` (the default), `shadow` or `enforce`. Under `shadow` the result carries
+  the answers and says it is shadow, and the caller must not act on them. The module only
+  reports the mode; each caller decides what it means. `selector` is reserved for a later
+  change to the selector, which does not use it today.
+- A daily cap per purpose, kept locally in `logs/decide-calls.json` under the data root
+  by UTC day. A call takes one from the cap just before it sends, after the request is
+  built and the key is found, so a refused request or a missing key costs nothing. A
+  counter that is not a small regular file of the expected shape fails closed with
+  `cap_unavailable`: delete it to start the day's count again. Calls from separate
+  processes take turns through a lock file on POSIX.
+
+`org.imprint.decide.purposes` maps a purpose to `{"mode": ..., "daily_cap": ...}`:
+
+```json
+{"org.imprint.decide.purposes": {"probe": {"mode": "shadow", "daily_cap": 24}}}
+```
+
+- `mode`: `off` (default when left out), `shadow` or `enforce`.
+- `daily_cap`: 0 to 100,000; 0 (default when left out) sends nothing.
+
+A purpose not named is `off`. An unknown purpose, any other key, or a value of the
+wrong type is refused when the config loads. `IMPRINT_DECIDE` set to any non-empty
+value turns every purpose off, and so does an `IMPRINT_SELECTOR` value that turns the
+selector off. No environment value turns one on. The key is dotted, so an older build
+keeps it and reads nothing into it.
+
+Each call that is not `disabled` appends one line to `logs/decide-<purpose>.jsonl`
+(private file mode, rotated once at 5 MiB): `ts`, `purpose`, `mode`, `outcome`,
+`reason`, `questions` (name to type), `answers` (name to type and values: `noul`;
+`choice`, `confidence` and `probabilities`; or `score`, `confidence` and
+`probabilities`), `dropped`, `elapsed_ms`, `usage`, `model_echoed`, `request_bytes` and
+`request_sent`, plus `dropped_shapes`, the field names and value kinds of answers that
+could not be read. It never holds the state, an instruction, a description or the key.
+
+### Offline selector evaluation
+
+`imprint selector-eval --cases CASES --scores SCORES` measures today's selection path
+on labelled cases with no network, config or store. It runs the real lexical
+prefilter, today's pick policy on the saved scores (at or above the floor, best first,
+at most `top`), and the renderer the prompt hook uses for Jev's picks, then reports
+`recall_at_shortlist` (gold candidates the shortlist kept), `precision_rendered` (gold
+among what would be rendered within the budget), `unrelated_pickups` (rendered
+candidates that are not gold) and per-case counts. Options: `--shortlist` (default
+150), `--budget` (32,768), `--score-floor` (0.55), `--top` (20) and `--short-lines`.
+Standing rules and the stale check are not modelled. Records are built from the
+fixture with synthetic ids, so line sizes are close to a real store's, not equal.
+Output holds ids and counts only. `tests/fixtures/selector_eval/` has a small synthetic
+pair; the module docstring in `src/imprint/decide/evaluate.py` gives both formats.
+
+### Jev probe
+
+`tools/jev_probe/run_probe.py` runs a fixed 24-call synthetic plan through `ask` as
+purpose `probe`, pinned to `jev-1.13.0`. Calls 1 to 12 send two invented states (about
+100 and 1,000 tokens) with 1, 10 and 150 Nouls, twice, interleaved, to show how cost and
+latency grow with state length and question count. Its Noul statements are shorter
+than live ones, so absolute token counts run lower than the selector's. Calls 13 to 24
+send twelve invented labelled cases (four applicable, four unrelated, four conflicting
+or with too little to go on), each as one Noul, one Choice (`required_here`,
+`conflicts_with_higher_instruction`, `irrelevant`, `not_enough_evidence`) and one Score
+(no effect, useful background, changes the next action, prevents a consequential error)
+in the same request.
+
+Run with no flags, it prints the plan and each request's size and sends nothing. It
+sends only with `--send-approved-calls 24`, a `--config` whose purposes enable `probe`
+with a cap that leaves 24 calls today, no environment switch turning it off, and a key
+present; otherwise it prints why and sends nothing. It stops at the first call that is
+not answered and never retries. Its output and the purpose log hold counts, sizes,
+usage, latency, answer shapes and values, and case ids.
+
 ## Short lines
 
 A rule's references cost more than its words. On a whole line, 160 bytes of text
@@ -540,6 +644,9 @@ Both keys are dotted, so an older build keeps them and reads nothing into them.
   it on. It is read from the process that sends, so set it where the hook will
   see it: under T3, the instance's `environment`, the home's `env` or the server's
   environment. A shell export reaches only what that shell runs.
+- `IMPRINT_DECIDE`: any non-empty value turns every typed-decision purpose off; see
+  Typed decisions. No value turns one on. `IMPRINT_SELECTOR` values that turn the
+  selector off turn the purposes off too.
 - `IMPRINT_DATA_ROOT`: default data root used when config omits `data_root`.
 - `IMPRINT_INSTALL_ROOT`: installer/application destination.
 - `CLAUDE_SETTINGS_PATH`: the Claude Code settings path an installer registers

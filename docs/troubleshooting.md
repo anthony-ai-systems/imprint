@@ -57,6 +57,23 @@ fail selection: it found nothing relevant, had nothing to send, was a replay, ra
 leaves a file in `logs/hook-failures`. The turn's line in `logs/hook-routes.jsonl`
 says which. With the key off, a failed turn emits empty context, as it always did.
 
+## A typed decision sends nothing
+
+`imprint.decide` sends only for a purpose that `org.imprint.decide.purposes` names
+with `mode` `shadow` or `enforce` and a `daily_cap` above 0. The result's `reason`
+says which check stopped it: `purpose_off` (not named, or `off`), `switched_off`
+(`IMPRINT_DECIDE` is set, or `IMPRINT_SELECTOR` turns the selector off, in the
+environment of the process that calls), `unknown_purpose`, `cap_reached` (today's
+UTC count in `logs/decide-calls.json` reached the cap) or `cap_unavailable` (that file
+is not one the module can trust; delete it to start the day's count again). A
+`missing_key` or `invalid_request` costs no call from the cap. The purpose's
+`logs/decide-<purpose>.jsonl` has one line per call that was not disabled.
+
+`tools/jev_probe/run_probe.py --send-approved-calls 24 --config PATH` prints a
+`refused` list and sends nothing until every condition holds: the count is 24, the
+config enables `probe` with a cap that leaves 24 calls today, no switch turns it off,
+and the key is present. Run it without flags to see the plan and request sizes.
+
 ## Cloud-sync root refused
 
 Move the data root to a local non-synchronized directory and update config. A

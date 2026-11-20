@@ -84,6 +84,32 @@ mode, holds one line per delivering hook turn with the time, route, outcome, a c
 code, a byte count, the selector mode, the selection method and whether Jev replied,
 and no prompt, statement, record id, domain or session.
 
+A failure notice (`org.imprint.selector.failure_notice`) is local: it adds one fixed
+line to the hook's own output and sends nothing.
+
+### Optional typed decisions
+
+`imprint.decide` asks Jev typed questions (Noul, Choice, Score) for named purposes
+other than relevance selection. No purpose is enabled by default: the shipped
+`org.imprint.decide.purposes` is `{}`. A purpose that is not named, or is named with
+`mode: "off"`, makes no request and touches no file, and one with a `daily_cap` of 0
+makes no request.
+Enabling one is an egress decision, as enabling the selector is: each call sends its
+caller's `state` and every question's instructions, option descriptions and level
+descriptions to `selector.jev.endpoint`, with the same key, whatever `selector.mode`
+says. What a caller puts in `state` is up to that caller, so read what a purpose sends
+before enabling it. No hook and no part of the live selector calls this module today.
+`IMPRINT_DECIDE` set to any non-empty value, or `IMPRINT_SELECTOR` set to a value that
+turns the selector off, turns every purpose off at once.
+
+Each call that is not disabled writes one line to `logs/decide-<purpose>.jsonl`
+(private file mode) with the time, purpose, mode, outcome, closed reason, question
+names and types, answer values and confidences, elapsed time, usage, echoed model and
+request size, and never the state, an instruction, a description or the key. Question
+and option names are lowercase identifiers chosen in code. `logs/decide-calls.json`
+holds today's call count per purpose and nothing else. Health's `network_state`
+describes the selector only; these logs are the record of what this module sent.
+
 On POSIX the optional `api_key_file` must be a private regular file owned by
 the current user. On Windows, Imprint checks only that it is a regular file,
 not its owner or ACL; there, prefer the key environment variable or keep the
