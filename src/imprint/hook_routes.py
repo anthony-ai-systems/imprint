@@ -154,34 +154,43 @@ def _stop_outcome(body: Mapping[str, Any]) -> tuple[str, object]:
     return outcome, body.get("provenance_basis")
 
 
-def _stamp(route: str | None = None) -> str:
-    """The time of a line, to the second.
-
-    A Stop line reads ``time.time()`` and not ``datetime.now()``. The byte-identity
-    replay steps its datetime clock on every read, so a Stop that read it once more
-    would move the stamp of every record after it, and nothing else would change.
-    """
-    if route == STOP_ROUTE:
-        return datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def _stamp() -> str:
+    """The time of a memory hook's line, to the second."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _stop_stamp() -> str:
+    """The time of a Stop line, to the second.
+
+    It reads ``time.time()`` and not ``datetime.now()``. The byte-identity replay
+    steps its datetime clock on every read, so a Stop that read it once more would
+    move the stamp of every record after it, and nothing else would change.
+    """
+    return datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stop_entry(body: Mapping[str, Any], *, mode: str | None) -> dict[str, object]:
+    """The line for one Stop output.
+
+    A Stop delivers nothing and never asks Jev, so its line has no bytes, no method
+    and is never answered. ``mode`` is None only on a Stop skipped before the config
+    was read.
+    """
+    outcome, detail = _stop_outcome(body)
+    return {
+        "answered": False, "bytes": 0, "detail": detail, "method": None, "mode": mode,
+        "outcome": outcome, "route": STOP_ROUTE, "ts": _stop_stamp(),
+    }
 
 
 def route_entry(
     route: str, body: Mapping[str, Any], *, mode: str | None, answered: bool = False,
     delivery: Mapping[str, Any] | None = None, held: bool = False,
 ) -> dict[str, object]:
-    """The line for one hook output. ``answered`` means Jev replied on this turn.
-
-    A Stop delivers nothing and never asks Jev, so its line has no bytes, no method
-    and is never answered. ``mode`` is None only on a Stop skipped before the config
-    was read.
-    """
+    """The line for one output of a hook that delivers memory. ``answered`` means
+    Jev replied on this turn. A Stop's line comes from ``stop_entry``."""
     if route == STOP_ROUTE:
-        outcome, detail = _stop_outcome(body)
-        return {
-            "answered": False, "bytes": 0, "detail": detail, "method": None, "mode": mode,
-            "outcome": outcome, "route": route, "ts": _stamp(route),
-        }
+        raise ValueError("a Stop's route line comes from stop_entry")
     context = body.get("hookSpecificOutput")
     payload = context.get("additionalContext") if isinstance(context, Mapping) else ""
     payload = payload if isinstance(payload, str) else ""
@@ -199,11 +208,12 @@ def route_entry(
 
 
 def failed_entry(action: str, error: str, *, mode: str) -> dict[str, object]:
-    """The line for a turn that ended before the hook could say how it went."""
+    """The line for a turn that ended before the hook could say how it went, on the
+    clock its route's own lines use."""
     route = ROUTES[action]
     return {
         "answered": False, "bytes": 0, "detail": error, "method": None, "mode": mode,
-        "outcome": "failed", "route": route, "ts": _stamp(route),
+        "outcome": "failed", "route": route, "ts": _stop_stamp() if route == STOP_ROUTE else _stamp(),
     }
 
 
@@ -231,9 +241,9 @@ class HookTurn:
     def settle(self, body: dict[str, Any]) -> dict[str, Any]:
         """Note where the turn came to, and return the output to emit."""
         try:
-            entry = route_entry(
-                ROUTES[self._action], body, mode=self._mode, answered=self.answered,
-                delivery=self.delivery, held=self.held,
+            route = ROUTES[self._action]
+            entry = stop_entry(body, mode=self._mode) if route == STOP_ROUTE else route_entry(
+                route, body, mode=self._mode, answered=self.answered, delivery=self.delivery, held=self.held,
             )
         except Exception:
             return body
@@ -319,4 +329,5 @@ __all__ = [
     "route_entry",
     "route_log_path",
     "route_summary",
+    "stop_entry",
 ]

@@ -27,7 +27,7 @@ from .config import (
     resolved_operator_root,
 )
 from .errors import ImprintError, ValidationError
-from .hook_routes import ROUTE_DEFER_ENV, ROUTE_FIELD, ROUTES, STOP_ROUTE, HookTurn, route_entry
+from .hook_routes import ROUTE_DEFER_ENV, ROUTE_FIELD, ROUTES, HookTurn, stop_entry
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
 from .store import ImprintStore
@@ -274,7 +274,7 @@ def _early_stop_line(body: dict) -> dict:
     if os.environ.get(ROUTE_DEFER_ENV) != "1":
         return body
     try:
-        return {**body, ROUTE_FIELD: route_entry(STOP_ROUTE, body, mode=None)}
+        return {**body, ROUTE_FIELD: stop_entry(body, mode=None)}
     except Exception:
         return body
 

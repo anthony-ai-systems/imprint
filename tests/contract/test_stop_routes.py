@@ -30,6 +30,7 @@ from imprint.hook_routes import (
     route_entry,
     route_log_path,
     route_summary,
+    stop_entry,
 )
 from imprint.store import ImprintStore
 
@@ -125,15 +126,20 @@ def test_the_reasons_are_found_in_every_module():
 @pytest.mark.parametrize("reason", sorted(_reasons_the_stop_hook_can_write()))
 def test_each_skip_reason_is_an_outcome_of_its_own(reason):
     body = {"status": "skipped", "reason": reason, "provenance_basis": "unverified"}
-    entry = route_entry("stop_capture", body, mode="deterministic")
+    entry = stop_entry(body, mode="deterministic")
     assert (entry["outcome"], entry["detail"]) == (RENAMED.get(reason, reason), "unverified")
+
+
+def test_a_stop_line_comes_only_from_its_own_builder():
+    with pytest.raises(ValueError):
+        route_entry("stop_capture", {"status": "queued"}, mode=None)
 
 
 def test_every_reason_the_cli_writes_has_an_outcome():
     written = set(re.findall(r'"reason":\s*"([a-z_]+)"', (ROOT / "src" / "imprint" / "cli.py").read_text()))
     assert written
     for reason in written:
-        outcome = route_entry("stop_capture", {"status": "skipped", "reason": reason}, mode=None)["outcome"]
+        outcome = stop_entry({"status": "skipped", "reason": reason}, mode=None)["outcome"]
         assert outcome != "failed" or reason == "hook_input_invalid", reason
 
 
@@ -155,7 +161,7 @@ def test_every_reason_the_cli_writes_has_an_outcome():
     ({}, "failed", "unknown_reason"),
 ])
 def test_every_stop_output_comes_to_one_outcome(body, outcome, detail):
-    entry = route_entry("stop_capture", body, mode="jev")
+    entry = stop_entry(body, mode="jev")
     assert (entry["outcome"], entry["detail"], entry["mode"]) == (outcome, detail, "jev")
     assert set(entry) == LINE_KEYS
 
@@ -338,7 +344,7 @@ def _failures(tmp_path):
 
 def test_the_bridge_writes_the_stop_line_and_keeps_it_from_the_host(tmp_path, bridged, monkeypatch, capsys):
     receipt = {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"}
-    line = route_entry("stop_capture", receipt, mode="deterministic")
+    line = stop_entry(receipt, mode="deterministic")
     _child(bridged, monkeypatch, stdout=json.dumps({**receipt, "_imprint_route": line}))
     assert _run(bridged, monkeypatch) == 0
     assert capsys.readouterr().out == json.dumps(receipt, sort_keys=True) + "\n"
@@ -415,7 +421,7 @@ def test_a_line_holds_no_words(tmp_path, monkeypatch, capsys, entry):
 def test_stop_lines_share_the_file_and_its_rotation(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "ROUTE_LOG_MAX_BYTES", 400)
     for _ in range(3):  # two lines fill the cap, so the third moves them aside
-        record_route(tmp_path, route_entry("stop_capture", {"status": "skipped", "reason": "not_explicit_feedback"}, mode=None))
+        record_route(tmp_path, stop_entry({"status": "skipped", "reason": "not_explicit_feedback"}, mode=None))
     path = route_log_path(tmp_path)
     assert [len(path.with_name(name).read_text().splitlines()) for name in ("hook-routes.jsonl.1", path.name)] == [2, 1]
     summary = route_summary(tmp_path, stop_window_seconds=DAY)
