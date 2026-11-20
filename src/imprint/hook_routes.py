@@ -18,11 +18,10 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-
-from collections import deque
 
 from imprint.config import effective_selector_mode
 from imprint.log_files import append_capped, newest_lines
