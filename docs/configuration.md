@@ -63,7 +63,7 @@ object and preserves unknown namespaced extensions.
 - `org.imprint.health.capture_silence_days`: `null` (default) or a whole number of
   days, 1 to 365. When set, `imprint health` degrades with `capture_silent` when no
   capture has landed in that many days while the Stop hook ran at least 10 times in
-  them; see Capture silence below. Unset, health never asks, and adds none of the
+  them on turns that could have captured; see Capture silence below. Unset, health never asks, and adds none of the
   `capture_silence_` fields.
 
 The release artifact includes `config.example.json`. Replace its placeholder
@@ -383,30 +383,36 @@ no statement, no session and no path. What the Stop prints is unchanged.
 `hook_route_outcomes_24h.stop_capture` counts the last day of these lines by outcome,
 beside the other routes. `capture_newest_age_seconds` is the age of the newest
 capture envelope in the spool, or -1 when there is none. Every spool file is a
-capture, from the Stop hook or `imprint capture`, so this is the age of the newest
-capture that landed, whether or not it has compiled. `imprint spool prune` removes
-old acknowledged envelopes, so after a prune it can read older or -1.
+capture, from the Stop hook or `imprint capture`, on this node or another whose
+spool this store holds, so this is the age of the newest capture that landed,
+whether or not it has compiled. `imprint spool prune` removes old acknowledged
+envelopes, so after a prune it can read older or -1.
 
 ## Capture silence
 
 With `org.imprint.health.capture_silence_days` set to a number of days, `imprint
 health` adds the degraded reason `capture_silent` when both hold:
 
-- no capture has landed in that many days: `capture_newest_age_seconds` is -1 or
-  older than the window, and
+- no capture has landed in that many days: no `captured` Stop line is in the
+  window, and `capture_newest_age_seconds` is -1 or older than the window, and
 - the Stop hook wrote at least 10 lines in the same window
-  (`capture_silence_min_stops`), whatever their outcome.
+  (`capture_silence_min_stops`) on turns that could have captured: any outcome but
+  `machine_origin` and `t3_scratch_thread`. Those turns are automation, or a T3
+  scratch thread where no prompt is credited, so they could never capture.
 
-A store nobody used in the window is quiet, not silent, so it is not degraded. Every
-Stop line counts, `machine_origin` included, because a marker set where people type
-would stop all capture too. So on a store that only automation reaches, leave the key
-unset. The window is read from the newest 2 MiB of the route log, current and rotated
-file, so on a busy store a long window counts only what that tail holds, which is
-always far more than 10 lines. Health then also reports `capture_silence_days`,
-`capture_silence_stop_calls` (the Stop lines in the window) and
-`capture_silence_min_stops`. With the key unset none of these appear and the reason
-is never raised. Stop lines exist only from the build that writes them, so the
-reason cannot be raised by Stops from before it.
+A store nobody used in the window is quiet, not silent, so it is not degraded, and
+neither is one that only automation reaches. A `captured` line counts even after
+`imprint spool prune` has removed its envelope. A fresh spool file counts too, and
+`imprint capture` or another node can write one, so while they do the Stop hook can
+capture nothing without this reason; `hook_route_outcomes_24h.stop_capture` still
+shows it. The window is read from the newest 2 MiB of the route log, current and
+rotated file, so on a busy store a long window counts only what that tail holds,
+which is always far more than 10 lines. Health then also reports
+`capture_silence_days`, `capture_silence_stop_calls` (the Stop lines in the window
+that could have captured), `capture_silence_captures` (the `captured` ones among
+them) and `capture_silence_min_stops`. With the key unset none of these appear and
+the reason is never raised. Stop lines exist only from the build that writes them,
+so the reason cannot be raised by Stops from before it.
 
 ## Short lines
 

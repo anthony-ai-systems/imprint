@@ -11,7 +11,9 @@
   `capture_newest_age_seconds`, the age of the newest capture envelope. A new key,
   `org.imprint.health.capture_silence_days`, unset by default, makes health degrade
   with `capture_silent` when no capture has landed in that many days while the Stop
-  hook ran at least 10 times in them. Unset, it changes nothing. What the Stop hook
+  hook ran at least 10 times in them on turns that could have captured, which leaves
+  out `machine_origin` and `t3_scratch_thread`. A `captured` Stop line in the window
+  counts as a capture even after a prune. Unset, it changes nothing. What the Stop hook
   prints to the host does not change. A Stop marked by `IMPRINT_CAPTURE_ORIGIN` still
   reads no config, so run outside the hook bridge it writes no line. The
   byte-identity replay now expects the route log on disk and the health report to

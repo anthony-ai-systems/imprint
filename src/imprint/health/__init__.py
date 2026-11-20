@@ -362,6 +362,7 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         capture_newest_age_seconds=_latest_age(spool_files, now),
         capture_silence_days=silence_days,
         capture_silence_stop_calls=int(hook_routes.get("stop_calls_in_window", 0)),
+        capture_silence_captures=int(hook_routes.get("stop_captures_in_window", 0)),
     ))
     result = report.as_dict()
     # CLI contract uses healthy/degraded while the invariant engine remains green/red.

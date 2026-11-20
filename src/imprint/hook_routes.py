@@ -53,6 +53,9 @@ STOP_OUTCOMES = ("captured", "not_feedback", "origin_unverified", *STOP_SKIP_OUT
 _STOP_RENAMED = {"not_explicit_feedback": "not_feedback", "unverified_provenance": "origin_unverified"}
 _STOP_SKIPS = frozenset(STOP_SKIP_OUTCOMES) | frozenset(_STOP_RENAMED.values())
 UNKNOWN_STOP_REASON = "unknown_reason"
+# Stops that could not have captured whatever was said: automation, and T3's scratch
+# folder, where no prompt is credited. The silence signal does not count them.
+_STOPS_THAT_CANNOT_CAPTURE = frozenset({"machine_origin", "t3_scratch_thread"})
 _ROUTE_OUTCOMES = {"session_start": OUTCOMES, "user_prompt_submit": OUTCOMES, STOP_ROUTE: STOP_OUTCOMES}
 
 # The selector_outcome of a turn T3's scratch check kept from Jev.
@@ -259,13 +262,14 @@ def route_summary(
     ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
 
-    With ``stop_window_seconds``, it also counts the Stop lines of any outcome in that
-    window, as far back as the tail it reads.
+    With ``stop_window_seconds``, it also counts, in that window and as far back as
+    the tail it reads, the Stop lines that could have captured and those that did.
     """
     current = time.time() if now is None else now
     outcomes = {route: dict.fromkeys(_ROUTE_OUTCOMES[route], 0) for route in ROUTES.values()}
     failures = 0
     stop_calls = 0
+    stop_captures = 0
     for raw in newest_lines(route_log_path(root), ROUTE_LOG_TAIL_BYTES):
         try:
             entry = json.loads(raw)
@@ -275,7 +279,8 @@ def route_summary(
                 stop_window_seconds is not None and route == STOP_ROUTE
                 and outcome in STOP_OUTCOMES and 0 <= age <= stop_window_seconds
             ):
-                stop_calls += 1
+                stop_calls += outcome not in _STOPS_THAT_CANNOT_CAPTURE
+                stop_captures += outcome == "captured"
             if not 0 <= age <= ROUTE_WINDOW_SECONDS:
                 continue
             outcomes[route][outcome] += 1
@@ -293,6 +298,7 @@ def route_summary(
     summary: dict[str, object] = {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
     if stop_window_seconds is not None:
         summary["stop_calls_in_window"] = stop_calls
+        summary["stop_captures_in_window"] = stop_captures
     return summary
 
 

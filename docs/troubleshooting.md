@@ -42,12 +42,16 @@ It means no capture has landed in that many days while the Stop hook ran at leas
 and the `stop_capture` lines in `logs/hook-routes.jsonl`. Mostly `not_feedback`
 means the hook works and nothing it saw read as feedback. Mostly `origin_unverified`
 or one `t3_` reason means prompts are being refused, and `capture_skips_24h` and
-`docs/contracts/capture-origin.md` say why. Mostly `machine_origin` means
-`IMPRINT_CAPTURE_ORIGIN` is set where people type, or the store sees only
-automation, where the key should stay unset. `failed` lines leave files in
-`logs/hook-failures`. If the Stop hook writes no lines at all, it is not registered
-or not running: see Hook registration in `docs/configuration.md`, and note that the
-reason needs Stop lines, so a hook that never runs cannot raise it.
+`docs/contracts/capture-origin.md` say why. `machine_origin` and
+`t3_scratch_thread` lines do not count toward the minimum, so this reason never
+comes from them alone. If people type where most lines say `machine_origin`,
+`IMPRINT_CAPTURE_ORIGIN` is set there by mistake: check that by hand. A `failed`
+line the bridge wrote, with `detail` `hook_action_failed`, `hook_action_timeout`,
+`hook_executable_unavailable`, `hook_output_invalid` or `hook_route_unreported`,
+leaves a file in `logs/hook-failures`. `hook_exception`, `hook_input_invalid` and
+`unknown_reason` leave none. If the Stop hook writes no lines at all, it is not
+registered or not running: see Hook registration in `docs/configuration.md`, and
+note that the reason needs Stop lines, so a hook that never runs cannot raise it.
 
 `selector_key_unavailable` means the store is on `selector.mode: jev` and the key
 check failed, so every turn falls back to deterministic delivery. Set the key in the

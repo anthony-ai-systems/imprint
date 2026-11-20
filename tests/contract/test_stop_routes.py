@@ -519,12 +519,27 @@ def test_stops_and_no_capture_in_the_window_degrade_health(tmp_path):
     ([_stop_line(age=1.5 * DAY)] * CAPTURE_SILENCE_MIN_STOPS, (), True),
     ([_stop_line(route="user_prompt_submit", outcome="delivered")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
     ([_stop_line(outcome="not_an_outcome")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
-    ([_stop_line("machine_origin")] * CAPTURE_SILENCE_MIN_STOPS, (), True),
+    ([_stop_line("machine_origin")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
+    ([_stop_line("t3_scratch_thread")] * CAPTURE_SILENCE_MIN_STOPS, (), False),
+    ([_stop_line("machine_origin")] * CAPTURE_SILENCE_MIN_STOPS + [_stop_line()] * (CAPTURE_SILENCE_MIN_STOPS - 1),
+     (), False),
+    ([_stop_line("failed")] * CAPTURE_SILENCE_MIN_STOPS, (), True),
+    ([_stop_line()] * CAPTURE_SILENCE_MIN_STOPS + [_stop_line("captured", age=1.5 * DAY)], (), False),
+    ([_stop_line()] * CAPTURE_SILENCE_MIN_STOPS + [_stop_line("captured", age=1.5 * DAY)], (5 * DAY,), False),
+    ([_stop_line()] * CAPTURE_SILENCE_MIN_STOPS + [_stop_line("captured", age=3 * DAY)], (), True),
 ], ids=["too_few_stops", "recent_capture", "old_capture", "stops_before_the_window", "stops_past_a_day",
-        "other_routes", "damaged_outcome", "machine_stops"])
+        "other_routes", "damaged_outcome", "machine_stops", "scratch_stops", "machine_stops_do_not_make_up_the_count",
+        "failed_stops", "a_captured_line_with_no_spool", "a_captured_line_after_an_old_spool",
+        "a_captured_line_before_the_window"])
 def test_the_silence_signal(tmp_path, entries, spool_ages, silent):
     report = _report(tmp_path, *entries, spool_ages=spool_ages, **{CAPTURE_SILENCE_DAYS: 2})
     assert ("capture_silent" in report["degraded_reasons"]) is silent
+
+
+def test_the_silence_metrics_say_what_the_rule_read(tmp_path):
+    entries = [_stop_line("machine_origin"), _stop_line("captured"), *[_stop_line()] * 3]
+    metrics = _report(tmp_path, *entries, **{CAPTURE_SILENCE_DAYS: 2})["metrics"]
+    assert (metrics["capture_silence_stop_calls"], metrics["capture_silence_captures"]) == (4, 1)
 
 
 def test_damaged_lines_count_as_no_stop(tmp_path):
@@ -542,6 +557,8 @@ def test_damaged_lines_count_as_no_stop(tmp_path):
     ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS,
       "capture_newest_age_seconds": DAY + 1}, True),
     ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS - 1}, False),
+    ({"capture_silence_days": 1, "capture_silence_stop_calls": CAPTURE_SILENCE_MIN_STOPS,
+      "capture_silence_captures": 1}, False),
     ({"capture_silence_stop_calls": 1000}, False),
 ])
 def test_the_rule(values, silent):

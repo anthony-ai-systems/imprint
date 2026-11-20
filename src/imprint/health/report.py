@@ -20,7 +20,8 @@ SELECTOR_FAILURE_LIMIT = 3
 # The routes whose turns can select, and so whose lines can show a selection ran.
 _SELECTING_ROUTES = ("session_start", "user_prompt_submit")
 # With org.imprint.health.capture_silence_days set, a window with no capture says
-# nothing unless the Stop hook ran at least this often in it: an idle store is quiet.
+# nothing unless the Stop hook ran at least this often in it, on turns that could
+# have captured: an idle store is quiet, and so is one only automation reaches.
 CAPTURE_SILENCE_MIN_STOPS = 10
 
 
@@ -86,14 +87,23 @@ class HealthInputs:
     hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     # -1 when no capture envelope is in the spool.
     capture_newest_age_seconds: int = -1
-    # None leaves the silence signal off. The calls are Stop route lines in that many days.
+    # None leaves the silence signal off. The calls are the Stop route lines in that many
+    # days that could have captured, and the captures are those that did.
     capture_silence_days: int | None = None
     capture_silence_stop_calls: int = 0
+    capture_silence_captures: int = 0
 
 
 def _capture_silent(values: HealthInputs) -> bool:
-    """Whether the Stop hook kept running and no capture landed in the window."""
+    """Whether the Stop hook kept running and no capture landed in the window.
+
+    A captured Stop line in the window is a capture, whatever the spool now holds:
+    a prune can empty it. A spool file newer than the window counts too, though
+    other writers to the spool can keep it fresh while the Stop hook captures nothing.
+    """
     if values.capture_silence_days is None or values.capture_silence_stop_calls < CAPTURE_SILENCE_MIN_STOPS:
+        return False
+    if values.capture_silence_captures > 0:
         return False
     newest = values.capture_newest_age_seconds
     return newest < 0 or newest > values.capture_silence_days * 86400
@@ -273,6 +283,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
     if values.capture_silence_days is not None:
         metrics["capture_silence_days"] = values.capture_silence_days
         metrics["capture_silence_stop_calls"] = max(0, values.capture_silence_stop_calls)
+        metrics["capture_silence_captures"] = max(0, values.capture_silence_captures)
         metrics["capture_silence_min_stops"] = CAPTURE_SILENCE_MIN_STOPS
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
