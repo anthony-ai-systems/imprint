@@ -349,6 +349,8 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         selector_fallbacks_24h=int(selector["fallbacks_24h"]),
         selector_failures_in_a_row=hook_routes["selector_failures_in_a_row"],
         hook_route_outcomes_24h=hook_routes["outcomes_24h"],
+        # Every spool file is a capture envelope, so the newest one is the newest capture.
+        capture_newest_age_seconds=_latest_age(spool_files, now),
     ))
     result = report.as_dict()
     # CLI contract uses healthy/degraded while the invariant engine remains green/red.

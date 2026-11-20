@@ -57,10 +57,12 @@ def test_every_scenario_is_there():
     assert len(GOLDEN) == SCENARIOS
 
 
-# Health counts a T3 prompt refused only for its entrypoint among the capture skips,
-# so its report changes by design and nothing else does.
-# test_only_the_designed_changes_differ_from_main shows what changed in it.
-CHANGED_BY_DESIGN = ["health"]
+# Health counts a T3 prompt refused only for its entrypoint among the capture skips.
+# Every Stop writes a route line, which health counts beside the age of the newest
+# capture. So the route log on disk and the health report change by design, and
+# nothing else does. test_only_the_designed_changes_differ_from_main shows what
+# changed in them.
+CHANGED_BY_DESIGN = ["files_on_disk", "health"]
 
 
 def test_no_rows_and_no_extension_replay_mains_bytes():
@@ -181,13 +183,36 @@ def _health(scenario: str) -> dict:
 def _health_as_main_had_it(scenario: str) -> dict:
     report = _health(scenario)
     assert report["metrics"]["capture_skips_24h"].pop("t3_entrypoint_unknown") == 0
+    assert report["metrics"].pop("capture_newest_age_seconds") == "<disk>"
+    report["metrics"]["hook_route_outcomes_24h"].pop("stop_capture")
     return report
+
+
+def _route_lines(files_on_disk: str) -> list[dict]:
+    return [
+        json.loads(line) for name, text in json.loads(files_on_disk).items()
+        if name.endswith("hook-routes.jsonl") for line in text.splitlines()
+    ]
+
+
+def _files_as_main_had_them(files_on_disk: str) -> dict:
+    files = json.loads(files_on_disk)
+    for name, text in files.items():
+        if name.endswith("hook-routes.jsonl"):
+            files[name] = "".join(
+                line for line in text.splitlines(keepends=True) if json.loads(line)["route"] != "stop_capture"
+            )
+    return files
 
 
 def test_only_the_designed_changes_differ_from_main(main_source):
     ours, mains = replay(SOURCE, "--full"), replay(main_source, "--full")
     assert different(ours, mains) == CHANGED_BY_DESIGN
     assert _health_as_main_had_it(ours["health"]) == _health(mains["health"])
+    assert _files_as_main_had_them(ours["files_on_disk"]) == json.loads(mains["files_on_disk"])
+    stops = [line for line in _route_lines(ours["files_on_disk"]) if line["route"] == "stop_capture"]
+    assert [line["outcome"] for line in stops] == ["captured", "captured", "not_feedback"]
+    assert _health(ours["health"])["metrics"]["hook_route_outcomes_24h"]["stop_capture"]["captured"] == 2
 
 
 def test_main_opens_a_store_with_rows_and_leaves_them(tmp_path, main_source, capture_envelope):

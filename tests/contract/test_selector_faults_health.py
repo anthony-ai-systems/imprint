@@ -394,8 +394,10 @@ def test_a_log_that_is_a_pipe_is_not_read(tmp_path):
 def test_an_absent_log_reports_zero(tmp_path):
     summary = route_summary(tmp_path, now=NOW)
     assert summary["selector_failures_in_a_row"] == 0
-    assert set(summary["outcomes_24h"]) == {"session_start", "user_prompt_submit"}
+    assert set(summary["outcomes_24h"]) == {"session_start", "user_prompt_submit", "stop_capture"}
     assert set(summary["outcomes_24h"]["session_start"]) == set(routes.OUTCOMES)
+    assert summary["outcomes_24h"]["stop_capture"] == dict.fromkeys(routes.STOP_OUTCOMES, 0)
+    assert "stop_calls_in_window" not in summary
 
 
 def test_a_run_reads_across_a_rotation(tmp_path, monkeypatch):
@@ -429,11 +431,13 @@ BEFORE_THIS_ITEM = {
 GAINED = {
     "hook_route_evidence", "hook_route_outcomes_24h", "selector_failure_limit", "selector_failures_in_a_row",
 }
+# Gained with the Stop route. The silence signal's own fields appear only when its key is set.
+GAINED_WITH_THE_STOP_ROUTE = {"capture_newest_age_seconds"}
 
 
 def test_health_gains_fields_only(tmp_path):
     report = report_for(tmp_path, mode="deterministic")
-    assert set(report["metrics"]) == BEFORE_THIS_ITEM | GAINED
+    assert set(report["metrics"]) == BEFORE_THIS_ITEM | GAINED | GAINED_WITH_THE_STOP_ROUTE
     assert set(report) == {"degraded_reasons", "health_schema_version", "metrics", "status"}
     assert report["health_schema_version"] == "1.0.0"
     assert report["metrics"]["hook_route_evidence"] == "operator_logs_hook_routes_tail"
@@ -490,6 +494,7 @@ def test_the_new_counts_say_nothing_but_counts(tmp_path):
     assert report["metrics"]["hook_route_outcomes_24h"] == {
         "session_start": dict.fromkeys(routes.OUTCOMES, 0),
         "user_prompt_submit": {**dict.fromkeys(routes.OUTCOMES, 0), "delivered": 1, "failed": 2, "nothing_relevant": 1},
+        "stop_capture": dict.fromkeys(routes.STOP_OUTCOMES, 0),
     }
 
 

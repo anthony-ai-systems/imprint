@@ -872,11 +872,18 @@ def test_an_event_too_deep_to_read_is_one_failed_line(tmp_path, monkeypatch, cap
     assert (line["outcome"], line["detail"]) == ("failed", "hook_input_invalid")
 
 
-@pytest.mark.parametrize("action", ["stop-capture", "health-check"])
-def test_a_hook_that_delivers_no_memory_has_no_line(tmp_path, monkeypatch, capsys, action):
+def test_the_health_hook_has_no_line(tmp_path, monkeypatch, capsys):
     config = write_config(tmp_path)
-    run_expecting(config, action, {"session_id": "s"}, monkeypatch)
+    run_expecting(config, "health-check", {"session_id": "s"}, monkeypatch)
     assert route_lines(tmp_path) == []
+
+
+def test_a_stop_has_one_line_of_its_own(tmp_path, monkeypatch, capsys):
+    config = write_config(tmp_path)
+    run_expecting(config, "stop-capture", {"session_id": "s"}, monkeypatch)
+    (line,) = route_lines(tmp_path)
+    assert set(line) == LINE_KEYS
+    assert (line["route"], line["outcome"]) == ("stop_capture", "feedback_text_unavailable")
 
 
 # -- under the bridge --------------------------------------------------------------
@@ -1050,10 +1057,9 @@ def test_a_bridge_that_cannot_find_its_root_still_answers_the_host(bridged, monk
     assert json.loads(capsys.readouterr().out) == {"status": "delivered"}
 
 
-@pytest.mark.parametrize("action", ["stop-capture", "health-check"])
-def test_the_bridge_writes_no_line_for_a_hook_that_delivers_no_memory(tmp_path, bridged, monkeypatch, capsys, action):
+def test_the_bridge_writes_no_line_for_the_health_hook(tmp_path, bridged, monkeypatch, capsys):
     child_returns(bridged, monkeypatch, stdout='{"status": "skipped"}')
-    assert run_bridge(bridged, monkeypatch, action) == 0
+    assert run_bridge(bridged, monkeypatch, "health-check") == 0
     assert route_lines(tmp_path) == []
     assert failure_files(tmp_path) == []
 

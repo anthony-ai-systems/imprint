@@ -79,6 +79,8 @@ class HealthInputs:
     selector_fallbacks_24h: int = 0
     selector_failures_in_a_row: int = 0
     hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    # -1 when no capture envelope is in the spool.
+    capture_newest_age_seconds: int = -1
 
 
 @dataclass(frozen=True)
@@ -218,6 +220,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "hook_route_outcomes_24h": {route: dict(counts) for route, counts in values.hook_route_outcomes_24h.items()},
         "hook_route_evidence": _route_evidence(values),
+        "capture_newest_age_seconds": max(-1, values.capture_newest_age_seconds),
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
         "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
         "t3_record_evidence": "operator_logs_capture_skips_tail",

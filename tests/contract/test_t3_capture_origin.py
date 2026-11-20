@@ -1524,3 +1524,39 @@ def test_health_degrades_on_an_unknown_entrypoint(tmp_path):
     report = health_report(root, store, {"compiler": "imprint-hook"})
     assert "t3_entrypoint_unknown" in report["degraded_reasons"]
     assert report["metrics"]["capture_skips_24h"]["t3_entrypoint_unknown"] == 1
+
+
+# -- the route line of a T3 Stop -----------------------------------------------------
+
+def _route_lines(root):
+    path = root / "logs" / "hook-routes.jsonl"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+
+T3_ENDINGS = {
+    "captured": lambda tmp: (_t3_home(tmp, _message(FEEDBACK)), _current_entry()),
+    "origin_unverified": lambda tmp: (_t3_home(tmp, _message(FEEDBACK, by="agent", source="mcp")), _current_entry()),
+    "t3_record_unavailable": lambda tmp: ({T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp / "absent")}, _current_entry()),
+    "t3_session_ref_unreadable": lambda tmp: (
+        _t3_home(tmp, _message(FEEDBACK), providers=((THREAD, json.dumps({"native": {"id": SESSION}})),)), _current_entry(),
+    ),
+    "t3_session_unmatched": lambda tmp: (
+        _t3_home(tmp, _message(FEEDBACK), providers=(_provider_thread("session-other"),)), _current_entry(),
+    ),
+    "t3_prompt_unmatched": lambda tmp: (_t3_home(tmp, _message("Different words entirely.")), _current_entry()),
+    "t3_marked_window": lambda tmp: (_t3_home(tmp, _message(FEEDBACK, source="mcp")), _current_entry()),
+    "t3_scratch_thread": lambda tmp: (
+        _t3_home(tmp, _message(FEEDBACK), threads=_in_folder(_scratch_chat(tmp))), _current_entry(),
+    ),
+    "t3_entrypoint_unknown": lambda tmp: (_t3_home(tmp, _message(FEEDBACK)), _current_entry(entrypoint="t3-future")),
+}
+
+
+@pytest.mark.parametrize("ending", T3_ENDINGS)
+def test_each_way_a_t3_stop_ends_leaves_its_route_line(tmp_path, ending):
+    env, entry = T3_ENDINGS[ending](tmp_path)
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, entry), env)
+    assert run.returncode == 0, run.stderr
+    (line,) = _route_lines(root)
+    assert (line["route"], line["outcome"]) == ("stop_capture", ending)
+    assert FEEDBACK not in json.dumps(line)
