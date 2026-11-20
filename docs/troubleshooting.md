@@ -29,6 +29,30 @@ counted: `hook_failure_count` is every file, split into
 `hook_failure_recent_count` and `hook_failure_old_count`. Health never deletes
 one. `imprint spool prune` is the only thing that does, and it is never automatic.
 
+`t3_entrypoint_unknown` means a prompt T3 records as typed by a person was refused
+only because its transcript entry names an entrypoint this build does not know. T3
+renamed its entrypoint once already, from `sdk-ts` to `t3-code`, and every T3 prompt
+was refused until a build knew the new name. Install a build that names the new
+entrypoint in `T3_ENTRYPOINTS`. The turns refused before then are not retried. See
+`docs/contracts/capture-origin.md`.
+
+`capture_silent` appears only when `org.imprint.health.capture_silence_days` is set.
+It means no capture has landed in that many days while the Stop hook ran at least
+`capture_silence_min_stops` times. Read `hook_route_outcomes_24h.stop_capture`
+and the `stop_capture` lines in `logs/hook-routes.jsonl`. Mostly `not_feedback`
+means the hook works and nothing it saw read as feedback. Mostly `origin_unverified`
+or one `t3_` reason means prompts are being refused, and `capture_skips_24h` and
+`docs/contracts/capture-origin.md` say why. `machine_origin` and
+`t3_scratch_thread` lines do not count toward the minimum, so this reason never
+comes from them alone. If people type where most lines say `machine_origin`,
+`IMPRINT_CAPTURE_ORIGIN` is set there by mistake: check that by hand. A `failed`
+line the bridge wrote, with `detail` `hook_action_failed`, `hook_action_timeout`,
+`hook_executable_unavailable`, `hook_output_invalid` or `hook_route_unreported`,
+leaves a file in `logs/hook-failures`. `hook_exception`, `hook_input_invalid` and
+`unknown_reason` leave none. If the Stop hook writes no lines at all, it is not
+registered or not running: see Hook registration in `docs/configuration.md`, and
+note that the reason needs Stop lines, so a hook that never runs cannot raise it.
+
 `selector_key_unavailable` means the store is on `selector.mode: jev` and the key
 check failed, so every turn falls back to deterministic delivery. Set the key in the
 variable `selector.jev.api_key_env` names, or make `selector.jev.api_key_file` a

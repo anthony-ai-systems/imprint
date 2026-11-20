@@ -7,15 +7,22 @@ HEALTH_SCHEMA_VERSION = "1.0.0"
 SUPPORTED_RECORD_MAJOR = 3
 SUPPORTED_HOOK_MAJOR = 1
 # A transcript refused or malformed used to surface as a hook failure. T3 session
-# references going unreadable stops all T3 capture. Any one of these needs someone
-# to look.
+# references going unreadable, or a T3 entrypoint no build knows, stops all T3
+# capture. Any one of these needs someone to look.
 _DEGRADING_CAPTURE_SKIPS = (
-    "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed", "transcript_refused",
+    "t3_entrypoint_unknown", "t3_marked_window", "t3_session_ref_unreadable", "transcript_malformed",
+    "transcript_refused",
 )
 # A live service can time out once. This many failed selections in a row, with no
 # reply from Jev between them, means it is down or selection cannot reach it. The
 # window is the hook route log's.
 SELECTOR_FAILURE_LIMIT = 3
+# The routes whose turns can select, and so whose lines can show a selection ran.
+_SELECTING_ROUTES = ("session_start", "user_prompt_submit")
+# With org.imprint.health.capture_silence_days set, a window with no capture says
+# nothing unless the Stop hook ran at least this often in it, on turns that could
+# have captured: an idle store is quiet, and so is one only automation reaches.
+CAPTURE_SILENCE_MIN_STOPS = 10
 
 
 @dataclass(frozen=True)
@@ -78,6 +85,28 @@ class HealthInputs:
     selector_fallbacks_24h: int = 0
     selector_failures_in_a_row: int = 0
     hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
+    # -1 when no capture envelope is in the spool.
+    capture_newest_age_seconds: int = -1
+    # None leaves the silence signal off. The calls are the Stop route lines in that many
+    # days that could have captured, and the captures are those that did.
+    capture_silence_days: int | None = None
+    capture_silence_stop_calls: int = 0
+    capture_silence_captures: int = 0
+
+
+def _capture_silent(values: HealthInputs) -> bool:
+    """Whether the Stop hook kept running and no capture landed in the window.
+
+    A captured Stop line in the window is a capture, whatever the spool now holds:
+    a prune can empty it. A spool file newer than the window counts too, though
+    other writers to the spool can keep it fresh while the Stop hook captures nothing.
+    """
+    if values.capture_silence_days is None or values.capture_silence_stop_calls < CAPTURE_SILENCE_MIN_STOPS:
+        return False
+    if values.capture_silence_captures > 0:
+        return False
+    newest = values.capture_newest_age_seconds
+    return newest < 0 or newest > values.capture_silence_days * 86400
 
 
 @dataclass(frozen=True)
@@ -97,8 +126,12 @@ class HealthReport:
 
 def _route_evidence(values: HealthInputs) -> str:
     """Every fallback writes a route line, so a log with none beside them took none,
-    and its run of failures is not evidence that there were none."""
-    lines = sum(count for counts in values.hook_route_outcomes_24h.values() for count in counts.values())
+    and its run of failures is not evidence that there were none. A Stop never
+    selects, so its lines say nothing about that."""
+    lines = sum(
+        count for route in _SELECTING_ROUTES
+        for count in values.hook_route_outcomes_24h.get(route, {}).values()
+    )
     blind = values.selector_mode == "jev" and not lines and values.selector_fallbacks_24h >= SELECTOR_FAILURE_LIMIT
     return "unavailable" if blind else "operator_logs_hook_routes_tail"
 
@@ -180,6 +213,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
             reasons.append("selector_key_unavailable")
         if values.selector_failures_in_a_row >= SELECTOR_FAILURE_LIMIT:
             reasons.append("selector_failures_repeated")
+    if _capture_silent(values):
+        reasons.append("capture_silent")
 
     metrics: dict[str, int | bool | str] = {
         "compiler_count": values.compiler_count,
@@ -217,6 +252,7 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         "hook_failure_evidence": "operator_logs_hook_failures_file_scan",
         "hook_route_outcomes_24h": {route: dict(counts) for route, counts in values.hook_route_outcomes_24h.items()},
         "hook_route_evidence": _route_evidence(values),
+        "capture_newest_age_seconds": max(-1, values.capture_newest_age_seconds),
         "t3_record_unavailable_24h": max(0, values.t3_record_unavailable_24h),
         "t3_record_unavailable_newest_age_seconds": max(-1, values.t3_record_unavailable_newest_age_seconds),
         "t3_record_evidence": "operator_logs_capture_skips_tail",
@@ -244,6 +280,11 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
     }
     if values.t3_homes is not None:
         metrics["t3_homes"] = dict(values.t3_homes)
+    if values.capture_silence_days is not None:
+        metrics["capture_silence_days"] = values.capture_silence_days
+        metrics["capture_silence_stop_calls"] = max(0, values.capture_silence_stop_calls)
+        metrics["capture_silence_captures"] = max(0, values.capture_silence_captures)
+        metrics["capture_silence_min_stops"] = CAPTURE_SILENCE_MIN_STOPS
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
         status="red" if reasons else "green",

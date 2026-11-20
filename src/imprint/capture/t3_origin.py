@@ -19,7 +19,9 @@ from .detector import operator_words, strip_effort_prefix
 from .provenance import MID_TURN_SOURCE
 from .transcript import _well_formed
 
-T3_ENTRYPOINT = "sdk-ts"
+# Every entrypoint T3 has written on the Claude prompts it sends. It wrote "sdk-ts"
+# until it renamed it "t3-code", and nothing else marked the change.
+T3_ENTRYPOINTS = frozenset({"sdk-ts", "t3-code"})
 T3_THREAD_ENV = "T3CODE_THREAD_ID"
 T3_HOME_ENV = "T3CODE_HOME"
 T3_RECORD_UNAVAILABLE_REASON = "t3_record_unavailable"
@@ -36,6 +38,9 @@ T3_MARKED_WINDOW_REASON = "t3_marked_window"
 # it is. Test scripts drive the app there, and old rows and unpatched builds record
 # what they type as user/web, so no prompt in one is credited, a person's included.
 T3_SCRATCH_THREAD_REASON = "t3_scratch_thread"
+# T3's records would have credited the prompt, and only its entrypoint is not one
+# T3 has shipped. That is what a renamed entrypoint looks like, so it is counted.
+T3_ENTRYPOINT_UNKNOWN_REASON = "t3_entrypoint_unknown"
 _SCRATCH_FOLDER = "scratch"
 _HUMAN_AUTHOR = "user"
 # Sources tied to a person at a T3 client. "server" also covers older records
@@ -354,10 +359,27 @@ class T3HostOrigin:
         return _scratch_placement(folders, self._database) is True
 
     def attests(self, entry: Mapping[str, Any], text: str) -> bool:
-        """Answer for an SDK prompt or a mid-turn one, which records no entrypoint."""
+        """Answer for a prompt T3 sent, or a mid-turn one, which records no entrypoint.
+
+        Any other entrypoint is refused. When the records would have credited the
+        prompt anyway, the refusal is given its own reason, because nothing else
+        would show that T3 has renamed its entrypoint again. Any other refusal of
+        such an entry stays an ordinary skip, a failed read of the records
+        included: that look only asks why, and a run that merely inherited the
+        thread variable must not report T3's records unreadable. The failure is
+        forgotten, an earlier entry's too, so a later entry that does need the
+        records reads them again and says so itself.
+        """
         self._miss = None
-        transport = entry.get("entrypoint") == T3_ENTRYPOINT or entry.get("promptSource") == MID_TURN_SOURCE
-        return transport and self._human_record(text) is not None
+        entrypoint = entry.get("entrypoint")
+        if (isinstance(entrypoint, str) and entrypoint in T3_ENTRYPOINTS) or entry.get("promptSource") == MID_TURN_SOURCE:
+            return self._human_record(text) is not None
+        credited = self._human_record(text) is not None
+        if self.read_failed:
+            self.read_failed = False
+            self._index = None
+        self._miss = T3_ENTRYPOINT_UNKNOWN_REASON if credited else None
+        return False
 
     def recorded_words(self, text: str) -> str:
         """Return only the part of an attested entry that T3 recorded."""

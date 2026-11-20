@@ -27,7 +27,7 @@ from .config import (
     resolved_operator_root,
 )
 from .errors import ImprintError, ValidationError
-from .hook_routes import ROUTES, HookTurn
+from .hook_routes import ROUTE_DEFER_ENV, ROUTE_FIELD, ROUTES, HookTurn, stop_entry
 from .projections import markdown_document
 from .permissions import secure_directory, secure_file, secure_tree
 from .store import ImprintStore
@@ -265,10 +265,28 @@ def _opaque_session_urn(root: Path, native_session_id: str) -> str:
     return f"urn:imprint:session:{mapped}"
 
 
-def _hook_input_invalid(turn: HookTurn | None = None) -> int:
+def _early_stop_line(body: dict) -> dict:
+    """Hand the bridge the route line of a Stop skipped before the config is read.
+
+    That skip reads no config and opens no store, so on its own it writes no line,
+    and the line it hands the bridge names no selector mode.
+    """
+    if os.environ.get(ROUTE_DEFER_ENV) != "1":
+        return body
+    try:
+        return {**body, ROUTE_FIELD: stop_entry(body, mode=None)}
+    except Exception:
+        return body
+
+
+def _hook_input_invalid(turn: HookTurn | None = None, *, early_stop: bool = False) -> int:
     """Skip an event a retry cannot change, without blocking the stop."""
     body = {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "hook_input_invalid"}
-    _write_json(turn.settle(body) if turn is not None else body)
+    if turn is not None:
+        body = turn.settle(body)
+    elif early_stop:
+        body = _early_stop_line(body)
+    _write_json(body)
     return 0
 
 
@@ -738,13 +756,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 event = json.load(sys.stdin)
             except RecursionError:
-                return _hook_input_invalid()
+                return _hook_input_invalid(early_stop=True)
             if not isinstance(event, dict):
                 raise ImprintError("hook event must be an object")
             _validate_hook_event(event, "Stop")
-            _write_json({"hook_schema_version": "1.0.0", "status": "skipped",
-                         "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
-                         else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"})
+            _write_json(_early_stop_line({"hook_schema_version": "1.0.0", "status": "skipped",
+                                          "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
+                                          else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"}))
             return 0
         config = load_config(args.config)
         root = resolved_operator_root(config)
@@ -1432,7 +1450,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         detail = None if unavailable else _rejection_detail(root, event["transcript_path"], exc)
                         _record_capture_skip(root, reason, detail)
-                        _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": reason})
+                        _write_json(turn.settle({"hook_schema_version": "1.0.0", "status": "skipped", "reason": reason}))
                         return 0
                     if native["skip_reason"]:
                         reason = native["skip_reason"]
@@ -1455,13 +1473,13 @@ def main(argv: list[str] | None = None) -> int:
                         # stay distinguishable from declared-provenance ones.
                         if native.get("provenance_basis"):
                             skipped["provenance_basis"] = native["provenance_basis"]
-                        _write_json(skipped)
+                        _write_json(turn.settle(skipped))
                         return 0
                     if outlived_its_mark(native.get("source_timestamp")):
-                        _write_json({
+                        _write_json(turn.settle({
                             "hook_schema_version": "1.0.0", "status": "skipped",
                             "reason": OPERATOR_TURN_EXPIRED_REASON,
-                        })
+                        }))
                         return 0
                     if native.get("degradation"):
                         extensions["org.imprint.transcript"] = native["degradation"]
@@ -1480,14 +1498,18 @@ def main(argv: list[str] | None = None) -> int:
                             "source_locator": native["source_locator"],
                         }]
                 if not isinstance(operator_text, str) or not operator_text.strip():
-                    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "feedback_text_unavailable"})
+                    _write_json(turn.settle(
+                        {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "feedback_text_unavailable"},
+                    ))
                     return 0
                 # Detection keeps the pastes in place: the line after a quote is
                 # the operator's, the same line after a bare colon is not.
                 spoken_text = strip_embedded_host_content(strip_leading_host_blocks(operator_text))
                 operator_text = stored_words(spoken_text)
                 if not operator_text:
-                    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                    _write_json(turn.settle(
+                        {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"},
+                    ))
                     return 0
                 detection = detect_explicit_feedback(
                     spoken_text,
@@ -1495,16 +1517,18 @@ def main(argv: list[str] | None = None) -> int:
                     prior_assistant_output=prior_assistant,
                 )
                 if not detection.is_feedback:
-                    _write_json({"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"})
+                    _write_json(turn.settle(
+                        {"hook_schema_version": "1.0.0", "status": "skipped", "reason": "not_explicit_feedback"},
+                    ))
                     return 0
                 # A verbatim record is never cut to fit, and blocking the stop cannot
                 # make the text any shorter, so this turn is skipped and says so.
                 if not text_fits(operator_text):
                     _record_capture_skip(root, OPERATOR_TEXT_OVERSIZED_REASON)
-                    _write_json({
+                    _write_json(turn.settle({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": OPERATOR_TEXT_OVERSIZED_REASON,
-                    })
+                    }))
                     return 0
                 # Stop fires on every assistant turn, so the same trailing
                 # operator utterance is re-read until the operator speaks again.
@@ -1517,10 +1541,10 @@ def main(argv: list[str] | None = None) -> int:
                 if not native_value and isinstance(event.get("transcript_path"), str):
                     mark_scope = _opaque_session_urn(root, f"transcript:{event['transcript_path']}")
                 if not marks.claim(mark_scope, turn_id):
-                    _write_json({
+                    _write_json(turn.settle({
                         "hook_schema_version": "1.0.0", "status": "skipped",
                         "reason": ALREADY_CAPTURED_REASON,
-                    })
+                    }))
                     return 0
                 # The claim is taken before the write so two concurrent Stops
                 # cannot both spool the turn, which makes an unwind mandatory:
@@ -1548,6 +1572,8 @@ def main(argv: list[str] | None = None) -> int:
                         "event_id": envelope["input_event_id"], "spool_file": envelope_path.name,
                         "canonical_status": "spool_only",
                     }
+                    # Its route line says captured even if a later step fails.
+                    turn.keep(receipt)
                     if bool(config.get("compiler")):
                         from .compiler import acknowledgement_committed
                         counts = compile_spools(
@@ -1570,7 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise
                 if "org.imprint.transcript" in extensions:
                     receipt["degradation"] = extensions["org.imprint.transcript"]["payload"]
-                _write_json(receipt)
+                _write_json(turn.settle(receipt))
                 return 0
             if args.action == "health-check":
                 _validate_hook_event(event, "SessionStart")
@@ -1579,16 +1605,21 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json({"hook_schema_version": "1.0.0", **result})
                 return 0 if result.get("status") == "healthy" else 2
     except (ImprintError, OSError, json.JSONDecodeError) as exc:
-        if turn is not None:
-            turn.abandon()
+        kept = turn.abandon() if turn is not None else {}
         _write_json({
             "status": "error", "error": str(exc), "error_type": type(exc).__name__,
-            **error_details,
+            **error_details, **kept,
         })
         return 2
     except BaseException:  # the SIGTERM handler's exit comes through here too
-        if turn is not None:
-            turn.abandon()
+        kept = turn.abandon() if turn is not None else {}
+        # Only a bridged Stop past its write has a line to hand over; the error
+        # itself still goes out as it would have.
+        if kept:
+            try:
+                _write_json(kept)
+            except Exception:
+                pass
         raise
     finally:
         if turn is not None:

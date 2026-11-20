@@ -1,10 +1,12 @@
-"""Where each delivering hook turn came to: one content-free line per turn.
+"""Where each hook turn came to: one content-free line per turn.
 
 Inside a hook, an empty answer and a dead selector look alike, and the agent sees
 neither. Each turn of the two hooks that deliver memory therefore lands on exactly
 one of ``OUTCOMES``, read from what the hook itself emitted and, where that cannot say,
 from the retrieval behind it, and appends one line to ``logs/hook-routes.jsonl``.
-Lines hold no prompt, statement, record id or domain.
+A Stop that captured nothing looks the same whether nobody gave feedback or every
+prompt was refused, so each Stop lands on one of ``STOP_OUTCOMES`` and appends its
+line to the same file. Lines hold no prompt, statement, record id or domain.
 
 A hook that runs under the bridge hands its line to the bridge, because only the
 bridge knows whether the host received the output, and it alone sees the failures
@@ -34,7 +36,27 @@ ROUTE_DEFER_ENV = "IMPRINT_DEFER_ROUTE_LINE"
 ROUTE_FIELD = "_imprint_route"
 
 OUTCOMES = ("delivered", "nothing_relevant", "already_delivered", "scratch_skip", "failed")
-ROUTES = {"session-start": "session_start", "user-prompt-submit": "user_prompt_submit"}
+STOP_ROUTE = "stop_capture"
+ROUTES = {"session-start": "session_start", "user-prompt-submit": "user_prompt_submit", "stop-capture": STOP_ROUTE}
+# Each reason the stop hook skips a turn for is an outcome of its own. A reason not
+# listed is a failure, so one added later cannot pass as a skip. Written out rather
+# than imported: every hook turn imports this module.
+STOP_SKIP_OUTCOMES = (
+    "feedback_text_unavailable", "machine_origin", "no_operator_message", "operator_text_oversized",
+    "operator_turn_already_captured", "operator_turn_expired", "synthetic_transcript_entry",
+    "t3_entrypoint_unknown", "t3_marked_window", "t3_prompt_unmatched", "t3_record_unavailable",
+    "t3_scratch_thread", "t3_session_ref_unreadable", "t3_session_unmatched",
+    "transcript_malformed", "transcript_refused", "transcript_tail_exhausted", "transcript_unavailable",
+)
+STOP_OUTCOMES = ("captured", "not_feedback", "origin_unverified", *STOP_SKIP_OUTCOMES, "failed")
+# The two skips the stop hook's receipt names otherwise.
+_STOP_RENAMED = {"not_explicit_feedback": "not_feedback", "unverified_provenance": "origin_unverified"}
+_STOP_SKIPS = frozenset(STOP_SKIP_OUTCOMES) | frozenset(_STOP_RENAMED.values())
+UNKNOWN_STOP_REASON = "unknown_reason"
+# Stops that could not have captured whatever was said: automation, and T3's scratch
+# folder, where no prompt is credited. The silence signal does not count them.
+_STOPS_THAT_CANNOT_CAPTURE = frozenset({"machine_origin", "t3_scratch_thread"})
+_ROUTE_OUTCOMES = {"session_start": OUTCOMES, "user_prompt_submit": OUTCOMES, STOP_ROUTE: STOP_OUTCOMES}
 
 # The selector_outcome of a turn T3's scratch check kept from Jev.
 SCRATCH_OUTCOME = "t3_scratch_thread"
@@ -111,15 +133,64 @@ def _outcome(
     return "nothing_relevant", reason or selector_outcome or body.get("reason")
 
 
+def _stop_outcome(body: Mapping[str, Any]) -> tuple[str, object]:
+    """The one outcome of a stop hook's output, and the closed code that explains it.
+
+    A written envelope is a capture, whether or not it compiled, and the detail says
+    which. A skip is its reason, with the verdict basis behind it where the receipt
+    gives one. Input a retry cannot change is a failure, as on the other routes.
+    """
+    status = body.get("status")
+    reason = body.get("reason")
+    if status == "queued":
+        return "captured", body.get("canonical_status")
+    if status != "skipped" or not isinstance(reason, str):
+        return "failed", UNKNOWN_STOP_REASON
+    if reason == HOOK_INPUT_INVALID:
+        return "failed", HOOK_INPUT_INVALID
+    outcome = _STOP_RENAMED.get(reason, reason)
+    if outcome not in _STOP_SKIPS:
+        return "failed", UNKNOWN_STOP_REASON
+    return outcome, body.get("provenance_basis")
+
+
 def _stamp() -> str:
+    """The time of a memory hook's line, to the second."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _stop_stamp() -> str:
+    """The time of a Stop line, to the second.
+
+    It reads ``time.time()`` and not ``datetime.now()``. The byte-identity replay
+    steps its datetime clock on every read, so a Stop that read it once more would
+    move the stamp of every record after it, and nothing else would change.
+    """
+    return datetime.fromtimestamp(time.time(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def stop_entry(body: Mapping[str, Any], *, mode: str | None) -> dict[str, object]:
+    """The line for one Stop output.
+
+    A Stop delivers nothing and never asks Jev, so its line has no bytes, no method
+    and is never answered. ``mode`` is None only on a Stop skipped before the config
+    was read.
+    """
+    outcome, detail = _stop_outcome(body)
+    return {
+        "answered": False, "bytes": 0, "detail": detail, "method": None, "mode": mode,
+        "outcome": outcome, "route": STOP_ROUTE, "ts": _stop_stamp(),
+    }
+
+
 def route_entry(
-    route: str, body: Mapping[str, Any], *, mode: str, answered: bool = False,
+    route: str, body: Mapping[str, Any], *, mode: str | None, answered: bool = False,
     delivery: Mapping[str, Any] | None = None, held: bool = False,
 ) -> dict[str, object]:
-    """The line for one hook output. ``answered`` means Jev replied on this turn."""
+    """The line for one output of a hook that delivers memory. ``answered`` means
+    Jev replied on this turn. A Stop's line comes from ``stop_entry``."""
+    if route == STOP_ROUTE:
+        raise ValueError("a Stop's route line comes from stop_entry")
     context = body.get("hookSpecificOutput")
     payload = context.get("additionalContext") if isinstance(context, Mapping) else ""
     payload = payload if isinstance(payload, str) else ""
@@ -137,10 +208,12 @@ def route_entry(
 
 
 def failed_entry(action: str, error: str, *, mode: str) -> dict[str, object]:
-    """The line for a turn that ended before the hook could say how it went."""
+    """The line for a turn that ended before the hook could say how it went, on the
+    clock its route's own lines use."""
+    route = ROUTES[action]
     return {
         "answered": False, "bytes": 0, "detail": error, "method": None, "mode": mode,
-        "outcome": "failed", "route": ROUTES[action], "ts": _stamp(),
+        "outcome": "failed", "route": route, "ts": _stop_stamp() if route == STOP_ROUTE else _stamp(),
     }
 
 
@@ -153,7 +226,7 @@ def record_route(root: Path, entry: Mapping[str, object]) -> None:
 
 
 class HookTurn:
-    """One turn of a delivering hook. Nothing here can change what the hook emits."""
+    """One turn of a hook with a route. Nothing here can change what the hook emits."""
 
     def __init__(self, root: Path, action: str, config: Mapping[str, Any]):
         self._root = root
@@ -161,6 +234,7 @@ class HookTurn:
         self._mode = effective_selector_mode(config.get("selector"))
         self._deferred = os.environ.get(ROUTE_DEFER_ENV) == "1"
         self._entry: dict[str, object] | None = None
+        self._kept: Mapping[str, Any] | None = None
         self.answered = False
         self.delivery: Mapping[str, Any] | None = None
         self.held = False
@@ -168,9 +242,9 @@ class HookTurn:
     def settle(self, body: dict[str, Any]) -> dict[str, Any]:
         """Note where the turn came to, and return the output to emit."""
         try:
-            entry = route_entry(
-                ROUTES[self._action], body, mode=self._mode, answered=self.answered,
-                delivery=self.delivery, held=self.held,
+            route = ROUTES[self._action]
+            entry = stop_entry(body, mode=self._mode) if route == STOP_ROUTE else route_entry(
+                route, body, mode=self._mode, answered=self.answered, delivery=self.delivery, held=self.held,
             )
         except Exception:
             return body
@@ -179,16 +253,36 @@ class HookTurn:
         self._entry = entry
         return body
 
-    def abandon(self) -> None:
-        """The turn raised after settling, so what it settled on did not happen."""
+    def keep(self, body: Mapping[str, Any]) -> None:
+        """A Stop wrote its envelope, which no later failure takes back.
+
+        ``body`` is its receipt, read only if the turn then fails, so it says how
+        far the capture got.
+        """
+        self._kept = body
+
+    def abandon(self) -> dict[str, Any]:
+        """The turn raised after settling, so what it settled on did not happen.
+
+        A Stop that kept its receipt still captured, so its line says so. Returns
+        what the failure's output must carry: under the bridge, that line.
+        """
         self._entry = None
+        if self._kept is not None:
+            try:
+                self._entry = stop_entry(self._kept, mode=self._mode)
+            except Exception:
+                pass
+        return {ROUTE_FIELD: self._entry} if self._deferred and self._entry is not None else {}
 
     def close(self) -> None:
         if not self._deferred:
             record_route(self._root, self._entry or failed_entry(self._action, "hook_exception", mode=self._mode))
 
 
-def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
+def route_summary(
+    root: Path, *, now: float | None = None, stop_window_seconds: int | None = None,
+) -> dict[str, object]:
     """Last-day outcome counts per route, and the run of failed selections the log ends on.
 
     A turn that used Jev's answer ends a run. A failed selection adds to one, even if it
@@ -196,17 +290,29 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     way. Any other turn says nothing about selection, so it neither adds to a run nor
     ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
+
+    With ``stop_window_seconds``, it also counts, in that window and as far back as
+    the tail it reads, the Stop lines that could have captured and those that did.
     """
     current = time.time() if now is None else now
-    outcomes = {route: dict.fromkeys(OUTCOMES, 0) for route in ROUTES.values()}
+    outcomes = {route: dict.fromkeys(_ROUTE_OUTCOMES[route], 0) for route in ROUTES.values()}
     failures = 0
+    stop_calls = 0
+    stop_captures = 0
     for raw in newest_lines(route_log_path(root), ROUTE_LOG_TAIL_BYTES):
         try:
             entry = json.loads(raw)
             age = current - datetime.fromisoformat(entry["ts"].replace("Z", "+00:00")).timestamp()
+            route, outcome = entry["route"], entry["outcome"]
+            if (
+                stop_window_seconds is not None and route == STOP_ROUTE
+                and outcome in STOP_OUTCOMES and 0 <= age <= stop_window_seconds
+            ):
+                stop_calls += outcome not in _STOPS_THAT_CANNOT_CAPTURE
+                stop_captures += outcome == "captured"
             if not 0 <= age <= ROUTE_WINDOW_SECONDS:
                 continue
-            outcomes[entry["route"]][entry["outcome"]] += 1
+            outcomes[route][outcome] += 1
         except (AttributeError, KeyError, OSError, OverflowError, RecursionError, TypeError, ValueError):
             continue
         if entry.get("mode") != "jev":
@@ -218,7 +324,11 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
             and entry.get("detail") != UNFIT_RECORDS
         ):
             failures += 1
-    return {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+    summary: dict[str, object] = {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+    if stop_window_seconds is not None:
+        summary["stop_calls_in_window"] = stop_calls
+        summary["stop_captures_in_window"] = stop_captures
+    return summary
 
 
 __all__ = [
@@ -228,10 +338,15 @@ __all__ = [
     "ROUTE_DEFER_ENV",
     "ROUTE_FIELD",
     "ROUTE_WINDOW_SECONDS",
+    "STOP_OUTCOMES",
+    "STOP_ROUTE",
+    "STOP_SKIP_OUTCOMES",
     "UNFIT_RECORDS",
+    "UNKNOWN_STOP_REASON",
     "failed_entry",
     "record_route",
     "route_entry",
     "route_log_path",
     "route_summary",
+    "stop_entry",
 ]
