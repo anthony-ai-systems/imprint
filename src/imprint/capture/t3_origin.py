@@ -367,16 +367,15 @@ class T3HostOrigin:
         such an entry stays an ordinary skip, a failed read of the records
         included: that look only asks why, and a run that merely inherited the
         thread variable must not report T3's records unreadable. The failure is
-        forgotten, so a later entry that does need the records reads them again
-        and says so itself.
+        forgotten, an earlier entry's too, so a later entry that does need the
+        records reads them again and says so itself.
         """
         self._miss = None
         entrypoint = entry.get("entrypoint")
         if (isinstance(entrypoint, str) and entrypoint in T3_ENTRYPOINTS) or entry.get("promptSource") == MID_TURN_SOURCE:
             return self._human_record(text) is not None
-        failed_before = self.read_failed
         credited = self._human_record(text) is not None
-        if self.read_failed and not failed_before:
+        if self.read_failed:
             self.read_failed = False
             self._index = None
         self._miss = T3_ENTRYPOINT_UNKNOWN_REASON if credited else None

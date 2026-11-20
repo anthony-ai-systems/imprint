@@ -1526,6 +1526,32 @@ def test_a_failed_look_for_an_unknown_entrypoint_leaves_a_later_read_to_say_so(t
     assert (origin.read_failed, origin.skip_reason) == (True, "t3_record_unavailable")
 
 
+def test_a_failed_mid_turn_check_does_not_make_a_later_unknown_entrypoint_report_it(tmp_path):
+    """The failure belongs to the mid-turn prompt, not to the opening prompt after it."""
+    absent = {T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp_path / "absent")}
+    path = _transcript(
+        tmp_path, _current_entry("Summarize the release notes.", entrypoint="sdk-cli"),
+        {"type": "assistant", "message": {"content": "Working."}}, _steer(),
+        {"type": "assistant", "message": {"content": "Done."}},
+        _current_entry(FEEDBACK, entrypoint="sdk-cli", uuid="user-2"),
+    )
+    run, root = _stop_hook(tmp_path, path, absent)
+    assert json.loads(run.stdout)["reason"] == "unverified_provenance"
+    assert _skip_log(root) == []
+    assert not _spooled(root)
+
+
+def test_a_later_entry_that_needs_the_records_still_says_they_failed(tmp_path):
+    origin = t3_host_origin(ON, SESSION, {T3_THREAD_ENV: THREAD, "T3CODE_HOME": str(tmp_path / "absent")})
+    steer = {"type": "user", "promptSource": "mid_turn_queue", "message": {"content": FEEDBACK}}
+    assert classify_with_host(steer, FEEDBACK, origin).is_operator is False
+    assert origin.skip_reason == "t3_record_unavailable"
+    assert classify_with_host(_current_entry(entrypoint="sdk-cli"), FEEDBACK, origin).is_operator is False
+    assert (origin.read_failed, origin.skip_reason) == (False, None)
+    assert classify_with_host(_current_entry(), FEEDBACK, origin).is_operator is False
+    assert (origin.read_failed, origin.skip_reason) == (True, "t3_record_unavailable")
+
+
 def test_an_unknown_entrypoint_never_overturns_a_declared_refusal(tmp_path):
     entry = _current_entry(entrypoint="t3-future", promptSource="system", origin={"kind": "task-notification"})
     origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, _message(FEEDBACK)))
