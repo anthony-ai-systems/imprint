@@ -242,6 +242,7 @@ class HookTurn:
         self._mode = effective_selector_mode(config.get("selector"))
         self._deferred = os.environ.get(ROUTE_DEFER_ENV) == "1"
         self._entry: dict[str, object] | None = None
+        self._kept: Mapping[str, Any] | None = None
         self.answered = False
         self.delivery: Mapping[str, Any] | None = None
         self.held = False
@@ -260,9 +261,27 @@ class HookTurn:
         self._entry = entry
         return body
 
-    def abandon(self) -> None:
-        """The turn raised after settling, so what it settled on did not happen."""
+    def keep(self, body: Mapping[str, Any]) -> None:
+        """A Stop wrote its envelope, which no later failure takes back.
+
+        ``body`` is its receipt, read only if the turn then fails, so it says how
+        far the capture got.
+        """
+        self._kept = body
+
+    def abandon(self) -> dict[str, Any]:
+        """The turn raised after settling, so what it settled on did not happen.
+
+        A Stop that kept its receipt still captured, so its line says so. Returns
+        what the failure's output must carry: under the bridge, that line.
+        """
         self._entry = None
+        if self._kept is not None:
+            try:
+                self._entry = stop_entry(self._kept, mode=self._mode)
+            except Exception:
+                pass
+        return {ROUTE_FIELD: self._entry} if self._deferred and self._entry is not None else {}
 
     def close(self) -> None:
         if not self._deferred:

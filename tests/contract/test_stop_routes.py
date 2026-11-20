@@ -262,6 +262,53 @@ def test_a_capture_that_raises_is_one_failed_line(tmp_path, monkeypatch, capsys)
     assert (one_line(tmp_path)["outcome"], one_line(tmp_path)["detail"]) == ("failed", "hook_exception")
 
 
+def _spooled(tmp_path):
+    return list((operator_root(tmp_path) / "spool").rglob("*.json"))
+
+
+def _unacknowledged(monkeypatch):
+    from imprint import compiler
+    monkeypatch.setattr(compiler, "acknowledgement_committed", lambda *args, **kwargs: False)
+
+
+AFTER_THE_WRITE = {
+    "compile_raises": lambda monkeypatch: monkeypatch.setattr(cli, "compile_spools", _failing(ImprintError("synthetic"))),
+    "unacknowledged": _unacknowledged,
+}
+
+
+@pytest.mark.parametrize("fault", AFTER_THE_WRITE)
+def test_a_capture_that_fails_after_its_envelope_is_written_is_still_captured(tmp_path, monkeypatch, capsys, fault):
+    AFTER_THE_WRITE[fault](monkeypatch)
+    config = write_config(tmp_path)
+    event = {"session_id": "s", "transcript_path": transcript_of(tmp_path, ASSISTANT, typed())}
+    code, body = stop(tmp_path, monkeypatch, capsys, event, config)
+    assert (code, body["status"]) == (2, "error")
+    assert "_imprint_route" not in body
+    assert len(_spooled(tmp_path)) == 1
+    assert (one_line(tmp_path)["outcome"], one_line(tmp_path)["detail"]) == ("captured", "spool_only")
+    stop(tmp_path, monkeypatch, capsys, event, config)
+    assert [line["outcome"] for line in lines(tmp_path)] == ["captured", "operator_turn_already_captured"]
+
+
+def test_a_capture_that_fails_after_its_envelope_is_written_hands_the_bridge_a_captured_line(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(ROUTE_DEFER_ENV, "1")
+    monkeypatch.setattr(cli, "compile_spools", _failing(ImprintError("synthetic")))
+    code, body = stop(tmp_path, monkeypatch, capsys, {"session_id": "s", "transcript_path": transcript_of(tmp_path, typed())})
+    assert (code, body["status"]) == (2, "error")
+    assert (body["_imprint_route"]["outcome"], body["_imprint_route"]["detail"]) == ("captured", "spool_only")
+    assert lines(tmp_path) == []
+
+
+def test_a_capture_that_fails_before_its_envelope_is_written_hands_the_bridge_no_line(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(ROUTE_DEFER_ENV, "1")
+    monkeypatch.setattr(cli, "write_envelope", _failing(ImprintError("synthetic")))
+    code, body = stop(tmp_path, monkeypatch, capsys, {"session_id": "s", "transcript_path": transcript_of(tmp_path, typed())})
+    assert (code, body["status"]) == (2, "error")
+    assert "_imprint_route" not in body
+    assert lines(tmp_path) == []
+
+
 def test_an_event_of_the_wrong_kind_is_one_failed_line(tmp_path, monkeypatch, capsys):
     code, _ = stop(tmp_path, monkeypatch, capsys, {"session_id": "s", "hook_event_name": "SessionStart"})
     assert code == 2
@@ -356,6 +403,27 @@ def test_a_capture_that_failed_still_blocks_the_stop_once_and_leaves_a_failed_li
     _child(bridged, monkeypatch, stdout='{"status": "error"}', code=2)
     assert _run(bridged, monkeypatch) == 2
     assert json.loads(capsys.readouterr().out)["failure_policy"] == "fail_closed"
+    assert [(line["outcome"], line["detail"]) for line in lines(tmp_path)] == [("failed", "hook_action_failed")]
+
+
+def test_a_capture_that_failed_after_its_write_blocks_the_same_way_and_leaves_a_captured_line(
+    tmp_path, bridged, monkeypatch, capsys,
+):
+    _child(bridged, monkeypatch, stdout='{"status": "error"}', code=2)
+    assert _run(bridged, monkeypatch) == 2
+    plain = capsys.readouterr()
+    line = stop_entry({"status": "queued", "canonical_status": "spool_only"}, mode="deterministic")
+    _child(bridged, monkeypatch, stdout=json.dumps({"status": "error", "_imprint_route": line}), code=2)
+    assert _run(bridged, monkeypatch) == 2
+    assert capsys.readouterr() == plain
+    assert lines(tmp_path)[1] == line
+    assert len(_failures(tmp_path)) == 2
+
+
+def test_a_failed_stop_is_taken_at_its_word_only_for_a_capture(tmp_path, bridged, monkeypatch, capsys):
+    line = stop_entry({"status": "skipped", "reason": "not_explicit_feedback"}, mode="deterministic")
+    _child(bridged, monkeypatch, stdout=json.dumps({"status": "error", "_imprint_route": line}), code=2)
+    assert _run(bridged, monkeypatch) == 2
     assert [(line["outcome"], line["detail"]) for line in lines(tmp_path)] == [("failed", "hook_action_failed")]
 
 

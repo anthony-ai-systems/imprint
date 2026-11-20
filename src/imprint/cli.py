@@ -1598,6 +1598,8 @@ def main(argv: list[str] | None = None) -> int:
                         "event_id": envelope["input_event_id"], "spool_file": envelope_path.name,
                         "canonical_status": "spool_only",
                     }
+                    # Its route line says captured even if a later step fails.
+                    turn.keep(receipt)
                     if bool(config.get("compiler")):
                         from .compiler import acknowledgement_committed
                         counts = compile_spools(
@@ -1629,11 +1631,10 @@ def main(argv: list[str] | None = None) -> int:
                 _write_json({"hook_schema_version": "1.0.0", **result})
                 return 0 if result.get("status") == "healthy" else 2
     except (ImprintError, OSError, json.JSONDecodeError) as exc:
-        if turn is not None:
-            turn.abandon()
+        kept = turn.abandon() if turn is not None else {}
         _write_json({
             "status": "error", "error": str(exc), "error_type": type(exc).__name__,
-            **error_details,
+            **error_details, **kept,
         })
         return 2
     except BaseException:  # the SIGTERM handler's exit comes through here too

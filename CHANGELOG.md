@@ -35,7 +35,9 @@
   line to `logs/hook-routes.jsonl`, under the same rotation as the other routes, on
   exactly one outcome: `captured`, `not_feedback`, `origin_unverified`, each other
   reason the Stop receipt gives under its own name, or `failed`. A receipt reason a
-  later build adds without naming it reads `failed`. Health reports the last day as
+  later build adds without naming it reads `failed`. A Stop that wrote its envelope
+  reads `captured`, with `detail` `spool_only`, even if the compile after it fails.
+  Health reports the last day as
   `hook_route_outcomes_24h.stop_capture`, beside the other routes, and gains
   `capture_newest_age_seconds`, the age of the newest capture envelope. A new key,
   `org.imprint.health.capture_silence_days`, unset by default, makes health degrade

@@ -520,7 +520,10 @@ or every prompt was refused. So each Stop appends one `stop_capture` line to the
 file, under the same rotation, and lands on exactly one `outcome`:
 
 - `captured`: the capture's envelope was written. `detail` is `compiled` when it was
-  compiled in the same call and `spool_only` when the compiler is off.
+  compiled in the same call and `spool_only` when it was not: the compiler is off, or
+  the compile or its acknowledgement failed after the write. That failure still exits
+  as one, blocks the stop once under the bridge and leaves a file in
+  `logs/hook-failures`, but the turn is captured and its envelope stays in the spool.
 - `not_feedback`: the detector did not read the operator's words as feedback, or
   nothing of the operator's was left once pastes and quotes were removed.
 - `origin_unverified`: the newest prompt came by a transport that does not say who
@@ -533,8 +536,10 @@ file, under the same rotation, and lands on exactly one `outcome`:
   `t3_session_ref_unreadable`, `t3_session_unmatched`, `t3_prompt_unmatched`,
   `t3_marked_window`, `t3_scratch_thread` and `t3_entrypoint_unknown`.
   `docs/contracts/capture-origin.md` says what each means.
-- `failed`: the capture raised, or the hook timed out, crashed, gave output it could
-  not use, reported no line or could not start, as on the other routes. `detail` is
+- `failed`: the capture raised before its envelope was written, or the hook timed
+  out, crashed, gave output it could not use, reported no line or could not start, as
+  on the other routes. A hook the bridge timed out reads `failed` even if it had
+  written its envelope, because the bridge cannot see how far it got. `detail` is
   the error code: `hook_exception` when the hook ran on its own, otherwise the
   bridge's, such as `hook_action_failed`. Input a retry cannot change is `failed`
   with `hook_input_invalid`, as it is on the other routes, and so is any receipt
