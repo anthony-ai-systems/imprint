@@ -79,6 +79,9 @@ class HealthInputs:
     selector_failures_in_a_row: int = 0
     # The share of the newest selections that failed; reported under jev, never degrading.
     selector_failure_share: Mapping[str, object] | None = None
+    # Typed-decision purposes the config enables and entries it names that this build
+    # cannot read; None, and not reported, when the config names none.
+    decide_purposes: Mapping[str, int] | None = None
     hook_route_outcomes_24h: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
 
 
@@ -248,6 +251,8 @@ def evaluate_health(values: HealthInputs) -> HealthReport:
         metrics["t3_homes"] = dict(values.t3_homes)
     if values.selector_mode == "jev" and values.selector_failure_share is not None:
         metrics["selector_failure_share"] = dict(values.selector_failure_share)
+    if values.decide_purposes is not None:
+        metrics["decide_purposes"] = dict(values.decide_purposes)
     return HealthReport(
         health_schema_version=HEALTH_SCHEMA_VERSION,
         status="red" if reasons else "green",

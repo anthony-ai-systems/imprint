@@ -685,3 +685,62 @@ def test_no_socket_is_opened_by_a_disabled_purpose(tmp_path, monkeypatch):
     monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: opened.append(args))
     call(tmp_path, None, cfg=config({}))
     assert opened == []
+
+
+# -- health --------------------------------------------------------------------------
+
+def health_metrics(tmp_path, purposes=None, mode="deterministic") -> dict:
+    from imprint.health import health_report
+    from imprint.store import ImprintStore
+
+    root = tmp_path / "op"
+    root.mkdir(parents=True, exist_ok=True)
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    cfg = copy.deepcopy(DEFAULTS)
+    cfg["hooks_dir"] = str(tmp_path)
+    cfg["selector"]["mode"] = mode
+    cfg["selector"]["jev"]["api_key_env"] = KEY_ENV
+    if purposes is not None:
+        cfg[DECIDE_PURPOSES_KEY] = purposes
+    return health_report(root, store, cfg)["metrics"]
+
+
+def test_with_no_purpose_named_health_is_unchanged(tmp_path):
+    metrics = health_metrics(tmp_path)
+    assert (metrics["network_state"], metrics["last_transfer_age_seconds"]) == ("offline", -1)
+    assert "decide_purposes" not in metrics
+
+
+def test_an_enabled_purpose_keeps_health_from_saying_offline(tmp_path):
+    purposes = {"probe": {"mode": "shadow", "daily_cap": 2}}
+    metrics = health_metrics(tmp_path, purposes)
+    assert (metrics["network_state"], metrics["last_transfer_age_seconds"]) == ("idle", -1)
+    assert metrics["decide_purposes"] == {"enabled": 1, "ignored": 0}
+    # A call that never sends is not a transfer.
+    call(tmp_path, Fake(), cfg=config({"probe": {"mode": "shadow"}}))
+    assert health_metrics(tmp_path, purposes)["network_state"] == "idle"
+    assert call(tmp_path, Fake(), cfg=config(purposes)).request_sent
+    metrics = health_metrics(tmp_path, purposes)
+    assert metrics["network_state"] == "transferred"
+    assert 0 <= metrics["last_transfer_age_seconds"] < 60
+    # Under jev, the selector's idle state does not hide the purpose's transfer.
+    assert health_metrics(tmp_path, purposes, mode="jev")["network_state"] == "transferred"
+    # Turned off again, the purpose no longer speaks for the network.
+    assert health_metrics(tmp_path, {})["network_state"] == "offline"
+
+
+def test_a_failed_send_still_counts_as_a_transfer(tmp_path):
+    purposes = {"probe": {"mode": "enforce", "daily_cap": 2}}
+    assert call(tmp_path, Fake(error=TimeoutError()), cfg=config(purposes)).request_sent
+    assert health_metrics(tmp_path, purposes)["network_state"] == "transferred"
+
+
+def test_health_counts_entries_it_cannot_read_and_does_not_enable_them(tmp_path):
+    metrics = health_metrics(tmp_path, {
+        "mind_reading": {"mode": "enforce", "daily_cap": 1},
+        "draft_check": {"mode": "enforce", "daily_cap": "many"},
+        "probe": {"mode": "enforce"},
+    })
+    assert metrics["network_state"] == "offline"
+    assert metrics["decide_purposes"] == {"enabled": 0, "ignored": 2}

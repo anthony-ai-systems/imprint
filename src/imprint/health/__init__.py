@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+from imprint.config import DECIDE_TRANSFER_MARKER, decide_purposes_enabled, decide_purposes_ignored
 from imprint.constants import STORE_SCHEMA_VERSION
 from imprint.errors import ValidationError
 from .report import HealthInputs, HealthReport, evaluate_health
@@ -55,6 +57,53 @@ def _latest_age(paths: list[Path], now: float) -> int:
     ages = [_age_seconds(path, now) for path in paths]
     known = [age for age in ages if age >= 0]
     return min(known) if known else -1
+
+
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_MAX_MARKER_BYTES = 1024
+
+
+def _decide_transfer_age(root: Path, now: float) -> int:
+    """Seconds since a typed decision last sent bytes, or -1 when none is on record.
+
+    Read here rather than through the decide package, which no hook may import.
+    """
+    path = root / "logs" / DECIDE_TRANSFER_MARKER
+    try:
+        status = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(status.st_mode) or status.st_size > _MAX_MARKER_BYTES:
+            return -1
+        with path.open("rb") as handle:
+            stamp = json.loads(handle.read(_MAX_MARKER_BYTES + 1)).get("last_transfer_ts")
+        if not isinstance(stamp, str) or _STAMP.fullmatch(stamp) is None:
+            return -1
+        sent = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except (OSError, ValueError, AttributeError, RecursionError):
+        return -1
+    return max(0, int(now - sent))
+
+
+def _with_decide_egress(
+    root: Path, config: dict, now: float, network_state: str, last_transfer_age: int,
+) -> tuple[str, int, dict[str, int] | None]:
+    """The network state once typed decisions are counted, and their content-free counts.
+
+    A purpose the config lets send can reach ``selector.jev.endpoint`` whatever the
+    selector's mode, so health cannot say ``offline`` while one is enabled. With no
+    purpose named, nothing here changes and no count is reported.
+    """
+    enabled = decide_purposes_enabled(config)
+    ignored = decide_purposes_ignored(config)
+    counts = {"enabled": len(enabled), "ignored": ignored} if enabled or ignored else None
+    if not enabled:
+        return network_state, last_transfer_age, counts
+    if network_state == "offline":
+        network_state = "idle"
+    age = _decide_transfer_age(root, now)
+    if age >= 0:
+        network_state = "transferred"
+        last_transfer_age = age if last_transfer_age < 0 else min(age, last_transfer_age)
+    return network_state, last_transfer_age, counts
 
 
 def _hook_failure_files(root: Path) -> list[Path]:
@@ -292,6 +341,9 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         selector = selector_health(root, config.get("selector"))
     except Exception:
         selector_key_checked = False
+    network_state, last_transfer_age, decide_purposes = _with_decide_egress(
+        root, config, now, str(selector["network_state"]), int(selector["last_transfer_age_seconds"]),
+    )
     from imprint.hook_routes import route_summary
     hook_routes = route_summary(root, now=now)
     t3_homes = None
@@ -338,8 +390,9 @@ def health_report(root: Path, store, config: dict) -> dict[str, object]:
         invalid_backup_count=invalid_backup_count,
         compiler_state=str(lock_state.get("state", "invalid")),
         database_state=database_state,
-        network_state=selector["network_state"],
-        last_transfer_age_seconds=int(selector["last_transfer_age_seconds"]),
+        network_state=network_state,
+        last_transfer_age_seconds=last_transfer_age,
+        decide_purposes=decide_purposes,
         selector_mode=selector["mode"],
         selector_key_present=bool(selector["key_present"]),
         selector_key_checked=selector_key_checked,

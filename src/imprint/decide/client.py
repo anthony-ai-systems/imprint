@@ -2,13 +2,15 @@
 
 ``ask`` never raises. A purpose that is off makes no request and touches no file:
 it returns a ``disabled`` result. Otherwise every call writes one content-free line
-to its purpose's decision log, whatever came of it.
+to its purpose's decision log, whatever came of it, and a call that sent bytes
+stamps a small marker that health reads to say the network was used.
 
 The transport rules are the selector's own, imported from ``imprint.retrieve.jev``
 rather than copied, so the two cannot drift: the key comes from the variable or the
 private file ``selector.jev`` names and is sent only in the ``Authorization``
 header, redirects are refused, the response is bounded, and one wall-clock deadline
-covers key resolution, the request and parsing. The endpoint and default model are
+covers key resolution, the wait for the cap's lock, the request and parsing. The
+endpoint and default model are
 ``selector.jev``'s too, whatever ``selector.mode`` says. Nothing here retries.
 
 The selector does not use this module, and no hook imports it.
@@ -30,6 +32,7 @@ from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 from imprint import __version__
+from imprint.config import DECIDE_TRANSFER_MARKER
 from imprint.log_files import append_capped
 from imprint.permissions import secure_directory, secure_file
 from imprint.retrieve import jev as _jev
@@ -260,8 +263,9 @@ def _read_counter(path: Path, day: str) -> dict[str, int]:
     return dict(calls) if value["day"] == day else {}
 
 
-def _write_counter(path: Path, day: str, calls: Mapping[str, int]) -> None:
-    data = json.dumps({"calls": dict(sorted(calls.items())), "day": day}, separators=(",", ":")).encode("ascii")
+def _replace_private(path: Path, value: Mapping[str, object]) -> None:
+    """Write ``value`` as JSON to ``path`` in one private, atomic step."""
+    data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
     descriptor, temporary_name = tempfile.mkstemp(prefix=".imprint-decide-", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -271,6 +275,10 @@ def _write_counter(path: Path, day: str, calls: Mapping[str, int]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _write_counter(path: Path, day: str, calls: Mapping[str, int]) -> None:
+    _replace_private(path, {"calls": dict(sorted(calls.items())), "day": day})
 
 
 def calls_today(root: Path, purpose: str, *, day: str | None = None) -> int | None:
@@ -303,6 +311,22 @@ def _reserve(
         return None
     except Exception:
         return "cap_unavailable"
+
+
+def transfer_marker_path(root: Path) -> Path:
+    return Path(root) / "logs" / DECIDE_TRANSFER_MARKER
+
+
+def _record_transfer(root: Path) -> None:
+    """Note, for health, that request bytes left for Jev. One timestamp and nothing
+    else, never rotated away. Never raises."""
+    try:
+        path = transfer_marker_path(root)
+        if not path.parent.is_dir():
+            secure_directory(path.parent)
+        _replace_private(path, {"last_transfer_ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    except Exception:
+        pass
 
 
 # -- the decision log --------------------------------------------------------------
@@ -395,6 +419,8 @@ def ask(
             purpose=name, mode=mode, outcome=outcome, reason=reason, elapsed_ms=elapsed,
             request_bytes=request_bytes, request_sent=request_sent, **values,
         )
+        if request_sent:
+            _record_transfer(root)
         _log(root, result, questions)
         return result
 
@@ -499,4 +525,5 @@ __all__ = [
     "decision_log_path",
     "encode_request",
     "request_body",
+    "transfer_marker_path",
 ]
