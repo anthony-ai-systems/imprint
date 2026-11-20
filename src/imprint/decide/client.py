@@ -336,11 +336,13 @@ def calls_today(root: Path, purpose: str, *, day: str | None = None) -> int | No
 
 
 def _reserve(
-    root: Path, purpose: str, cap: int, day: str, deadline: float, clock: Callable[[], float],
+    root: Path, purpose: str, cap: int, day: str | None, deadline: float, clock: Callable[[], float],
 ) -> str | None:
     """Take one call from today's cap. None when taken, else the closed reason.
 
-    A lock still held by another process at ``deadline``, or no file lock on this
+    Today is read once the lock is held, unless ``day`` names it, so a wait for the
+    lock that crosses midnight counts in the new day and keeps that day's count. A
+    lock still held by another process at ``deadline``, or no file lock on this
     platform, is ``cap_unavailable``.
     """
     if cap <= 0:
@@ -350,11 +352,12 @@ def _reserve(
         if not path.parent.is_dir():
             secure_directory(path.parent)
         with _locked(path.parent / COUNTER_LOCK_NAME, deadline, clock):
-            calls = _read_counter(path, day)
+            today = day or _today()
+            calls = _read_counter(path, today)
             if calls.get(purpose, 0) >= cap:
                 return "cap_reached"
             calls[purpose] = calls.get(purpose, 0) + 1
-            _write_counter(path, day, calls)
+            _write_counter(path, today, calls)
         return None
     except Exception:
         return "cap_unavailable"
@@ -494,7 +497,7 @@ def ask(
         # cap counts calls taken, which is never fewer than calls sent.
         if deadline - clock() <= 0:
             return finish("fallback", "timeout")
-        refused = _reserve(root, name, cap, day or _today(), deadline, clock)
+        refused = _reserve(root, name, cap, day, deadline, clock)
         if refused is not None:
             return finish("capped", refused)
         remaining = deadline - clock()

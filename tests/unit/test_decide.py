@@ -596,6 +596,28 @@ def test_the_windows_lock_keeps_the_cap_between_processes(tmp_path, monkeypatch)
     assert events == ["taken", "released", "taken", "released"] and len(fake.calls) == 1
 
 
+def test_a_wait_for_the_lock_that_crosses_midnight_counts_in_the_new_day(tmp_path, monkeypatch):
+    from imprint.decide import client
+
+    root = tmp_path / "op"
+    today = ["2026-11-19"]
+    monkeypatch.setattr(client, "_today", lambda: today[0])
+    locked = client._locked
+
+    def waited_past_midnight(path, deadline, clock):
+        # While this call waited for the lock, the day turned and another call took
+        # the new day's only slot.
+        today[0] = "2026-11-20"
+        client._write_counter(counter_path(root), "2026-11-20", {"probe": 1})
+        return locked(path, deadline, clock)
+
+    monkeypatch.setattr(client, "_locked", waited_past_midnight)
+    fake = Fake()
+    result = call(tmp_path, fake, cfg=config({"probe": {"mode": "enforce", "daily_cap": 1}}), day=None)
+    assert (result.outcome, result.reason, fake.calls) == ("capped", "cap_reached", [])
+    assert json.loads(counter_path(root).read_text()) == {"calls": {"probe": 1}, "day": "2026-11-20"}
+
+
 def test_a_call_already_out_of_time_takes_nothing_from_the_cap(tmp_path):
     ticks = iter([0.0])
     fake = Fake()
