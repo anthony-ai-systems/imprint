@@ -94,28 +94,39 @@ def one_line(tmp_path) -> dict:
 
 # -- the vocabulary ------------------------------------------------------------------
 
+# Every module the stop hook takes a skip reason from. A new ``*_REASON`` constant in
+# any of them must be an outcome, or this file fails before a Stop can write it.
+REASON_MODULES = (marks, provenance, schema, t3_origin, transcript)
+# The reasons the stop hook writes as literals, and the two its receipt names otherwise.
+LITERAL_REASONS = {"feedback_text_unavailable", "not_explicit_feedback"}
+RENAMED = {"not_explicit_feedback": "not_feedback", provenance.UNVERIFIED_ENTRY_REASON: "origin_unverified"}
+
+
 def _reasons_the_stop_hook_can_write() -> set[str]:
     named = {
-        provenance.SYNTHETIC_ENTRY_REASON, provenance.NO_OPERATOR_MESSAGE_REASON, provenance.MACHINE_ORIGIN_REASON,
-        transcript.TRANSCRIPT_UNAVAILABLE_REASON, transcript.TRANSCRIPT_REFUSED_REASON,
-        transcript.TRANSCRIPT_MALFORMED_REASON, transcript.TRANSCRIPT_TAIL_EXHAUSTED_REASON,
-        marks.ALREADY_CAPTURED_REASON, marks.OPERATOR_TURN_EXPIRED_REASON, schema.OPERATOR_TEXT_OVERSIZED_REASON,
-        "feedback_text_unavailable",
+        value for module in REASON_MODULES for name, value in vars(module).items()
+        if name.endswith("_REASON") and isinstance(value, str)
     }
-    return named | {value for name, value in vars(t3_origin).items() if name.endswith("_REASON")}
+    return named | LITERAL_REASONS
 
 
 def test_the_vocabulary_is_closed_and_has_no_repeats():
     assert len(STOP_OUTCOMES) == len(set(STOP_OUTCOMES))
     assert {"captured", "not_feedback", "origin_unverified", "failed"} <= set(STOP_OUTCOMES)
-    assert set(STOP_SKIP_OUTCOMES) == _reasons_the_stop_hook_can_write()
+    assert set(STOP_SKIP_OUTCOMES) == _reasons_the_stop_hook_can_write() - set(RENAMED)
+
+
+def test_the_reasons_are_found_in_every_module():
+    found = _reasons_the_stop_hook_can_write()
+    assert {"machine_origin", "transcript_tail_exhausted", "operator_turn_expired", "operator_text_oversized",
+            "t3_entrypoint_unknown", "unverified_provenance"} <= found
 
 
 @pytest.mark.parametrize("reason", sorted(_reasons_the_stop_hook_can_write()))
 def test_each_skip_reason_is_an_outcome_of_its_own(reason):
     body = {"status": "skipped", "reason": reason, "provenance_basis": "unverified"}
     entry = route_entry("stop_capture", body, mode="deterministic")
-    assert (entry["outcome"], entry["detail"]) == (reason, "unverified")
+    assert (entry["outcome"], entry["detail"]) == (RENAMED.get(reason, reason), "unverified")
 
 
 def test_every_reason_the_cli_writes_has_an_outcome():
