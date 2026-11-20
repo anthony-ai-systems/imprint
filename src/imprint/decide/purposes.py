@@ -1,7 +1,8 @@
 """The closed list of purposes a typed decision may serve, and how each may send.
 
 A purpose sends only when the config names it with a mode of ``shadow`` or
-``enforce`` and a daily cap above zero. The shipped config names none. ``shadow``
+``enforce`` and a daily cap above zero. The shipped config names none, and an entry
+this build cannot read (an unknown purpose or field, or a bad value) is off. ``shadow``
 returns answers flagged so that the caller must not act on them; the module only
 reports the mode, and each caller decides what that means for it.
 
@@ -20,6 +21,7 @@ from imprint.config import (
     DECIDE_MODES,
     DECIDE_PURPOSES,
     DECIDE_PURPOSES_KEY,
+    decide_purposes_enabled,
     decide_setting,
     selector_switched_off,
 )
@@ -50,8 +52,9 @@ def purpose_mode(config: Mapping[str, Any], purpose: str) -> tuple[str, int, str
 
 
 def enabled_purposes(config: Mapping[str, Any]) -> tuple[str, ...]:
-    """The purposes the config lets send, whatever the environment says."""
-    return tuple(name for name in PURPOSES if decide_setting(config, name)[0] != "off")
+    """The purposes the config lets send: a mode other than ``off`` and a daily cap
+    above 0. The environment can still turn them off; this ignores it."""
+    return decide_purposes_enabled(config)
 
 
 __all__ = [

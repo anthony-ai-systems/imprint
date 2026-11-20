@@ -5,15 +5,19 @@ Every state, instruction and description here is invented.
 
 from __future__ import annotations
 
+import copy
+import io
 import json
 import os
 import socket
+import sys
+import threading
 import time
 import urllib.error
 
 import pytest
 
-from imprint.config import DECIDE_PURPOSES, DECIDE_PURPOSES_KEY, DEFAULTS, parse_config
+from imprint.config import DECIDE_PURPOSES, DECIDE_PURPOSES_KEY, DEFAULTS, decide_setting, load_config, parse_config
 from imprint.decide import (
     PURPOSES,
     REASONS,
@@ -25,12 +29,12 @@ from imprint.decide import (
     choice,
     counter_path,
     decision_log_path,
+    enabled_purposes,
     encode_request,
     noul,
     score,
 )
 from imprint.decide.questions import Choice, Noul, Score
-from imprint.errors import ValidationError
 
 KEY_ENV = "DECIDE_TEST_KEY"
 DAY = "2026-11-19"
@@ -530,20 +534,75 @@ def test_an_unloggable_name_never_reaches_the_log(tmp_path):
 
 # -- config ------------------------------------------------------------------------
 
-@pytest.mark.parametrize("value, message", [
-    ([], "must be an object"),
-    ({"mind_reading": {"mode": "shadow"}}, "unknown purpose"),
-    ({"probe": "shadow"}, "may hold only"),
-    ({"probe": {"mode": "shadow", "endpoint": "https://elsewhere.invalid"}}, "may hold only"),
-    ({"probe": {"mode": "on"}}, "mode must be"),
-    ({"probe": {"mode": "shadow", "daily_cap": -1}}, "daily_cap"),
-    ({"probe": {"mode": "shadow", "daily_cap": 100001}}, "daily_cap"),
-    ({"probe": {"mode": "shadow", "daily_cap": True}}, "daily_cap"),
-    ({"probe": {"mode": "shadow", "daily_cap": 2.5}}, "daily_cap"),
-])
-def test_the_purposes_key_is_validated(value, message):
-    with pytest.raises(ValidationError, match=message):
-        parse_config({DECIDE_PURPOSES_KEY: value})
+@pytest.mark.parametrize("value", [
+    [],
+    "probe",
+    3,
+    {"mind_reading": {"mode": "shadow", "daily_cap": 5}},
+    {"probe": "shadow"},
+    {"probe": {"mode": "shadow", "daily_cap": 5, "endpoint": "https://elsewhere.invalid"}},
+    {"probe": {"mode": "on", "daily_cap": 5}},
+    {"probe": {"mode": "shadow", "daily_cap": -1}},
+    {"probe": {"mode": "shadow", "daily_cap": 100001}},
+    {"probe": {"mode": "shadow", "daily_cap": True}},
+    {"probe": {"mode": "shadow", "daily_cap": 2.5}},
+], ids=lambda _: "")
+def test_an_entry_this_build_cannot_read_loads_and_is_off(tmp_path, value):
+    """A later build's purpose or field, or a typo, must not stop the config loading:
+    every hook loads it. What this build cannot read sends nothing."""
+    cfg = config(value)
+    fake = Fake()
+    for purpose in PURPOSES:
+        assert decide_setting(cfg, purpose) == ("off", 0)
+        result = call(tmp_path, fake, purpose=purpose, cfg=cfg)
+        assert (result.outcome, result.reason, result.request_sent) == ("disabled", "purpose_off", False)
+    assert fake.calls == [] and enabled_purposes(cfg) == ()
+
+
+def test_an_unreadable_entry_leaves_the_others_alone(tmp_path):
+    cfg = config({
+        "probe": {"mode": "enforce", "daily_cap": 3},
+        "mind_reading": {"mode": "enforce", "daily_cap": 3},
+        "draft_check": {"mode": "shadow", "daily_cap": 3, "model": "jev-9.0.0"},
+    })
+    assert enabled_purposes(cfg) == ("probe",)
+    assert call(tmp_path, Fake(), cfg=cfg).outcome == "answered"
+    assert call(tmp_path, Fake(), cfg=cfg, purpose="draft_check").reason == "purpose_off"
+
+
+def test_a_later_builds_purpose_does_not_break_the_hooks(tmp_path, monkeypatch, capsys):
+    import imprint.cli as cli
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({
+        "config_version": "3.0.0", "data_root": str(tmp_path / "data"), "operator_slug": "test",
+        "node_id": "primary", "compiler": True,
+        DECIDE_PURPOSES_KEY: {
+            "mind_reading": {"mode": "enforce", "daily_cap": 5},
+            "probe": {"mode": "shadow", "daily_cap": 1, "budget": 3},
+        },
+    }), encoding="utf-8")
+    assert set(load_config(path)[DECIDE_PURPOSES_KEY]) == {"mind_reading", "probe"}
+    for action, event in (
+        ("session-start", {"session_id": "s", "source": "startup"}),
+        ("user-prompt-submit", {"session_id": "s", "prompt": "a synthetic prompt"}),
+    ):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+        assert cli.main(["--config", str(path), "hook", action]) == 0
+        assert json.loads(capsys.readouterr().out).get("status") != "error"
+
+
+def test_enabled_purposes_are_those_that_can_send():
+    cfg = config({
+        "probe": {"mode": "shadow", "daily_cap": 1},
+        "draft_check": {"mode": "enforce"},
+        "action_guard": {"mode": "enforce", "daily_cap": 0},
+        "event_match": {"mode": "off", "daily_cap": 5},
+        "capture_classify": {"mode": "enforce", "daily_cap": 2},
+    })
+    assert enabled_purposes(cfg) == ("capture_classify", "probe")
+    assert enabled_purposes(config({})) == ()
+    assert enabled_purposes(parse_config({})) == ()
 
 
 def test_no_socket_is_opened_by_a_disabled_purpose(tmp_path, monkeypatch):
