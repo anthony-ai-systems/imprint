@@ -19,7 +19,9 @@ from .detector import operator_words, strip_effort_prefix
 from .provenance import MID_TURN_SOURCE
 from .transcript import _well_formed
 
-T3_ENTRYPOINT = "sdk-ts"
+# Every entrypoint T3 has written on the Claude prompts it sends. It wrote "sdk-ts"
+# until it renamed it "t3-code", and nothing else marked the change.
+T3_ENTRYPOINTS = frozenset({"sdk-ts", "t3-code"})
 T3_THREAD_ENV = "T3CODE_THREAD_ID"
 T3_HOME_ENV = "T3CODE_HOME"
 T3_RECORD_UNAVAILABLE_REASON = "t3_record_unavailable"
@@ -354,9 +356,13 @@ class T3HostOrigin:
         return _scratch_placement(folders, self._database) is True
 
     def attests(self, entry: Mapping[str, Any], text: str) -> bool:
-        """Answer for an SDK prompt or a mid-turn one, which records no entrypoint."""
+        """Answer for a prompt T3 sent, or a mid-turn one, which records no entrypoint."""
         self._miss = None
-        transport = entry.get("entrypoint") == T3_ENTRYPOINT or entry.get("promptSource") == MID_TURN_SOURCE
+        entrypoint = entry.get("entrypoint")
+        transport = (
+            (isinstance(entrypoint, str) and entrypoint in T3_ENTRYPOINTS)
+            or entry.get("promptSource") == MID_TURN_SOURCE
+        )
         return transport and self._human_record(text) is not None
 
     def recorded_words(self, text: str) -> str:

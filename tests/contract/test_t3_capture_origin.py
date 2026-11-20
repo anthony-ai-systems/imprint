@@ -1338,3 +1338,115 @@ def test_health_counts_a_session_join_failure_and_only_a_shape_change_degrades(t
     report = health_report(root, store, {"compiler": "imprint-hook"})
     assert "t3_session_ref_unreadable" in report["degraded_reasons"]
     assert report["metrics"]["capture_skips_24h"]["t3_session_ref_unreadable"] == 1
+
+
+# -- the entrypoints T3 has shipped --------------------------------------------------
+
+# A wake that the event intake queues into a thread opens with a fixed line no person
+# types. The correction after it would be captured if anything vouched for it.
+WAKE = f"AUTOMATED EVENT WAKE 0123456789abcdef0123456789abcdef\n{FEEDBACK}"
+
+
+def _current_entry(text=FEEDBACK, **extra):
+    """A prompt shaped like the rows T3 writes now: these fields and values, no content."""
+    shape = {"entrypoint": "t3-code", "userType": "external", "isSidechain": False, "version": "2.1.322"}
+    return _sdk_entry(text, **{**shape, **extra})
+
+
+def _current_exchange(tmp_path, entry):
+    return _transcript(tmp_path, {"type": "assistant", "message": {"content": "Draft."}}, entry)
+
+
+def test_the_entrypoints_t3_has_shipped_are_named_in_one_place():
+    assert t3_origin.T3_ENTRYPOINTS == frozenset({"sdk-ts", "t3-code"})
+
+
+@pytest.mark.parametrize("entrypoint", ["sdk-ts", "t3-code"])
+def test_every_entrypoint_t3_has_shipped_is_judged_by_its_record(tmp_path, entrypoint):
+    verdict = _verdict(tmp_path, _current_entry(entrypoint=entrypoint), _message(FEEDBACK))
+    assert (verdict.is_operator, verdict.basis) == (True, "host_record")
+
+
+def test_stop_hook_captures_a_correction_from_a_current_t3_row(tmp_path):
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry()), _t3_home(tmp_path, _message(FEEDBACK)))
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert json.loads(run.stdout).get("reason") is None, run.stdout
+    envelope = _envelope(root)
+    assert envelope["verdict"]["raw_operator_text"] == FEEDBACK
+    assert envelope["extensions"]["org.imprint.host_origin"]["payload"]["basis"] == "t3_message_record"
+    assert _skip_log(root) == []
+
+
+@pytest.mark.parametrize("row", [
+    _message(WAKE, by="agent", source="mcp"),
+    _message(WAKE, by="agent", source="server"),
+    _message(WAKE, by="agent", source="provider", senderThreadId="thread-other"),
+    _message(WAKE, source="web", senderThreadId="thread-other"),
+], ids=["mcp_queue", "server_queue", "another_thread", "sent_for_another_thread"])
+def test_a_wake_envelope_in_a_current_row_is_refused(tmp_path, row):
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry(WAKE)), _t3_home(tmp_path, row))
+    assert (run.returncode, json.loads(run.stdout)["reason"]) == (0, "unverified_provenance")
+    assert not _spooled(root)
+    assert _skip_log(root) == []
+
+
+@pytest.mark.parametrize("entry, reason, basis", [
+    (_current_entry(f"<task-notification>\n{FEEDBACK}\n</task-notification>", promptSource="system",
+                    origin={"kind": "task-notification"}), "synthetic_transcript_entry", "origin"),
+    (_current_entry(promptSource="system", origin={"kind": "coordinator"}), "synthetic_transcript_entry", "origin"),
+    (_current_entry(isMeta=True), "synthetic_transcript_entry", "structure"),
+    (_current_entry(isSidechain=True), "synthetic_transcript_entry", "structure"),
+], ids=["task_notification", "coordinator", "meta", "sidechain"])
+def test_a_current_row_that_declares_a_machine_is_refused_before_any_record(tmp_path, entry, reason, basis):
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, entry), _t3_home(tmp_path, _message(FEEDBACK)))
+    receipt = json.loads(run.stdout)
+    assert (receipt["reason"], receipt["provenance_basis"]) == (reason, basis)
+    assert not _spooled(root)
+    assert _skip_log(root) == []
+
+
+@pytest.mark.parametrize("row", [
+    _message(FEEDBACK, by="agent", source="provider", notification={"kind": "synthetic"}),
+    _message(FEEDBACK, by="agent", source="server", notification={"kind": "synthetic"}),
+    _message(FEEDBACK, scheduledTaskId="task-1"),
+    _message(FEEDBACK, by="agent", source="mcp", scheduledTaskId="task-1"),
+    _message(FEEDBACK, by="agent", source="mcp"),
+    _message(FEEDBACK, by="agent", source="provider"),
+], ids=["notification", "server_notification", "scheduled", "scheduled_by_agent", "agent", "provider"])
+def test_a_current_row_whose_record_is_a_machine_is_refused(tmp_path, row):
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry()), _t3_home(tmp_path, row))
+    assert json.loads(run.stdout)["reason"] == "unverified_provenance"
+    assert not _spooled(root)
+    assert _skip_log(root) == []
+
+
+def test_a_task_notification_queued_into_a_current_turn_is_passed_over(tmp_path):
+    path = _transcript(
+        tmp_path, _current_entry("Summarize the release notes."), {"type": "assistant", "message": {"content": "Working."}},
+        {**_steer(commandMode="task-notification", origin={"kind": "task-notification"}), "entrypoint": "t3-code"},
+        {"type": "assistant", "message": {"content": "Done."}},
+    )
+    origin = t3_host_origin(ON, SESSION, _t3_home(tmp_path, *STEERED))
+    assert parse_with_origin(parse_native_stop_transcript, path, origin)["operator_text"] == "Summarize the release notes."
+
+
+def test_a_current_row_in_a_scratch_thread_is_not_credited(tmp_path):
+    env = _t3_home(tmp_path, _message(FEEDBACK), threads=_in_folder(_scratch_chat(tmp_path)))
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry()), env)
+    assert json.loads(run.stdout)["reason"] == "t3_scratch_thread"
+    assert [json.loads(line)["reason"] for line in _skip_log(root)] == ["t3_scratch_thread"]
+    assert not _spooled(root)
+
+
+@pytest.mark.parametrize("home, reason", [
+    ({"messages": (_message("Different words entirely."),)}, "t3_prompt_unmatched"),
+    ({"messages": (_message(FEEDBACK),), "providers": (_provider_thread("session-other"),)}, "t3_session_unmatched"),
+    ({"messages": (_message(FEEDBACK),), "providers": ()}, "t3_session_unmatched"),
+], ids=["other_words", "other_session", "no_provider_row"])
+def test_a_current_row_with_no_matching_human_record_is_refused(tmp_path, home, reason):
+    env = _t3_home(tmp_path, *home["messages"], **{key: value for key, value in home.items() if key != "messages"})
+    run, root = _stop_hook(tmp_path, _current_exchange(tmp_path, _current_entry()), env)
+    assert json.loads(run.stdout)["reason"] == reason
+    assert [json.loads(line)["reason"] for line in _skip_log(root)] == [reason]
+    assert not _spooled(root)
+
