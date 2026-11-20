@@ -27,6 +27,15 @@ _CLIENT_CARRIER_PATHS = (CLIENT_CARRIER_QUEUE, CLIENT_CARRIER_CLIENTS)
 # Say on the prompt turn itself that judgment selection failed and nothing was
 # delivered. Off, a failed turn emits the empty context it always has.
 SELECTION_FAILURE_NOTICE = "org.imprint.selector.failure_notice"
+# Typed Jev questions outside the selector. Each purpose that may send is named here
+# with its mode and daily call cap; one that is not named sends nothing. Enabling one
+# is an egress decision. The purposes are a closed list, so a typo cannot open one.
+DECIDE_PURPOSES_KEY = "org.imprint.decide.purposes"
+DECIDE_PURPOSES = (
+    "selector", "capture_classify", "event_match", "completion_check", "draft_check", "action_guard", "probe",
+)
+DECIDE_MODES = ("off", "shadow", "enforce")
+DECIDE_DAILY_CAP_LIMIT = 100000
 
 DEFAULTS = {
     "config_version": "3.0.0",
@@ -45,6 +54,8 @@ DEFAULTS = {
     CLIENT_CARRIER_CLIENTS: None,
     # One fixed line naming the failure, in place of empty context.
     SELECTION_FAILURE_NOTICE: False,
+    # No purpose named, so the typed-decision module sends nothing.
+    DECIDE_PURPOSES_KEY: {},
     "context_budget_bytes": 32768,
     "allow_higher_budget": False,
     "spool_retention_days": 30,
@@ -105,6 +116,12 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def selector_switched_off() -> bool:
+    """Whether ``IMPRINT_SELECTOR`` holds a value that turns the selector off."""
+    override = os.environ.get(SELECTOR_ENV, "").strip().lower()
+    return bool(override) and override not in _SELECTOR_ENV_KEEPS_CONFIG
+
+
 def effective_selector_mode(selector: Any) -> str:
     """Resolve the selector mode. The environment can only turn it off.
 
@@ -114,8 +131,7 @@ def effective_selector_mode(selector: Any) -> str:
     ``shadow`` leave the configured mode in force: no environment value can
     enable a network selector that the config leaves deterministic.
     """
-    override = os.environ.get(SELECTOR_ENV, "").strip().lower()
-    if override and override not in _SELECTOR_ENV_KEEPS_CONFIG:
+    if selector_switched_off():
         return "deterministic"
     mode = selector.get("mode") if isinstance(selector, dict) else None
     return mode if mode in {"jev", "shadow"} else "deterministic"
@@ -240,6 +256,38 @@ def _validate_selector(data: dict[str, Any]) -> None:
         raise ValidationError("selector jev log_decisions must be a boolean")
 
 
+def _validate_decide(data: dict[str, Any]) -> None:
+    purposes = data.get(DECIDE_PURPOSES_KEY)
+    if not isinstance(purposes, dict):
+        raise ValidationError(f"{DECIDE_PURPOSES_KEY} must be an object of purposes")
+    for name, value in purposes.items():
+        if name not in DECIDE_PURPOSES:
+            raise ValidationError(f"{DECIDE_PURPOSES_KEY} names an unknown purpose; known: {list(DECIDE_PURPOSES)}")
+        if not isinstance(value, dict) or set(value) - {"mode", "daily_cap"}:
+            raise ValidationError(f"{DECIDE_PURPOSES_KEY} {name} may hold only mode and daily_cap")
+        if value.get("mode", "off") not in DECIDE_MODES:
+            raise ValidationError(f"{DECIDE_PURPOSES_KEY} {name} mode must be off, shadow, or enforce")
+        cap = value.get("daily_cap", 0)
+        if not _is_int(cap) or not 0 <= cap <= DECIDE_DAILY_CAP_LIMIT:
+            raise ValidationError(f"{DECIDE_PURPOSES_KEY} {name} daily_cap must be 0..{DECIDE_DAILY_CAP_LIMIT}")
+
+
+def decide_setting(config: Mapping[str, Any], purpose: str) -> tuple[str, int]:
+    """A purpose's configured mode and daily cap; ``("off", 0)`` when it is not named.
+
+    This reads the config alone and ignores the environment, which only the module
+    that sends consults.
+    """
+    purposes = config.get(DECIDE_PURPOSES_KEY)
+    value = purposes.get(purpose) if isinstance(purposes, Mapping) else None
+    if purpose not in DECIDE_PURPOSES or not isinstance(value, Mapping):
+        return "off", 0
+    mode, cap = value.get("mode", "off"), value.get("daily_cap", 0)
+    if mode not in DECIDE_MODES or not _is_int(cap) or cap < 0:
+        return "off", 0
+    return mode, cap
+
+
 def _validate_config(data: dict[str, Any]) -> None:
     if not isinstance(data.get("config_version"), str) or data["config_version"] != DEFAULTS["config_version"]:
         raise ValidationError("unsupported config_version")
@@ -304,6 +352,7 @@ def _validate_config(data: dict[str, Any]) -> None:
         if not hooks_dir.is_absolute() or "\x00" in data["hooks_dir"]:
             raise ValidationError("hooks_dir must be an absolute safe path")
     _validate_selector(data)
+    _validate_decide(data)
 
 
 def config_path(environ: Mapping[str, str] | None = None) -> Path:

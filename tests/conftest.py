@@ -112,9 +112,10 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     Inet sockets cannot connect or send datagrams, every name-resolution
     function and ``create_connection`` fail, and ``urllib.request.urlopen``
     raises. Subprocesses spawned by tests inherit ``IMPRINT_SELECTOR=off``,
-    which forces deterministic retrieval, and no selector API key from the
-    developer's environment. Tests that exercise the selector in-process
-    remove the override explicitly.
+    which forces deterministic retrieval, ``IMPRINT_DECIDE=off``, which turns
+    every typed-decision purpose off, and no selector API key from the
+    developer's environment. Tests that exercise the selector or a purpose
+    in-process remove the override explicitly.
     """
     for name, guarded in _GUARDED_SENDS.items():
         monkeypatch.setattr(socket.socket, name, guarded)
@@ -122,6 +123,7 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(socket, name, _blocked)
     monkeypatch.setattr(urllib.request, "urlopen", _blocked)
     monkeypatch.setenv("IMPRINT_SELECTOR", "off")
+    monkeypatch.setenv("IMPRINT_DECIDE", "off")
     for name in ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
