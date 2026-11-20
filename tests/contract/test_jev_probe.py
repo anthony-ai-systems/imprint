@@ -18,6 +18,7 @@ from imprint.decide import calls_today, decision_log_path
 ROOT = Path(__file__).parents[2]
 PROBE = ROOT / "tools" / "jev_probe" / "run_probe.py"
 KEY_ENV = "PROBE_TEST_KEY"
+DAY = "2026-11-19"
 
 
 # -- the probe runner ----------------------------------------------------------------
@@ -55,7 +56,14 @@ class Fake:
 
 @pytest.fixture
 def ready(tmp_path, monkeypatch):
-    """Every condition to send holds, so each test can take one away."""
+    """Every condition to send holds, so each test can take one away.
+
+    The counter's day is pinned, so setup, preflight, each call's count and the
+    checks after all read one day, even across UTC midnight.
+    """
+    from imprint.decide import client
+
+    monkeypatch.setattr(client, "_today", lambda: DAY)
     monkeypatch.delenv("IMPRINT_SELECTOR", raising=False)
     monkeypatch.delenv("IMPRINT_DECIDE", raising=False)
     monkeypatch.setenv(KEY_ENV, "synthetic-probe-key")
@@ -137,9 +145,9 @@ def test_it_refuses_to_send_without_every_condition(probe, tmp_path, monkeypatch
     elif take_away == "cap_short":
         write_probe_config(tmp_path, {"probe": {"mode": "shadow", "daily_cap": 23}})
     elif take_away == "cap_spent":
-        from imprint.decide.client import _reserve, _today
+        from imprint.decide.client import _reserve
 
-        assert _reserve(tmp_path / "data" / "probe", "probe", 24, _today(), time.monotonic() + 5, time.monotonic) is None
+        assert _reserve(tmp_path / "data" / "probe", "probe", 24, DAY, time.monotonic() + 5, time.monotonic) is None
     elif take_away == "no_key":
         monkeypatch.delenv(KEY_ENV)
     elif take_away == "bad_key_env":
@@ -175,7 +183,7 @@ def test_with_every_condition_it_sends_the_24_calls_once(probe, tmp_path, ready)
     assert all(line["outcome"] == "answered" and line["mode"] == "shadow" for line in results)
     assert results[12]["answers"]["relation"]["choice"] == "irrelevant"
     assert results[12]["shapes"][0]["count"] == 1
-    assert calls_today(tmp_path / "data" / "probe", "probe") == 24
+    assert calls_today(tmp_path / "data" / "probe", "probe", day=DAY) == 24
     text = json.dumps(lines)
     cases = probe.load_cases()
     for case in cases["primitive_cases"]:
