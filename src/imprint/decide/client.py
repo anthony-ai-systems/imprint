@@ -216,31 +216,77 @@ class _LockBusy(Exception):
     pass
 
 
+class _NoLock(Exception):
+    """The platform has no file lock, so the cap cannot hold between processes."""
+
+
+def _lock_calls() -> tuple[Callable[[int], bool], Callable[[int], None] | None]:
+    """Try-once and release for an exclusive lock on an open descriptor.
+
+    The try returns False while another holder has the lock and never blocks. POSIX
+    uses ``flock``, released when the descriptor closes; Windows locks the file's
+    first byte with ``msvcrt``. With neither there is no lock, and ``_NoLock``
+    keeps the cap closed rather than letting two callers both take its last call.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
+    if fcntl is not None:
+        def take_flock(descriptor: int) -> bool:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return True
+
+        return take_flock, None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+    if msvcrt is None:
+        raise _NoLock()
+
+    def take_byte(descriptor: int) -> bool:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:  # held through another descriptor
+            return False
+        return True
+
+    def release_byte(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+    return take_byte, release_byte
+
+
 @contextlib.contextmanager
 def _locked(path: Path, deadline: float, clock: Callable[[], float]) -> Iterator[None]:
-    """Hold an exclusive lock on ``path`` where the platform has ``flock``.
+    """Hold an exclusive lock on ``path``.
 
     It never blocks: it tries, and while another process holds the lock it tries
     again until ``deadline`` on ``clock``, then gives up with ``_LockBusy``. So a
-    stalled holder cannot hold a call past its one deadline.
+    stalled holder cannot hold a call past its one deadline. A platform with no
+    file lock raises ``_NoLock`` before the file is opened.
     """
+    take, release = _lock_calls()
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
+        while not take(descriptor):
+            left = deadline - clock()
+            if left <= 0:
+                raise _LockBusy()
+            time.sleep(min(_LOCK_POLL_SECONDS, left))
         try:
-            import fcntl
-        except ImportError:  # Windows: calls from one process at a time are assumed
-            fcntl = None
-        while fcntl is not None:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                left = deadline - clock()
-                if left <= 0:
-                    raise _LockBusy() from None
-                time.sleep(min(_LOCK_POLL_SECONDS, left))
-        yield
+            yield
+        finally:
+            if release is not None:
+                with contextlib.suppress(OSError):
+                    release(descriptor)
     finally:
         os.close(descriptor)
 
@@ -294,7 +340,8 @@ def _reserve(
 ) -> str | None:
     """Take one call from today's cap. None when taken, else the closed reason.
 
-    A lock still held by another process at ``deadline`` is ``cap_unavailable``.
+    A lock still held by another process at ``deadline``, or no file lock on this
+    platform, is ``cap_unavailable``.
     """
     if cap <= 0:
         return "cap_reached"

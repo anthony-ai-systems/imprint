@@ -437,9 +437,10 @@ both. It has four parts.
   moment between taking its count and sending is still counted, so the cap counts calls
   taken, never fewer than calls sent. A counter that is not a small regular file of the
   expected shape fails closed with `cap_unavailable`: delete it to start the day's count
-  again. Calls from separate processes take turns through `logs/decide-calls.lock` on
-  POSIX; a call never blocks on it, and one that cannot take the lock before its
-  deadline is `cap_unavailable` and sends nothing.
+  again. Calls from separate processes take turns through `logs/decide-calls.lock`
+  (`flock` on POSIX, a byte lock on Windows); a call never blocks on it, and one that
+  cannot take the lock before its deadline, or that runs where no file lock exists, is
+  `cap_unavailable` and sends nothing.
 
 `org.imprint.decide.purposes` maps a purpose to `{"mode": ..., "daily_cap": ...}`:
 

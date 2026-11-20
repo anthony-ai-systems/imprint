@@ -551,6 +551,51 @@ def test_a_held_counter_lock_gives_up_inside_the_deadline(tmp_path):
     assert calls_today(tmp_path / "op", "probe", day=DAY) == 0
 
 
+def test_without_any_file_lock_the_cap_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", None)
+    fake = Fake()
+    result = call(tmp_path, fake, cfg=config({"probe": {"mode": "enforce", "daily_cap": 1}}))
+    assert (result.outcome, result.reason, fake.calls) == ("capped", "cap_unavailable", [])
+    assert calls_today(tmp_path / "op", "probe", day=DAY) == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="stands in for the Windows lock with POSIX flock")
+def test_the_windows_lock_keeps_the_cap_between_processes(tmp_path, monkeypatch):
+    import fcntl
+    import types
+
+    events: list[str] = []
+
+    def locking(descriptor, mode, size):
+        assert size == 1 and os.lseek(descriptor, 0, os.SEEK_CUR) == 0
+        if mode == windows.LK_UNLCK:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            events.append("released")
+            return
+        assert mode == windows.LK_NBLCK
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise OSError(36, "Resource deadlock avoided") from None  # what msvcrt raises when held
+        events.append("taken")
+
+    windows = types.SimpleNamespace(LK_UNLCK=0, LK_NBLCK=2, locking=locking)
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", windows)
+    logs = tmp_path / "op" / "logs"
+    logs.mkdir(parents=True)
+    fake = Fake()
+    cfg = config({"probe": {"mode": "enforce", "daily_cap": 1}})
+    with open(logs / "decide-calls.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        result = call(tmp_path, fake, cfg=cfg, timeout_seconds=0.3)
+    assert (result.outcome, result.reason, fake.calls, events) == ("capped", "cap_unavailable", [], [])
+    assert call(tmp_path, fake, cfg=cfg).outcome == "answered"
+    assert call(tmp_path, fake, cfg=cfg).reason == "cap_reached"
+    assert events == ["taken", "released", "taken", "released"] and len(fake.calls) == 1
+
+
 def test_a_call_already_out_of_time_takes_nothing_from_the_cap(tmp_path):
     ticks = iter([0.0])
     fake = Fake()
