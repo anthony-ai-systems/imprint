@@ -122,12 +122,22 @@ def test_the_real_hooks_never_import_the_decide_package(tmp_path):
             assert any('"selector_method": "jev"' in output for output in outputs)
 
 
-def decide_imports(path: Path) -> list[str]:
-    """Every module an import statement or an import call in ``path`` names that has a
-    ``decide`` part: ``import imprint.decide``, ``from imprint import decide``,
-    ``from .decide.x import y``, ``importlib.import_module("imprint.decide")``."""
+def _strings(nodes: list[ast.expr]) -> list[str]:
+    """The text constants among ``nodes``, and inside list or tuple literals among them."""
     found = []
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+    for node in nodes:
+        items = node.elts if isinstance(node, (ast.List, ast.Tuple)) else [node]
+        found.extend(item.value for item in items if isinstance(item, ast.Constant) and isinstance(item.value, str))
+    return found
+
+
+def decide_import_nodes(tree: ast.AST) -> list[tuple[str, ast.AST]]:
+    """Every module an import statement or an import call names that has a ``decide``
+    part, with the node that names it: ``import imprint.decide``, ``from imprint import
+    decide``, ``from .decide.x import y``, ``importlib.import_module("imprint.decide")``,
+    ``import_module(name="imprint.decide")``, ``__import__("imprint", fromlist=["decide"])``."""
+    found = []
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
@@ -135,21 +145,68 @@ def decide_imports(path: Path) -> list[str]:
         elif isinstance(node, ast.Call) and getattr(node.func, "attr", getattr(node.func, "id", None)) in {
             "import_module", "__import__",
         }:
-            names = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+            names = _strings([*node.args, *(keyword.value for keyword in node.keywords)])
         else:
             continue
-        found.extend(name for name in names if "decide" in name.split("."))
+        found.extend((name, node) for name in names if "decide" in name.split("."))
     return found
+
+
+def decide_imports(path: Path) -> list[str]:
+    return [name for name, _ in decide_import_nodes(ast.parse(path.read_text(encoding="utf-8")))]
+
+
+def _selector_eval_branch(node: ast.AST) -> bool:
+    test = getattr(node, "test", None)
+    return (
+        isinstance(node, ast.If) and isinstance(test, ast.Compare) and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq) and ast.unparse(test.left) == "args.command"
+        and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value == "selector-eval"
+    )
+
+
+def stray_cli_decide_imports(source: str) -> list[str]:
+    """Decide imports in the CLI other than the one lazy import inside the offline
+    ``selector-eval`` branch, wherever they sit."""
+    tree = ast.parse(source)
+    allowed = {
+        id(inner) for branch in ast.walk(tree) if _selector_eval_branch(branch)
+        for statement in branch.body for inner in ast.walk(statement)
+    }
+    return [
+        name for name, node in decide_import_nodes(tree)
+        if id(node) not in allowed or name != "decide.evaluate.run_selector_eval"
+    ]
 
 
 def test_the_check_finds_each_way_of_importing(tmp_path):
     probe = tmp_path / "probe.py"
     for line in ("import imprint.decide", "from imprint import decide", "from .decide.client import ask",
-                 "import importlib; importlib.import_module('imprint.decide')", "__import__('imprint.decide')"):
+                 "import importlib; importlib.import_module('imprint.decide')", "__import__('imprint.decide')",
+                 "import importlib; importlib.import_module(name='imprint.decide')",
+                 "import importlib; importlib.import_module('.evaluate', package='imprint.decide')",
+                 "__import__('imprint', fromlist=['decide'])"):
         probe.write_text(line + "\n", encoding="utf-8")
         assert decide_imports(probe), line
     probe.write_text("from imprint.config import decide_setting, DECIDE_PURPOSES\n", encoding="utf-8")
     assert decide_imports(probe) == []
+
+
+def test_the_cli_check_allows_the_import_only_inside_the_offline_command():
+    lazy = textwrap.dedent('''
+        def main(args):
+            if args.command == "selector-eval":
+                from .decide.evaluate import run_selector_eval
+                return run_selector_eval
+    ''')
+    assert stray_cli_decide_imports(lazy) == []
+    for stray in (
+        "from .decide.evaluate import run_selector_eval\n" + lazy,
+        lazy.replace('"selector-eval"', '"hook"'),
+        lazy + "    from .decide.evaluate import run_selector_eval\n",
+        lazy.replace("from .decide.evaluate import run_selector_eval", "from .decide.client import ask"),
+    ):
+        assert stray_cli_decide_imports(stray), stray
 
 
 def test_the_live_path_names_no_decide_import():
@@ -164,4 +221,4 @@ def test_the_live_path_names_no_decide_import():
     for path in live:
         assert not decide_imports(path), path.name
     # At most one lazy import, inside the offline selector-eval command only.
-    assert set(decide_imports(source / "cli.py")) <= {"decide.evaluate.run_selector_eval"}
+    assert stray_cli_decide_imports((source / "cli.py").read_text(encoding="utf-8")) == []
