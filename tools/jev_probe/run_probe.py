@@ -11,6 +11,11 @@ only when every one of these holds, and otherwise refuses before the first call:
   it off;
 - a key that each call would accept is where ``selector.jev`` says to look.
 
+The cap check reads today's count once, before the first call, and holds nothing
+back: another run sharing the data root can use calls in the meantime, and this run
+then stops at ``cap_reached``. The cap itself is never exceeded, since each call takes
+its count under the counter's lock.
+
 It stops at the first call that does not come back answered, and never retries.
 
 The plan:
@@ -142,7 +147,7 @@ def refusals(args: argparse.Namespace, calls: list[dict[str, Any]]) -> tuple[lis
         if used is None:
             reasons.append("the daily call counter cannot be read")
         elif cap - used < len(calls):
-            reasons.append(f"the probe daily_cap leaves {max(0, cap - used)} calls today, not {len(calls)}")
+            reasons.append(f"the probe daily_cap leaves {max(0, cap - used)} calls today as of now, not {len(calls)}")
     try:
         # Read as each call reads it, so a key the sender would refuse is refused here.
         resolve_api_key(JevSettings.from_config(config["selector"]["jev"]))

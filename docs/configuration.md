@@ -511,9 +511,11 @@ in the same request.
 Run with no flags, it prints the plan and each request's size and sends nothing. It
 sends only with `--send-approved-calls 24`, a `--config` whose purposes enable `probe`
 with a cap that leaves 24 calls today, no environment switch turning it off, and a key
-each call would accept; otherwise it prints why and sends nothing. It stops at the first
-call that is not answered and never retries. Its output and the purpose log hold counts,
-sizes, usage, latency, answer shapes and values, and case ids.
+each call would accept; otherwise it prints why and sends nothing. The cap check reads
+today's count once and holds nothing back, so another run on the same data root can
+use calls meanwhile and stop this one at `cap_reached`; the cap is never exceeded. It
+stops at the first call that is not answered and never retries. Its output and the
+purpose log hold counts, sizes, usage, latency, answer shapes and values, and case ids.
 
 ## Stop lines
 
