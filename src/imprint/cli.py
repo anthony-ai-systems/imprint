@@ -711,6 +711,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     carrier.add_argument("host", choices=("codex",))
 
+    selector_eval = subs.add_parser(
+        "selector-eval",
+        help="score the selector's shortlist and pick policy on labelled cases and saved scores; offline",
+    )
+    selector_eval.add_argument("--cases", type=Path, required=True)
+    selector_eval.add_argument("--scores", type=Path, required=True)
+    selector_eval.add_argument("--shortlist", type=int)
+    selector_eval.add_argument("--budget", type=int)
+    selector_eval.add_argument("--score-floor", type=float)
+    selector_eval.add_argument("--top", type=int)
+    selector_eval.add_argument("--short-lines", action="store_true")
+
     subs.add_parser("delivery-commit", help=argparse.SUPPRESS)
 
     subs.add_parser("health", help="report content-free health as JSON")
@@ -747,6 +759,17 @@ def main(argv: list[str] | None = None) -> int:
             _write_json({"hook_schema_version": "1.0.0", "status": "skipped",
                          "reason": MACHINE_ORIGIN_REASON if transport_origin == "automation"
                          else UNVERIFIED_ENTRY_REASON, "provenance_basis": "transport"})
+            return 0
+        if args.command == "selector-eval":
+            # Offline: reads two files, and no config, store or network.
+            from .decide.evaluate import run_selector_eval
+            settings = {
+                name: value for name, value in (
+                    ("shortlist", args.shortlist), ("budget", args.budget),
+                    ("score_floor", args.score_floor), ("top", args.top),
+                ) if value is not None
+            }
+            _write_json(run_selector_eval(args.cases, args.scores, short_lines=args.short_lines, **settings))
             return 0
         config = load_config(args.config)
         root = resolved_operator_root(config)

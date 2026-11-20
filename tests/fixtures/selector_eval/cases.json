@@ -1,0 +1,49 @@
+{
+  "about": "Synthetic labelled cases for imprint selector-eval. Every turn and statement is invented.",
+  "cases": [
+    {
+      "id": "release-notes",
+      "turn": "Draft the release notes for the lantern sync service and list the breaking changes first.",
+      "candidates": [
+        {"id": "j1", "statement": "Release notes must list breaking changes before new features."},
+        {"id": "j2", "statement": "Never ship a release note without a migration step for each breaking change."},
+        {"id": "j3", "statement": "Use metric units in the garden planner charts."},
+        {"id": "j4", "statement": "Keep commit subjects under sixty characters."},
+        {"id": "j5", "statement": "When writing about the lantern service, call it the sync service, not the daemon."}
+      ],
+      "gold": ["j1", "j2", "j5"]
+    },
+    {
+      "id": "checkout-tests",
+      "turn": "The checkout tests fail on the tax rounding step; find the cause before changing the expected values.",
+      "candidates": [
+        {"id": "j1", "statement": "Do not change an expected value in a test to make it pass; find why it changed first."},
+        {"id": "j2", "statement": "Round money only at the final total, never per line."},
+        {"id": "j3", "statement": "Write release notes in plain English."},
+        {"id": "j4", "statement": "Prefer short variable names in loops."},
+        {"id": "j5", "statement": "Ask before deleting any fixture file."}
+      ],
+      "gold": ["j1", "j2"]
+    },
+    {
+      "id": "garden-chart",
+      "turn": "Make the garden planner's watering chart readable on a phone.",
+      "candidates": [
+        {"id": "j1", "statement": "Use metric units in the garden planner charts."},
+        {"id": "j2", "statement": "Charts must stay legible at phone width without sideways scrolling."},
+        {"id": "j3", "statement": "Release notes must list breaking changes before new features."},
+        {"id": "j4", "statement": "Round money only at the final total, never per line."}
+      ],
+      "gold": ["j1", "j2"]
+    },
+    {
+      "id": "thanks-only",
+      "turn": "Thanks, that is all for today.",
+      "candidates": [
+        {"id": "j1", "statement": "Keep commit subjects under sixty characters."},
+        {"id": "j2", "statement": "Ask before deleting any fixture file."}
+      ],
+      "gold": []
+    }
+  ]
+}
