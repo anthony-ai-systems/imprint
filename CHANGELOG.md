@@ -10,7 +10,10 @@
   `selector_notice` and the route line `notice`. Local domain records the fallback
   still delivers go out with no line, and an empty pool, an answer with no picks,
   `shadow` and `deterministic` never get one. With the key `false` or absent, no
-  byte a hook emits changes.
+  byte a hook emits changes. Under `jev`, health also reports
+  `selector_failure_share`: the share of the newest 50 selections in the last day
+  that failed, `null` below 10. It raises no reason, and when health degrades does
+  not change.
 - Carry a scope on each record, with nothing reading it yet. A new `record_scope`
   table holds one row per retrievable record, and a record with none is legacy. A
   row's kind is `client`, `central`, `core_owner`, `unresolved` or `held`, and

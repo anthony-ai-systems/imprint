@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from collections import deque
+
 from imprint.config import effective_selector_mode
 from imprint.log_files import append_capped, newest_lines
 from imprint.selection_notice import NOTICE_FIELD
@@ -47,6 +49,10 @@ _UNDELIVERED_PICKS = frozenset({"crowded_picks", "oversized_picks"})
 # Records were due on this turn and none could fit. Neither says anything about Jev,
 # and neither is the same as nothing being relevant.
 UNFIT_RECORDS = "oversized_records"
+# Health's share of failed selections reads at most this many of the newest, and says
+# nothing below the minimum, where one timeout would swing it.
+SELECTOR_SHARE_WINDOW = 50
+SELECTOR_SHARE_MIN_SAMPLE = 10
 
 
 def route_log_path(root: Path) -> Path:
@@ -191,6 +197,17 @@ class HookTurn:
             record_route(self._root, self._entry or failed_entry(self._action, "hook_exception", mode=self._mode))
 
 
+def _failure_share(selections: deque) -> dict[str, object]:
+    sample, failed = len(selections), sum(selections)
+    return {
+        "window": SELECTOR_SHARE_WINDOW,
+        "min_sample": SELECTOR_SHARE_MIN_SAMPLE,
+        "sample": sample,
+        "failed": failed,
+        "share": round(failed / sample, 4) if sample >= SELECTOR_SHARE_MIN_SAMPLE else None,
+    }
+
+
 def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     """Last-day outcome counts per route, and the run of failed selections the log ends on.
 
@@ -199,10 +216,15 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
     way. Any other turn says nothing about selection, so it neither adds to a run nor
     ends one. Damaged lines count as nothing, and so do stamps outside the
     window, which is how a store's history ages out.
+
+    The same selections, the newest ``SELECTOR_SHARE_WINDOW`` of them, give the share
+    that failed, which shows a Jev that fails on and off. It is only reported: what
+    degrades health is still the run alone.
     """
     current = time.time() if now is None else now
     outcomes = {route: dict.fromkeys(OUTCOMES, 0) for route in ROUTES.values()}
     failures = 0
+    selections: deque = deque(maxlen=SELECTOR_SHARE_WINDOW)
     for raw in newest_lines(route_log_path(root), ROUTE_LOG_TAIL_BYTES):
         try:
             entry = json.loads(raw)
@@ -216,12 +238,18 @@ def route_summary(root: Path, *, now: float | None = None) -> dict[str, object]:
             continue
         if entry.get("answered") is True and entry.get("method") == "jev":
             failures = 0
+            selections.append(False)
         elif (
             entry["outcome"] == "failed" and entry.get("method") == "deterministic_fallback"
             and entry.get("detail") != UNFIT_RECORDS
         ):
             failures += 1
-    return {"outcomes_24h": outcomes, "selector_failures_in_a_row": failures}
+            selections.append(True)
+    return {
+        "outcomes_24h": outcomes,
+        "selector_failures_in_a_row": failures,
+        "selector_failure_share": _failure_share(selections),
+    }
 
 
 __all__ = [
@@ -231,6 +259,8 @@ __all__ = [
     "ROUTE_DEFER_ENV",
     "ROUTE_FIELD",
     "ROUTE_WINDOW_SECONDS",
+    "SELECTOR_SHARE_MIN_SAMPLE",
+    "SELECTOR_SHARE_WINDOW",
     "UNFIT_RECORDS",
     "failed_entry",
     "record_route",

@@ -9,7 +9,9 @@ from __future__ import annotations
 import copy
 import io
 import json
+import time
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -18,10 +20,14 @@ import imprint.cli as cli
 import imprint.retrieve as retrieval
 from imprint.config import DEFAULTS, SELECTION_FAILURE_NOTICE, parse_config
 from imprint.errors import ValidationError
-from imprint.hook_routes import route_log_path
+from imprint.health import health_report
+from imprint.hook_routes import (
+    SELECTOR_SHARE_MIN_SAMPLE, SELECTOR_SHARE_WINDOW, record_route, route_log_path, route_summary,
+)
 from imprint.retrieve import jev
 from imprint.retrieve.models import RetrievalRecord
 from imprint.selection_notice import NOTICE_REASONS, failure_notice
+from imprint.store import ImprintStore
 
 KEY_ENV = "JEV_TEST_KEY"
 PROMPT = "Should the synthetic prompt words ever reach the notice?"
@@ -279,3 +285,98 @@ def test_off_or_absent_is_byte_identical(tmp_path, monkeypatch, capsys, reason, 
     assert "selector_notice" not in body and "notice" not in lines[0][0]
     if event is NO_DOMAIN:
         assert context(body) == ""
+
+
+# -- health: the share of recent selections that failed ------------------------------
+
+NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc).timestamp()
+
+
+def stamp(age: float, now: float) -> str:
+    return datetime.fromtimestamp(now - age, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def failed(age: float = 60, now: float = NOW, **changes) -> dict:
+    return {
+        "answered": False, "bytes": 0, "detail": "timeout", "method": "deterministic_fallback", "mode": "jev",
+        "outcome": "failed", "route": "user_prompt_submit", "ts": stamp(age, now), **changes,
+    }
+
+
+def answered(age: float = 60, now: float = NOW) -> dict:
+    return failed(age, now, answered=True, method="jev", outcome="delivered", detail="picked", bytes=40)
+
+
+def share(root, *entries) -> dict:
+    for entry in entries:
+        record_route(root, entry)
+    return route_summary(root, now=NOW)["selector_failure_share"]
+
+
+def test_the_window_and_sample_are_fixed():
+    assert (SELECTOR_SHARE_WINDOW, SELECTOR_SHARE_MIN_SAMPLE) == (50, 10)
+
+
+def test_a_sample_under_the_minimum_reports_no_share(tmp_path):
+    value = share(tmp_path, *[failed(age=600 - n) for n in range(SELECTOR_SHARE_MIN_SAMPLE - 1)])
+    assert value == {
+        "window": SELECTOR_SHARE_WINDOW, "min_sample": SELECTOR_SHARE_MIN_SAMPLE,
+        "sample": SELECTOR_SHARE_MIN_SAMPLE - 1, "failed": SELECTOR_SHARE_MIN_SAMPLE - 1, "share": None,
+    }
+
+
+def test_the_share_reads_only_the_newest_window(tmp_path):
+    older = [failed(age=10_000 - n) for n in range(20)]
+    newer = [answered(age=5_000 - n) if n % 5 else failed(age=5_000 - n) for n in range(SELECTOR_SHARE_WINDOW)]
+    value = share(tmp_path, *older, *newer)
+    assert (value["sample"], value["failed"], value["share"]) == (SELECTOR_SHARE_WINDOW, 10, 0.2)
+
+
+def test_only_selections_count(tmp_path):
+    others = [
+        failed(outcome="nothing_relevant", detail="no_candidates"),
+        failed(outcome="failed", detail="oversized_records"),
+        failed(outcome="scratch_skip", detail=None, method="deterministic"),
+        failed(outcome="already_delivered", detail=None, method="jev"),
+        failed(mode="shadow", method="shadow"),
+        failed(mode="deterministic", method="deterministic", outcome="nothing_relevant"),
+        failed(route="session_start", outcome="delivered", method="deterministic"),
+        failed(age=2 * 24 * 60 * 60),
+    ]
+    value = share(tmp_path, *others, *[answered() for _ in range(SELECTOR_SHARE_MIN_SAMPLE)])
+    assert (value["sample"], value["failed"], value["share"]) == (SELECTOR_SHARE_MIN_SAMPLE, 0, 0.0)
+
+
+def test_a_failure_after_a_reply_counts_as_failed(tmp_path):
+    late = failed(answered=True, detail="exception")
+    value = share(tmp_path, late, *[answered() for _ in range(SELECTOR_SHARE_MIN_SAMPLE - 1)])
+    assert (value["sample"], value["failed"]) == (SELECTOR_SHARE_MIN_SAMPLE, 1)
+
+
+def health_for(tmp_path, entries, mode="jev") -> dict:
+    root = tmp_path / "operator"
+    root.mkdir(parents=True, exist_ok=True)
+    store = ImprintStore(root / "imprint.db")
+    store.initialize()
+    now = time.time()
+    for age, entry in zip(range(len(entries) + 60, 60, -1), entries):
+        record_route(root, {**entry, "ts": stamp(age, now)})
+    return health_report(root, store, {
+        **copy.deepcopy(DEFAULTS), "hooks_dir": str(tmp_path), "selector": selector(mode),
+    })
+
+
+def test_a_high_share_alone_does_not_degrade_health(tmp_path):
+    # Two in a row at most, so the run never reaches the limit, though most selections fail.
+    entries = [failed(), failed(), answered()] * 6
+    report = health_for(tmp_path, entries)
+    value = report["metrics"]["selector_failure_share"]
+    assert (value["sample"], value["failed"]) == (18, 12)
+    assert value["share"] == round(12 / 18, 4)
+    assert "selector_failures_repeated" not in report["degraded_reasons"]
+    assert report["metrics"]["selector_failures_in_a_row"] == 0
+
+
+def test_the_share_is_reported_only_under_jev(tmp_path):
+    for mode in ("deterministic", "shadow"):
+        assert "selector_failure_share" not in health_for(tmp_path / mode, [], mode)["metrics"]

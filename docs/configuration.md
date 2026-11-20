@@ -342,7 +342,16 @@ them.
   start is not a failed selection. Each of those leaves a file in `logs/hook-failures`,
   which `hook_failures_present` reports. Damaged log lines count as nothing. Only an
   unbroken run raises this reason, so a Jev that fails on and off shows only in
-  `selector_fallbacks_24h` and `hook_route_outcomes_24h`.
+  `selector_fallbacks_24h`, `hook_route_outcomes_24h` and `selector_failure_share`.
+
+Under `selector.mode: jev` only, health also reports `selector_failure_share`: of the
+newest `window` (50) selections in the last 24 hours, how many there were (`sample`),
+how many failed (`failed`), and `share`, their ratio to four places. A selection is a
+turn that used Jev's answer or a failed selection as defined just above, so a turn
+with nothing to send, a replay, a scratch turn and `oversized_records` are not in it.
+`share` is `null` until `sample` reaches `min_sample` (10). It is reported only: it
+never raises a degraded reason, and what degrades health is still the run alone.
+`shadow` and `deterministic` stores do not have the field.
 
 ## Failure notice
 

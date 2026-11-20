@@ -41,6 +41,12 @@ too: it reads `failed` with `answered` true. The reason clears on the first turn
 uses Jev's answer, or when the failures pass 24 hours. See Hook route log in
 `docs/configuration.md`.
 
+A Jev that fails on and off never makes a run of 3, so health stays green. Read
+`selector_failure_share` under `metrics`: its `share` is the part of the newest 50
+selections in the last day that failed, or `null` with fewer than 10. A share that
+stays high with no degraded reason is that pattern, and the route log's `detail` says
+which failure it is.
+
 ## The agent got no judgments and no notice
 
 With `org.imprint.selector.failure_notice: true`, a prompt turn whose selection failed
